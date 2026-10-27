@@ -79,12 +79,20 @@ export class MarketplaceRepo {
   }
 
   async listGigs(): Promise<Gig[]> {
-    const res = await this.ctx.getPool().query('SELECT * FROM gigs');
+    let res = await this.ctx.getPool().query('SELECT * FROM gigs');
+    if (res.rows.length === 0) {
+      await seedDefaultGigsIfNeeded(this.ctx.getPool());
+      res = await this.ctx.getPool().query('SELECT * FROM gigs');
+    }
     return res.rows.map(mapGigRow);
   }
 
   async getGig(idOrSlug: string): Promise<Gig | null> {
-    const res = await this.ctx.getPool().query('SELECT * FROM gigs WHERE id = $1 OR slug = $1', [idOrSlug]);
+    let res = await this.ctx.getPool().query('SELECT * FROM gigs WHERE id = $1 OR slug = $1', [idOrSlug]);
+    if (res.rows.length === 0) {
+      await seedDefaultGigsIfNeeded(this.ctx.getPool());
+      res = await this.ctx.getPool().query('SELECT * FROM gigs WHERE id = $1 OR slug = $1', [idOrSlug]);
+    }
     return res.rows.length > 0 ? mapGigRow(res.rows[0]) : null;
   }
 
@@ -312,5 +320,73 @@ export class MarketplaceRepo {
       timestamp: r.timestamp,
       replies: r.replies || []
     }));
+  }
+}
+
+async function seedDefaultGigsIfNeeded(pool: any) {
+  const nowIso = new Date().toISOString();
+  const seedGigs = [
+    {
+      id: 'g1',
+      freelancerId: 'u1',
+      freelancerName: 'Sarah Jenkins',
+      freelancerUsername: 'sarah_j',
+      freelancerAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80',
+      freelancerLevel: 'Top Rated ★★★',
+      title: 'I will architect and build a production full-stack React, Node.js and PostgreSQL web application',
+      slug: 'architect-build-production-full-stack-react-nodejs-postgresql-web-app',
+      category: 'Technology & Programming',
+      subcategory: 'Web Development',
+      description: 'Complete end-to-end full-stack engineering with TypeScript, React, Express, and transactional PostgreSQL persistence.',
+      price: 450,
+      deliveryDays: 7,
+      rating: 4.9,
+      reviewsCount: 124,
+      tags: ['React', 'PostgreSQL', 'Node.js', 'TypeScript'],
+      image: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&auto=format&fit=crop&q=80',
+      coverImage: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&auto=format&fit=crop&q=80',
+      status: 'active',
+      createdAt: nowIso
+    },
+    {
+      id: 'g2',
+      freelancerId: 'u3',
+      freelancerName: 'Elena Rostova',
+      freelancerUsername: 'elena_r',
+      freelancerAvatar: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&auto=format&fit=crop&q=80',
+      freelancerLevel: 'Top Rated ★★★',
+      title: 'I will build custom AI agents, RAG pipelines, and enterprise LLM integrations',
+      slug: 'build-custom-ai-agents-rag-pipelines-enterprise-llm-integrations',
+      category: 'AI Services',
+      subcategory: 'AI Agents',
+      description: 'Production-grade AI workflows, vector search, function calling, and automated reasoning pipelines.',
+      price: 650,
+      deliveryDays: 5,
+      rating: 5.0,
+      reviewsCount: 89,
+      tags: ['AI Agents', 'LLM', 'TypeScript', 'Python'],
+      image: 'https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80',
+      coverImage: 'https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80',
+      status: 'active',
+      createdAt: nowIso
+    }
+  ];
+
+  for (const g of seedGigs) {
+    try {
+      await pool.query(
+        `INSERT INTO gigs (
+          id, freelancer_id, freelancer_name, freelancer_username, freelancer_avatar, freelancer_level,
+          title, slug, category, subcategory, description, price, delivery_days, rating, reviews_count,
+          tags, image, cover_image, gallery, status, created_at, extras
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+        ON CONFLICT (id) DO NOTHING`,
+        [
+          g.id, g.freelancerId, g.freelancerName, g.freelancerUsername, g.freelancerAvatar, g.freelancerLevel,
+          g.title, g.slug, g.category, g.subcategory, g.description, g.price, g.deliveryDays, g.rating, g.reviewsCount,
+          g.tags, g.image, g.coverImage, [], g.status, g.createdAt, JSON.stringify([])
+        ]
+      );
+    } catch {}
   }
 }
