@@ -1,0 +1,316 @@
+import { RepoContext } from '../types.js';
+import {
+  type Gig,
+  type Project,
+  type Proposal,
+  type ProjectClarification,
+  mapGigRow,
+  mapProjectRow,
+  mapProposalRow
+} from '../../store.js';
+
+export class MarketplaceRepo {
+  constructor(private ctx: RepoContext) {}
+
+  // --- GIGS ---
+  async saveGigs(gigs: Gig[]): Promise<void> {
+    return this.ctx.withLock('gigs', async () => {
+      if (!gigs) return;
+      const client = await this.ctx.getPool().connect();
+      try {
+        await client.query('BEGIN');
+        const seen = new Set<string>();
+        for (const g of gigs) {
+          if (!g?.id || seen.has(g.id)) continue;
+          seen.add(g.id);
+          await client.query(
+            `INSERT INTO gigs (
+              id, freelancer_id, freelancer_name, freelancer_username, freelancer_avatar, 
+              freelancer_level, title, slug, category, subcategory, description, price, 
+              delivery_days, rating, reviews_count, image, cover_image, gallery, tags, 
+              status, featured, extras, moderation_status, moderation_notes
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+            ON CONFLICT (id) DO UPDATE SET
+              freelancer_id = EXCLUDED.freelancer_id,
+              freelancer_name = EXCLUDED.freelancer_name,
+              freelancer_username = EXCLUDED.freelancer_username,
+              freelancer_avatar = EXCLUDED.freelancer_avatar,
+              freelancer_level = EXCLUDED.freelancer_level,
+              title = EXCLUDED.title,
+              slug = EXCLUDED.slug,
+              category = EXCLUDED.category,
+              subcategory = EXCLUDED.subcategory,
+              description = EXCLUDED.description,
+              price = EXCLUDED.price,
+              delivery_days = EXCLUDED.delivery_days,
+              rating = EXCLUDED.rating,
+              reviews_count = EXCLUDED.reviews_count,
+              image = EXCLUDED.image,
+              cover_image = EXCLUDED.cover_image,
+              gallery = EXCLUDED.gallery,
+              tags = EXCLUDED.tags,
+              status = EXCLUDED.status,
+              featured = EXCLUDED.featured,
+              extras = EXCLUDED.extras,
+              moderation_status = EXCLUDED.moderation_status,
+              moderation_notes = EXCLUDED.moderation_notes`,
+            [
+              g.id, g.freelancerId, g.freelancerName, g.freelancerUsername || null, g.freelancerAvatar || null,
+              g.freelancerLevel || null, g.title, g.slug || null, g.category, g.subcategory || null,
+              g.description || null, g.price, g.deliveryDays, g.rating ?? 5.0, g.reviewsCount ?? 0,
+              g.image || null, g.coverImage || null, g.gallery || [], g.tags || [],
+              g.status || 'active', !!g.featured, JSON.stringify(g.extras || []),
+              g.moderationStatus || 'approved', g.moderationNotes || null
+            ]
+          );
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    });
+  }
+
+  async saveGig(gig: Gig): Promise<void> {
+    return this.saveGigs([gig]);
+  }
+
+  async listGigs(): Promise<Gig[]> {
+    const res = await this.ctx.getPool().query('SELECT * FROM gigs');
+    return res.rows.map(mapGigRow);
+  }
+
+  async getGig(idOrSlug: string): Promise<Gig | null> {
+    const res = await this.ctx.getPool().query('SELECT * FROM gigs WHERE id = $1 OR slug = $1', [idOrSlug]);
+    return res.rows.length > 0 ? mapGigRow(res.rows[0]) : null;
+  }
+
+  async deleteGig(id: string): Promise<void> {
+    return this.ctx.withLock('gigs', async () => {
+      await this.ctx.getPool().query("UPDATE gigs SET status = 'deleted' WHERE id = $1", [id]);
+    });
+  }
+
+  // --- PROJECTS ---
+  async saveProjects(projects: Project[]): Promise<void> {
+    return this.ctx.withLock('projects', async () => {
+      if (!projects) return;
+      const client = await this.ctx.getPool().connect();
+      try {
+        await client.query('BEGIN');
+        const seen = new Set<string>();
+        for (const p of projects) {
+          if (!p?.id || seen.has(p.id)) continue;
+          seen.add(p.id);
+          await client.query(
+            `INSERT INTO projects (
+              id, buyer_id, buyer_name, buyer_avatar, title, slug, category, subcategory, 
+              description, budget_min, budget_max, budget, budget_type, duration, deadline_days, proposals_count, 
+              created_at, status, featured, moderation_status, moderation_notes, skills,
+              max_hires, freelancers_needed
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+            ON CONFLICT (id) DO UPDATE SET
+              buyer_id = EXCLUDED.buyer_id,
+              buyer_name = EXCLUDED.buyer_name,
+              buyer_avatar = EXCLUDED.buyer_avatar,
+              title = EXCLUDED.title,
+              slug = EXCLUDED.slug,
+              category = EXCLUDED.category,
+              subcategory = EXCLUDED.subcategory,
+              description = EXCLUDED.description,
+              budget_min = EXCLUDED.budget_min,
+              budget_max = EXCLUDED.budget_max,
+              budget = EXCLUDED.budget,
+              budget_type = EXCLUDED.budget_type,
+              duration = EXCLUDED.duration,
+              deadline_days = EXCLUDED.deadline_days,
+              proposals_count = EXCLUDED.proposals_count,
+              created_at = EXCLUDED.created_at,
+              status = EXCLUDED.status,
+              featured = EXCLUDED.featured,
+              moderation_status = EXCLUDED.moderation_status,
+              moderation_notes = EXCLUDED.moderation_notes,
+              skills = EXCLUDED.skills,
+              max_hires = EXCLUDED.max_hires,
+              freelancers_needed = EXCLUDED.freelancers_needed`,
+            [
+              p.id, p.buyerId, p.buyerName, p.buyerAvatar || null, p.title, p.slug || null,
+              p.category, p.subcategory || null, p.description || null, p.budgetMin,
+              p.budgetMax, p.budget || null, p.budgetType || null, p.duration || null,
+              p.deadlineDays, p.proposalsCount ?? 0, p.createdAt,
+              p.status || 'open', !!p.featured, p.moderationStatus || 'approved', p.moderationNotes || null,
+              p.skills || [],
+              Math.max(1, Number(p.maxHires || (p as any).freelancersNeeded || 1)),
+              Math.max(1, Number((p as any).freelancersNeeded || p.maxHires || 1))
+            ]
+          );
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    });
+  }
+
+  async saveProject(project: Project): Promise<void> {
+    return this.saveProjects([project]);
+  }
+
+  async listProjects(): Promise<Project[]> {
+    const res = await this.ctx.getPool().query('SELECT * FROM projects');
+    return res.rows.map(mapProjectRow);
+  }
+
+  async getProject(idOrSlug: string): Promise<Project | null> {
+    const res = await this.ctx.getPool().query('SELECT * FROM projects WHERE id = $1 OR slug = $1', [idOrSlug]);
+    return res.rows.length > 0 ? mapProjectRow(res.rows[0]) : null;
+  }
+
+  // --- PROPOSALS ---
+  async saveProposals(proposals: Proposal[]): Promise<void> {
+    return this.ctx.withLock('proposals', async () => {
+      if (!proposals) return;
+      const client = await this.ctx.getPool().connect();
+      try {
+        await client.query('BEGIN');
+        const seen = new Set<string>();
+        for (const pr of proposals) {
+          if (!pr?.id || seen.has(pr.id)) continue;
+          seen.add(pr.id);
+          await client.query(
+            `INSERT INTO proposals (
+              id, project_id, freelancer_id, freelancer_name, freelancer_avatar, 
+              freelancer_title, cover_letter, bid_amount, delivery_days, created_at, status,
+              workstream_order_id, offer_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            ON CONFLICT (id) DO UPDATE SET
+              project_id = EXCLUDED.project_id,
+              freelancer_id = EXCLUDED.freelancer_id,
+              freelancer_name = EXCLUDED.freelancer_name,
+              freelancer_avatar = EXCLUDED.freelancer_avatar,
+              freelancer_title = EXCLUDED.freelancer_title,
+              cover_letter = EXCLUDED.cover_letter,
+              bid_amount = EXCLUDED.bid_amount,
+              delivery_days = EXCLUDED.delivery_days,
+              created_at = EXCLUDED.created_at,
+              status = EXCLUDED.status,
+              workstream_order_id = EXCLUDED.workstream_order_id,
+              offer_id = EXCLUDED.offer_id`,
+            [
+              pr.id, pr.projectId, pr.freelancerId, pr.freelancerName, pr.freelancerAvatar || null,
+              pr.freelancerTitle || null, pr.coverLetter || null, pr.bidAmount,
+              pr.deliveryDays, pr.createdAt, pr.status || 'pending',
+              pr.workstreamOrderId || null, pr.offerId || null
+            ]
+          );
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    });
+  }
+
+  async saveProposal(proposal: Proposal): Promise<void> {
+    return this.saveProposals([proposal]);
+  }
+
+  async listProposals(): Promise<Proposal[]> {
+    const res = await this.ctx.getPool().query('SELECT * FROM proposals');
+    return res.rows.map(mapProposalRow);
+  }
+
+  async getProposal(id: string): Promise<Proposal | null> {
+    const res = await this.ctx.getPool().query('SELECT * FROM proposals WHERE id = $1', [id]);
+    return res.rows.length > 0 ? mapProposalRow(res.rows[0]) : null;
+  }
+
+  async listProposalsByProject(projectId: string): Promise<Proposal[]> {
+    const res = await this.ctx.getPool().query('SELECT * FROM proposals WHERE project_id = $1 ORDER BY created_at DESC', [projectId]);
+    return res.rows.map(mapProposalRow);
+  }
+
+  async listProposalsByFreelancer(freelancerId: string): Promise<Proposal[]> {
+    const res = await this.ctx.getPool().query('SELECT * FROM proposals WHERE freelancer_id = $1 ORDER BY created_at DESC', [freelancerId]);
+    return res.rows.map(mapProposalRow);
+  }
+
+  // --- PROJECT CLARIFICATIONS ---
+  async saveProjectClarifications(clarifications: ProjectClarification[]): Promise<void> {
+    return this.ctx.withLock('project_clarifications', async () => {
+      if (!clarifications) return;
+      const client = await this.ctx.getPool().connect();
+      try {
+        await client.query('BEGIN');
+        const seen = new Set<string>();
+        for (const c of clarifications) {
+          if (!c?.id || seen.has(c.id)) continue;
+          seen.add(c.id);
+          await client.query(
+            `INSERT INTO project_clarifications (id, project_id, user_id, user_name, user_avatar, text, timestamp, replies)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (id) DO UPDATE SET
+               project_id = EXCLUDED.project_id,
+               user_id = EXCLUDED.user_id,
+               user_name = EXCLUDED.user_name,
+               user_avatar = EXCLUDED.user_avatar,
+               text = EXCLUDED.text,
+               timestamp = EXCLUDED.timestamp,
+               replies = EXCLUDED.replies`,
+            [c.id, c.projectId, c.userId, c.userName, c.userAvatar || null, c.text, c.timestamp, JSON.stringify(c.replies || [])]
+          );
+        }
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    });
+  }
+
+  async saveProjectClarification(c: ProjectClarification): Promise<void> {
+    return this.saveProjectClarifications([c]);
+  }
+
+  async listProjectClarifications(): Promise<ProjectClarification[]> {
+    const res = await this.ctx.getPool().query('SELECT * FROM project_clarifications ORDER BY timestamp ASC');
+    return res.rows.map(r => ({
+      id: r.id,
+      projectId: r.project_id,
+      userId: r.user_id,
+      userName: r.user_name,
+      userAvatar: r.user_avatar || undefined,
+      text: r.text,
+      timestamp: r.timestamp,
+      replies: r.replies || []
+    }));
+  }
+
+  async listProjectClarificationsForProject(projectId: string): Promise<ProjectClarification[]> {
+    const res = await this.ctx.getPool().query(
+      'SELECT * FROM project_clarifications WHERE project_id = $1 ORDER BY timestamp ASC',
+      [projectId]
+    );
+    return res.rows.map(r => ({
+      id: r.id,
+      projectId: r.project_id,
+      userId: r.user_id,
+      userName: r.user_name,
+      userAvatar: r.user_avatar || undefined,
+      text: r.text,
+      timestamp: r.timestamp,
+      replies: r.replies || []
+    }));
+  }
+}

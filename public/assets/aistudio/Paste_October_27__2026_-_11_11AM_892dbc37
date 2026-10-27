@@ -1,0 +1,757 @@
+# FIVEPA — MASTER MARKETPLACE RULES, OPERATING SPECIFICATION & NON-REGRESSION INSTRUCTIONS
+
+## 1. ABSOLUTE INSTRUCTIONS — READ BEFORE MODIFYING ANY CODE
+
+You are working on FivePA, an existing Node.js/TypeScript freelance marketplace.
+
+**Your task is to preserve the current marketplace's established business rules and operating model. Do not change marketplace rules. Do not introduce new restrictions on buyers, sellers, freelancers, or other ordinary users.**
+
+These instructions are mandatory.
+
+### 1.1 Non-negotiable requirements
+
+1. Do not change existing marketplace policies, workflows, eligibility rules, pricing limits, cancellation rules, review windows, withdrawal limits, or other user-facing business rules.
+2. Do not introduce new restrictions affecting all users or ordinary users merely to simplify implementation or strengthen security.
+3. Do not remove existing features or reduce the freedom of buyers and sellers.
+4. Do not close, archive, or disable a WorkStream merely because its associated Order has been completed or cancelled.
+5. Do not prevent buyers and sellers from communicating, conducting repeat business, or exchanging new proposals after earlier work ends.
+6. Do not prevent a buyer from hiring multiple freelancers for the same Project when the Project remains open for hiring.
+7. Do not introduce a rule that allows only one Order, one proposal, or one engagement between a particular buyer and seller.
+8. Do not confuse a Gig with a Project, a Proposal with an Order, a WorkStream with an Order, or an Invoice with a second payment charge.
+9. Do not introduce additional verification, approval, mandatory-delivery, review, waiting-period, cancellation, withdrawal, upload, or communication requirements that are not part of the established rules below.
+10. Do not change the user interface or feature behavior unnecessarily while fixing backend issues.
+11. Do not replace the existing Node.js/TypeScript backend or redesign the entire architecture.
+12. Do not add duplicate financial systems, duplicate WorkStreams, duplicate Order models, or unnecessary project-management layers.
+13. Reuse the existing Order, WorkStream, Proposal, Invoice, escrow/payment, messaging, delivery, revision, review, dispute, authentication, authorization, and notification systems.
+14. Preserve existing database records and legitimate user workflows. Do not use destructive migrations, broad data resets, or silent data loss as shortcuts.
+15. Do not introduce new fees or alter the advertised Gig price, accepted Project Proposal amount, or existing fee calculations as an incidental part of a security fix.
+16. Do not treat an optional security enhancement as a mandatory marketplace policy change.
+
+### 1.2 Security and business rules are different
+
+A genuine security vulnerability must be fixed when it permits unauthorized access, fabricated money, duplicate payments, invalid financial transitions, privilege escalation, private-data exposure, or another real integrity failure.
+
+However, fix the actual vulnerability rather than imposing a broad restriction.
+
+Examples:
+
+- Prevent an unauthorized person from changing an Order's financial amount; do not prevent legitimate buyers from purchasing services.
+- Prevent duplicate payment processing; do not prevent legitimate payment retries.
+- Prevent a duplicate refund; do not prevent a valid refund.
+- Prevent unauthorized withdrawals; do not reduce the existing withdrawal limits.
+- Prevent an unauthorized user from modifying a WorkStream; do not close the WorkStream to its legitimate participants.
+- Protect private user data; do not unnecessarily disable public profiles or legitimate marketplace discovery.
+- Reject invalid financial state transitions; do not prohibit legitimate revisions, cancellation decisions, disputes, or follow-on work.
+- Protect restricted accounts from prohibited financial mutations according to existing policy; do not automatically disable unrelated read access or permitted communication.
+
+If a proposed fix would change a business rule, introduce a new user restriction, or alter a workflow specified below, do not implement that change as part of a security fix. Preserve the established rule and address the underlying technical defect.
+
+---
+
+## 2. FIVEPA'S CORE MARKETPLACE MODEL
+
+FivePA combines a Fiverr-style predefined Gig marketplace with a PeoplePerHour-style Project marketplace and persistent buyer–seller WorkStreams.
+
+The platform has two distinct ways to begin work.
+
+### A. Gigs
+
+A Gig is a predefined service published by a seller. Buyers can discover a Gig and purchase it at the seller's advertised price.
+
+A Gig purchase creates a new Order and a new WorkStream, and funds the Order's escrow as part of the purchase process.
+
+### B. Projects
+
+A Project is a buyer-published opportunity to hire freelancers.
+
+Freelancers submit Proposals. Submitting a Proposal alone does not create an Order, fund escrow, or start a WorkStream. Hiring happens when the buyer accepts the Proposal and completes the required payment/funding step.
+
+The same Project may support multiple independent freelancer engagements while it remains open for hiring. Each hired freelancer has an independent engagement, financial record, Order, and WorkStream.
+
+### C. WorkStreams
+
+A WorkStream represents an ongoing buyer–seller working relationship for a particular engagement, not a permanent global relationship identified only by buyer ID and seller ID.
+
+The same buyer and seller may have multiple WorkStreams, including separate WorkStreams for separate Gig purchases.
+
+An existing WorkStream can also support continued communication, follow-on Proposals, and additional work where the buyer and seller choose to continue their relationship there.
+
+**An Order ending does not mean the WorkStream must end.**
+
+Completed or cancelled Orders do not automatically terminate the WorkStream, remove its chat history, prohibit new Proposals, or prohibit repeat business.
+
+---
+
+## 3. USERS, ACCOUNTS, AND MARKETPLACE FREEDOM
+
+### 3.1 Buyers and sellers
+
+The marketplace must allow users to buy services and offer services under the existing account and authorization rules.
+
+Do not introduce a rule that permanently assigns a user to only one role when the existing implementation permits both buyer and seller activity.
+
+Do not introduce arbitrary restrictions on the number of Gigs, Projects, Proposals, WorkStreams, repeat engagements, or legitimate conversations.
+
+In particular, sellers must not be given a newly imposed maximum number of active or published Gigs. FivePA's intended marketplace model permits sellers to publish an unlimited number of Gigs, subject to existing technical and legitimate safety controls.
+
+### 3.2 Account status and security
+
+Authentication, authorization, account status, and financial permissions must be enforced correctly.
+
+Security controls should prevent unauthorized actions without creating unrelated restrictions.
+
+Where an account is restricted, suspended, frozen, or deactivated, follow the existing status policy for the specific action. Do not treat all account statuses as interchangeable, and do not invent additional account penalties.
+
+Do not silently grant privileged roles, change account ownership, or permit unauthorized profile, password, email, or financial changes.
+
+Password changes and session invalidation must protect the affected account without preventing the user from authenticating again normally.
+
+The existing three-device session limit is intentional. Do not increase or decrease it as part of an unrelated fix.
+
+---
+
+## 4. GIG RULES — SELLER-PUBLISHED SERVICES
+
+### 4.1 Gig creation and publication
+
+A Gig is a seller-defined service with an advertised scope, price, delivery period, and any permitted extras.
+
+The Gig marketplace must retain the established ability for sellers to publish Gigs without a newly imposed active-Gig limit.
+
+Existing price and configuration limits are:
+
+- Minimum Gig price: $5.
+- Maximum Gig price: $10,000.
+- Maximum Gig extras: 20.
+- Maximum individual extra amount: $100,000.
+- Maximum delivery period: 365 days.
+
+These are established limits, not invitations to add further restrictions.
+
+All monetary values must be in USD.
+
+Do not confuse a Gig with a buyer-published Project or a custom Proposal.
+
+### 4.2 Purchasing a Gig
+
+When a buyer purchases a Gig:
+
+1. Validate the actual Gig and its permitted price and configuration.
+2. Create a new Gig Order associated with the correct buyer, seller, and Gig.
+3. Create a new WorkStream for that newly ordered Gig.
+4. Fund the Order's escrow as part of the purchase process.
+5. Record the financial event and state changes consistently and idempotently.
+6. Notify the relevant parties through the existing notification system.
+7. Make the Order and WorkStream available through the existing user interface.
+
+Every new Gig purchase must create its own new Order and WorkStream, even when the same buyer purchases another Gig from the same seller.
+
+Do not reuse an unrelated previous Gig Order or WorkStream merely because the buyer and seller IDs match.
+
+Do not create a successfully funded Order unless the required funding operation actually succeeds.
+
+Do not create a second charge when the seller later submits the final invoice/delivery.
+
+### 4.3 Work while a Gig Order is active
+
+The buyer and seller communicate and exchange permitted files, links, references, and messages through the WorkStream.
+
+A seller cannot send a new Proposal as a workaround while the same Gig Order is funded and in progress. The appropriate next step is to carry out the work and use the established delivery/final-invoice workflow.
+
+This limitation concerns the relevant active Gig engagement. It must not become a global ban on the seller's other Gigs, unrelated WorkStreams, or legitimate marketplace activity.
+
+### 4.4 Gig delivery and review
+
+The formal final submission is the seller's final invoice/submission event.
+
+The WorkStream may already contain messages, files, links, references, and ongoing delivery communication. Do not add an unnecessary mandatory delivery-only screen or duplicate delivery system.
+
+The final invoice/submission moves the Order into the existing delivered/review lifecycle.
+
+The buyer can:
+
+- Approve the submission and release the already-funded escrow.
+- Request a revision under the existing revision workflow.
+- Use the existing cancellation or dispute process where eligible.
+
+The invoice is not a second charge. It is the formal completion/payment-request event associated with the existing funded engagement.
+
+The Gig review window is three days.
+
+- If the buyer approves earlier, completion and escrow release can happen earlier.
+- If the buyer does not intervene during the valid review window, the existing automatic completion/release behavior may proceed after three days.
+- A valid pending cancellation request, dispute, revision state, or other established blocking condition must be respected by the release logic.
+- A revision must use the existing revision workflow and the applicable restarted submission/review process.
+- Ratings and reviews are separate from the earnings-clearance period.
+
+Do not extend the three-day review window or add a new buyer review-extension feature as part of an unrelated fix.
+
+After the applicable completion and release event, the existing 14-day earnings-clearance rule applies before withdrawal eligibility, subject to the established financial state.
+
+---
+
+## 5. PROJECT RULES — BUYER-PUBLISHED OPPORTUNITIES
+
+### 5.1 Publishing Projects
+
+A buyer can publish a Project for freelancers to discover and submit Proposals.
+
+A Project must become publicly available according to the existing publish/open workflow. Do not introduce an unnecessary moderation or waiting stage for every Project.
+
+The public Projects page must show only Projects that meet the existing public visibility requirements: open, published, and otherwise eligible for public discovery.
+
+Projects that are in moderation, in progress, completed, cancelled, suspended, or unpublished must not appear as ordinary open Projects on the public Projects page.
+
+Their authorized status and history can remain accessible through the relevant profile, WorkStream, or other existing private interface.
+
+### 5.2 Multiple freelancers can be hired
+
+A Project is not necessarily closed merely because one freelancer has been hired.
+
+The same buyer may hire multiple freelancers for the same Project while it remains open for additional hiring.
+
+Each accepted freelancer engagement must have its own independent:
+
+- Buyer–seller engagement.
+- Order.
+- WorkStream.
+- Accepted Proposal amount.
+- Escrow and financial lifecycle.
+- Delivery, review, cancellation, and dispute state as applicable.
+
+Do not make the Project globally unavailable merely because its first freelancer has started work.
+
+Do not expose private or in-progress Project details through unauthorized direct-ID lookups. Enforce public visibility consistently without blocking the buyer's legitimate ability to hire more freelancers.
+
+### 5.3 Proposal submission and hiring
+
+Submitting a Project Proposal must not, by itself:
+
+- Create a funded Order.
+- Create a hired engagement.
+- Fund escrow.
+- Mark the freelancer as hired.
+
+The hiring step occurs when the buyer accepts the Proposal and completes the required payment/funding operation.
+
+Only after the required acceptance and funding workflow succeeds should the system establish the funded engagement and its WorkStream.
+
+Multiple freelancers can independently submit Proposals and be hired for the same Project, subject to the Project's legitimate open/hiring status.
+
+### 5.4 Project pricing and review
+
+The minimum Project price is $5.
+
+The minimum actual Order amount is $10. Preserve the distinction between a Project's minimum advertised/budget amount and the minimum amount for an actual Order.
+
+The Project delivery/review window is seven days.
+
+Use the established Project review, revision, cancellation, dispute, and escrow workflows. Do not accidentally apply the Gig's three-day review period to Projects.
+
+The refund amount for a Project engagement follows the accepted Proposal quote and the applicable legitimate refund calculation. Do not substitute an unrelated Project budget or another freelancer's Proposal amount.
+
+---
+
+## 6. WORKSTREAM RULES — THE BUYER–SELLER WORKSPACE
+
+The WorkStream is the ongoing workspace for a particular engagement.
+
+It contains or connects to the relevant chat, messages, files, links, proposals, invoices, payment events, delivery submissions, revisions, reviews, cancellation events, disputes, and system messages supported by the existing implementation.
+
+### 6.1 WorkStream creation
+
+- A new Gig purchase creates a new Order and a new WorkStream.
+- Accepting and funding a Project Proposal creates the relevant engagement and WorkStream.
+- Submitting a Proposal alone does not create a WorkStream or Order.
+- A follow-on Proposal created inside an existing WorkStream must continue in that same WorkStream, even if accepting it creates an additional Order.
+- Do not create duplicate WorkStreams for the same continuation merely because another Order or Invoice is created.
+- Do not identify a WorkStream solely by a permanent buyer-ID/seller-ID pair.
+
+### 6.2 WorkStream after completion or cancellation
+
+The WorkStream remains open after its associated Order is completed or cancelled.
+
+The buyer and seller can continue communicating and may conduct repeat business through legitimate follow-on Proposals or other supported workflows.
+
+A new direct Gig purchase creates a new WorkStream for that Gig. It must not automatically reopen or overwrite the previous Gig Order.
+
+If the parties choose to continue work through a follow-on Proposal in an existing WorkStream, preserve that WorkStream.
+
+Do not:
+
+- Delete the WorkStream when an Order ends.
+- Disable all chat after completion or cancellation.
+- Prohibit new Proposals solely because previous work was completed or cancelled.
+- Force every follow-on engagement into a completely unrelated workspace.
+- Reopen or overwrite a previous completed/cancelled Order simply to represent new work.
+- Prevent a legitimate new Order from being created where the existing workflow requires one.
+
+### 6.3 WorkStream authorization
+
+Only authorized participants and appropriately authorized administrative actors may access or mutate protected WorkStream data.
+
+Check participant ownership and role on the server. Do not rely only on hidden frontend buttons.
+
+A security fix must prevent unauthorized access or modification without disabling normal participant messaging, legitimate file/reference sharing, or permitted post-completion/post-cancellation communication.
+
+### 6.4 Deliverable acceptance
+
+The deliverable may be represented by any one of the following:
+
+- A non-empty file.
+- Non-empty URL/reference text.
+- A non-empty written message.
+
+Reject the submission as empty only when the file, URL/reference text, and written message are all blank or whitespace-only.
+
+Do not introduce URL reachability checks, domain whitelists, URL verification, clickable-link requirements, or “fake URL” rejection rules. URLs and references may remain plain text under the existing behavior.
+
+Continue to enforce legitimate existing upload limits and access controls.
+
+---
+
+## 7. PROPOSALS, INVOICES, AND FOLLOW-ON WORK
+
+### 7.1 Proposals
+
+Proposals are offers of work and must remain distinct from Orders and payment events.
+
+A Project Proposal does not create an Order or WorkStream until the buyer accepts it and the required funding workflow succeeds.
+
+A follow-on Proposal sent inside an existing WorkStream continues in that WorkStream. If accepted, it may create a new Order or engagement as required by the existing implementation without duplicating the WorkStream.
+
+A seller may propose further work after a prior Order has completed or been cancelled, provided the existing workflow permits the proposal.
+
+A buyer may accept a legitimate Proposal and fund the new engagement under the existing rules.
+
+Do not prohibit proposals simply because an earlier Order between the same parties exists.
+
+### 7.2 Invoices
+
+Invoices are financial/workflow records associated with the appropriate engagement and WorkStream.
+
+An Invoice must accurately reflect its status, such as Sent, Paid, or Cancelled, according to the existing model.
+
+Where the existing UI provides buyer accept/reject actions, keep those actions on the relevant existing card. Where the existing UI provides seller cancellation and resending actions, preserve them.
+
+Do not duplicate cards, create redundant payment flows, or charge the buyer again merely because an invoice is sent or accepted.
+
+For a funded Gig, the final invoice/submission is the formal completion/payment-request event. It releases the existing escrow only when the applicable approval/release conditions are satisfied.
+
+For other engagement types, preserve their existing legitimate funding and invoice semantics rather than blindly reusing Gig logic.
+
+---
+
+## 8. PAYMENTS, ESCROW, FEES, AND FINANCIAL INTEGRITY
+
+PostgreSQL must be the authoritative persistence layer for financial records and state. Preserve the existing Node.js/TypeScript architecture.
+
+Do not allow an in-memory ledger, fallback store, or stale object to silently become an independent authority for financial balances or escrow.
+
+### 8.1 Core financial rules
+
+- Use USD only.
+- Do not fabricate balances, escrow, deposits, payments, earnings, refunds, or withdrawals.
+- A financial event must correspond to a valid authorized business operation.
+- Never release escrow twice for the same eligible engagement.
+- Never issue duplicate refunds for the same refund intent.
+- Never credit a payment twice because a webhook is replayed.
+- Never mark a payment funded, paid, refunded, released, or settled unless the corresponding authoritative operation succeeds.
+- Never mark an Order funded when the required funding operation failed.
+- Never treat an invoice as a second charge when the underlying escrow is already funded.
+- Do not let stale Order objects overwrite newer financial or lifecycle states.
+- Preserve the immutable identity of an Order and its financial terms after creation, except through explicitly authorized, valid existing workflows.
+- Do not allow an unauthorized client to determine trusted fees, escrow balances, payment outcomes, refund amounts, or payout results.
+- Financial state changes and their ledger/persistence records must remain consistent and recoverable.
+- Idempotency must prevent duplicate effects while permitting legitimate retries after transient failures.
+- Provider webhook processing must verify the provider event and route it to the correct payment purpose.
+- A payment event must not be acknowledged as successfully fulfilled when its required financial operation failed.
+
+### 8.2 Existing financial limits
+
+Preserve these established limits:
+
+- Minimum Project price: $5.
+- Minimum Gig price: $5.
+- Minimum actual Order amount: $10.
+- Maximum Gig price: $10,000.
+- Maximum Gig extras: 20.
+- Maximum individual extra amount: $100,000.
+- Maximum delivery period: 365 days.
+- Minimum withdrawal amount: $3.
+- Maximum withdrawal amount: $5,000.
+- Earnings clearance period: 14 days.
+
+Do not introduce additional limits or change these values as part of unrelated security work.
+
+### 8.3 Escrow release
+
+Escrow may be released only through the applicable legitimate completion/approval/automatic-release workflow.
+
+The financial service itself must enforce the relevant eligibility conditions, not merely trust that a frontend or one caller already checked them.
+
+Respect valid pending cancellation requests, disputes, revision states, and other established conditions that block release.
+
+Do not make every Order permanently unreleasable because it once entered an intermediate state. Use the legitimate lifecycle and recovery rules.
+
+### 8.4 Refunds
+
+A refund must have an authoritative, traceable financial record.
+
+For a Gig, the established refund amount is the Gig price, subject to the actual valid transaction and the applicable refund outcome.
+
+For a Project, the established refund amount follows the accepted Proposal quote.
+
+Do not calculate a refund from an unrelated Order, Proposal, buyer, seller, or WorkStream.
+
+Repeated requests and retries for the same refund intent must not create duplicate refunds. However, the system must still permit a legitimate distinct refund when the existing business workflow allows it.
+
+Do not block all refunds merely because a prior refund attempt failed or partially completed. Reconcile the authoritative state and allow safe recovery.
+
+### 8.5 Payouts and withdrawals
+
+Preserve the existing withdrawal limits and eligibility rules.
+
+Prevent double payouts, duplicate refunds, stale approvals, mismatched holds, and inconsistent wallet/ledger/payout states.
+
+A failed payout must have a valid recovery path. Do not mark a payout pending or successful without the corresponding authoritative hold, balance, and transaction state.
+
+Do not introduce arbitrary new withdrawal waiting periods, lower withdrawal limits, or additional blanket payout restrictions.
+
+### 8.6 Payment gateways and credentials
+
+Keep gateway secrets protected at rest and usable correctly at runtime.
+
+Do not store encrypted ciphertext as though it were a provider's plaintext credential. Decrypt only in the appropriate trusted runtime path.
+
+Verify webhook signatures and provider transaction identity. If a required secret or signature is missing or invalid, do not treat the event as verified.
+
+Do not introduce a payment provider or claim that a live gateway is configured when it is not.
+
+Where gateway setup is not yet configured, preserve the existing setup behavior and prevent simulated or unverified payment paths from creating real production balances.
+
+---
+
+## 9. CANCELLATIONS, LATE ORDERS, REVISIONS, AND DISPUTES
+
+Use the existing marketplace cancellation and dispute workflows. Do not invent a different policy while fixing technical defects.
+
+### 9.1 Cancellation
+
+Preserve the existing Fiverr-style cancellation reasons and the current buyer/seller cancellation experience.
+
+Do not invent new cancellation eligibility requirements or silently change who can request or respond to cancellation.
+
+A cancellation request is a workflow state, not proof that a refund has already succeeded.
+
+An open cancellation request must block automatic completion/release where the established rules require that protection.
+
+An Order should become accepted/auto-cancelled only after the required refund operation succeeds. If the refund fails, do not falsely present the cancellation as financially completed; preserve a recoverable state.
+
+If the buyer rejects a seller's cancellation request, return the Order to the appropriate delivered/review state and start the established fresh three-day review window.
+
+Do not impose a permanent “one cancellation request per delivery” rule. After a rejection, another cancellation request may be allowed if it is otherwise eligible under the existing policy.
+
+Do not make expired requests permanently block the Order or prevent legitimate responses and recovery.
+
+### 9.2 Late-order protection
+
+The established late-order protection period is 48 hours after the delivery deadline.
+
+When a cancellation/rejection outcome occurs while the Order remains late, the existing late-order protection behavior may restart the 48-hour period as specified by the current workflow.
+
+Do not reintroduce the old 76-hour Gig refund rule.
+
+Do not add unrelated waiting periods or alter the existing late-order policy.
+
+### 9.3 Seller cancellation response
+
+The seller cancellation request's buyer response period is 48 hours under the established rule.
+
+The system must handle expiry and automatic outcomes consistently with the existing cancellation/refund workflow.
+
+A timeout must not create a refund twice, silently corrupt Order state, or leave the user without a valid resolution path.
+
+### 9.4 Revisions
+
+Preserve the existing revision request/resolution workflow.
+
+A valid revision must not be accidentally treated as a final approved delivery. A revision must use the applicable existing delivery/review lifecycle.
+
+Do not prohibit legitimate revisions or add new revision limits without an explicit business-rule instruction.
+
+### 9.5 Disputes
+
+Disputes must be recorded consistently with the associated Order and financial state.
+
+A disputed Order must not be automatically released through a path that ignores the dispute.
+
+However, a dispute must not permanently freeze all financial activity regardless of its outcome. Use the existing dispute-resolution process to determine the valid next step.
+
+Do not introduce a new dispute policy or additional blanket restrictions.
+
+---
+
+## 10. NOTIFICATIONS AND SYSTEM MESSAGES
+
+The UI is FivePA's primary notification surface. Email is optional/secondary under the established design.
+
+Important events should use the existing notification/activity system and display the relevant toast, activity/notification entry, and unread badge/count where supported.
+
+Preserve or correctly implement WorkStream system messages for events such as:
+
+- Order created.
+- Escrow funded.
+- Escrow released or refunded.
+- Invoice paid.
+- Seller wallet credited.
+- Delivery submitted or approved.
+- Revision requested or resolved.
+- Dispute opened or resolved.
+- Order cancelled or completed.
+- Wallet credited.
+
+Do not create duplicate notifications or contradictory system messages for a single financial event.
+
+Countdowns and deadlines must use authoritative server timestamps rather than relying on a user's local clock.
+
+Never log OTPs, administrative 2FA codes, passwords, gateway secrets, or other sensitive authentication data.
+
+Do not introduce mandatory email usage when the established interface uses UI notifications as the primary source.
+
+---
+
+## 11. FILES, MESSAGES, AND UPLOADS
+
+Preserve the existing WorkStream messaging and file/reference-sharing capabilities.
+
+Existing intentional limits are:
+
+- Maximum file size: 25 MB.
+- Maximum uploads: 5 per minute.
+- Maximum messages: 120 per minute.
+
+Do not increase or decrease these limits as part of unrelated fixes.
+
+Validate authorization and file access correctly. Prevent unauthorized file access and unauthorized modifications without removing legitimate file sharing.
+
+Do not add unnecessary URL validation or force links to be clickable.
+
+Do not replace an existing functional file-reference implementation with a stub that returns no results or blocks legitimate users.
+
+---
+
+## 12. AUTHENTICATION, AUTHORIZATION, AND PRIVACY
+
+Security must protect the platform without changing the ordinary user experience unnecessarily.
+
+### 12.1 Authentication
+
+Use the existing authentication architecture.
+
+Protect session validation, revocation, token handling, password changes, and login flows against genuine security defects.
+
+Production deployments must not rely on demo authentication, predictable signing secrets, or development-only shortcuts.
+
+If a production configuration is missing a security-critical setting, fail safely rather than silently enabling an insecure fallback.
+
+Do not disable legitimate login, signup, password reset, or account recovery.
+
+Preserve the existing three-device session limit.
+
+### 12.2 Authorization
+
+Every sensitive server-side action must verify the correct actor, ownership, role, and relevant state.
+
+Do not rely exclusively on frontend checks.
+
+Do not allow an ordinary administrator or user to promote themselves to a more privileged role, alter another user's protected credentials, or bypass intended administrative controls.
+
+Do not impose new global restrictions on normal users as a substitute for correct role and ownership checks.
+
+### 12.3 Public profiles and private information
+
+Public user endpoints must expose only fields intended for public display.
+
+Do not expose private email addresses, mobile numbers, wallet balances, earnings, internal status flags, administrative flags, or other non-public information through a public profile response.
+
+Use the existing public-user sanitization behavior consistently across direct lookups and public profile routes.
+
+Protect private information without disabling legitimate public profiles, Gig discovery, or permitted marketplace access.
+
+### 12.4 WebSockets and notifications
+
+Verify the intended recipient and authorization before delivering private messages, notifications, or WorkStream events.
+
+Do not broadcast private data to unrelated users.
+
+Keep authorized messaging and notification delivery functional. Do not disable WebSockets or WorkStream notifications as a shortcut for fixing recipient filtering.
+
+### 12.5 Rate limiting and diagnostics
+
+Preserve the established message/upload limits and existing rate-limiting behavior.
+
+Do not rely on spoofable client-supplied identity or IP information where a trusted server-derived value is required.
+
+Protect diagnostic logs from leaking secrets and avoid unnecessary synchronous I/O that harms production functionality.
+
+---
+
+## 13. DATABASE AND PERSISTENCE RULES
+
+PostgreSQL is the authoritative persistence layer for financial data.
+
+Keep financial state, escrow, payouts, refunds, wallet balances, and associated ledger events consistent across the database and the application.
+
+Do not treat an in-memory copy as the authoritative source of financial truth.
+
+### Required integrity principles
+
+1. Database migrations must match the fields and tables actually used by runtime code.
+2. Financial columns must not be silently omitted from persistence operations.
+3. Required database fields must not be replaced with fabricated defaults.
+4. Database transaction failures must not be reported as successful financial operations.
+5. Concurrent requests must not overwrite newer financial or Order states using stale data.
+6. Financial state changes and associated ledger records must be committed consistently.
+7. Retry behavior must be idempotent and recoverable.
+8. Order identity and financial terms must not be silently changed by an ordinary state-update operation.
+9. A failed transaction must not leave a misleading in-memory success state.
+10. A fallback path must not reconstruct or mint money from stale memory.
+11. Background jobs must not release escrow or process refunds more than once.
+12. Database constraints and conditional updates should protect the intended state transitions without introducing new marketplace restrictions.
+
+Fix the actual persistence defect rather than replacing the entire storage architecture.
+
+Do not introduce a new parallel ledger, wallet, escrow engine, or Order lifecycle.
+
+---
+
+## 14. ADMINISTRATIVE OPERATIONS
+
+Preserve the existing administrative functionality and permission model.
+
+Administrative changes must use the intended authorization level and must not accidentally mutate unrelated accounts, delete data unexpectedly, or bypass financial consistency.
+
+Administrative operations that affect money or Order deadlines must handle concurrency and persistence correctly.
+
+If an administrative feature currently fails because of a real implementation bug, fix that bug without removing the feature or granting excessive privileges.
+
+Do not invent new approval layers or administrative requirements as part of an unrelated security fix.
+
+---
+
+## 15. EXACT EXISTING BUSINESS LIMITS — DO NOT CHANGE
+
+The following are intentional existing limits:
+
+| Rule | Existing value |
+|---|---:|
+| Minimum Project price | $5 |
+| Minimum Gig price | $5 |
+| Minimum actual Order | $10 |
+| Maximum Gig price | $10,000 |
+| Maximum Gig extras | 20 |
+| Maximum individual extra amount | $100,000 |
+| Maximum delivery period | 365 days |
+| Minimum withdrawal | $3 |
+| Maximum withdrawal | $5,000 |
+| Maximum upload file size | 25 MB |
+| Upload rate | 5 per minute |
+| Message rate | 120 per minute |
+| Concurrent device sessions | 3 |
+| Gig review window | 3 days |
+| Project review window | 7 days |
+| Earnings clearance | 14 days |
+| Late-order protection | 48 hours after deadline |
+| Buyer response period for seller cancellation request | 48 hours |
+| Seller extension | One free 14-day extension |
+
+All monetary values are USD only.
+
+The following additional established behaviors must remain intact:
+
+- WorkStreams remain available after Order completion or cancellation.
+- Repeat business remains allowed.
+- New Proposals remain allowed after earlier work ends.
+- A pending invoice may block bypassing that specific pending invoice state; it must not become a global ban on future business.
+- Every new direct Gig purchase creates a new Order and WorkStream.
+- Follow-on Proposals inside an existing WorkStream continue in that WorkStream.
+- Buyers may hire multiple freelancers for the same Project while it remains open for hiring.
+- An Order ending does not automatically close the WorkStream.
+- A cancellation request does not count as a completed refund until the required refund succeeds.
+- A rejected cancellation may be requested again if otherwise eligible.
+- URLs/references in deliverables do not require reachability verification.
+- Sellers may publish an unlimited number of Gigs under the intended marketplace model.
+
+Do not add new limits on the number of Gigs, WorkStreams, proposals, hires, messages, repeat engagements, or other normal marketplace actions beyond the existing intentional limits and legitimate security controls described here.
+
+---
+
+## 16. IMPLEMENTATION INSTRUCTIONS FOR GEMINI STUDIO
+
+### Scope
+
+Work directly in the current FivePA codebase.
+
+Do not ask questions, prepare a plan instead of doing the task, or conduct a new repo-wide audit. Use the specific confirmed issues and files provided in the current task.
+
+Make the smallest complete changes necessary to fix the confirmed defects.
+
+Do not modify unrelated modules, features, user interface components, business rules, or marketplace workflows.
+
+Keep the Node.js/TypeScript backend and existing architecture.
+
+Use PostgreSQL as the authoritative financial persistence layer where the current financial system requires it.
+
+Reuse existing helpers and services where appropriate. Avoid duplicate implementations, abandoned old paths, shadow state machines, parallel financial engines, and unnecessary abstractions.
+
+### Tests and quota
+
+Do not create, modify, or run tests.
+
+Do not conduct another broad audit or scan the entire repository. Work only on the specified confirmed findings and the files directly necessary to resolve them.
+
+Minimize Gemini quota usage while still making complete, correct, production-quality fixes. Do not use shortcuts, stubs, fake success responses, or incomplete patches.
+
+Compilation may be used only if explicitly permitted in the current task. Do not run tests.
+
+### Before changing a line
+
+Treat the current code and database schema as the implementation to be repaired, and the specification above as the established business behavior that must be preserved.
+
+Do not assume a reported candidate is a confirmed defect merely because it appears in a previous audit list. Implement only the confirmed issues included in the current task.
+
+If the correct fix requires a technical guard, make that guard precise and narrowly scoped. Do not turn it into a new marketplace policy.
+
+### After modifying code
+
+Review the changes for unintended effects on:
+
+- Gig purchase and escrow funding.
+- Project Proposal acceptance and hiring.
+- Multiple freelancers hired on the same Project.
+- New WorkStreams versus existing WorkStreams.
+- Follow-on Proposals.
+- Invoices and payment events.
+- Delivery, review, revisions, cancellation, and dispute handling.
+- Refunds, escrow releases, payouts, and withdrawals.
+- Session validation and account authorization.
+- Public profile visibility and private-data protection.
+- Existing UI behavior, notifications, and system messages.
+- Existing pricing, limits, and timing rules.
+
+Do not claim that a security or financial issue is fixed unless the implementation actually addresses it.
+
+Do not claim tests were run.
+
+Provide a concise completion report listing the exact files changed, the confirmed defects fixed, the safeguards added, and confirmation that no marketplace rules or limits were intentionally changed.
+
+## FINAL DIRECTIVE
+
+**FivePA's marketplace business rules are not to be redesigned.**
+
+Do not introduce new restrictions affecting all users. Do not remove or limit legitimate buyer and seller behavior. Do not change established prices, limits, timers, hiring rules, cancellation rules, WorkStream behavior, or payment workflows.
+
+Fix only genuine technical defects, enforce existing rules correctly, preserve legitimate user journeys, and maintain the current marketplace model.
+
+If a proposed implementation conflicts with this specification, the specification takes precedence over the proposed implementation.
