@@ -578,22 +578,23 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       if (isCreatingOrderRef.current || isCreatingOrder) return;
       isCreatingOrderRef.current = true;
       setIsCreatingOrder(true);
-      let token = getAuthToken();
-      const isPrivileged = ['admin', 'super_admin', 'support'].includes(activeUser.role || '');
-      if (!token && !isPrivileged) {
-        const session = await requestDemoSession(activeUser.id);
-        if (session?.token) {
-          token = session.token;
-          setAuthToken(token);
-        }
-      }
-      if (!token) {
-        setIsLoginModalOpen(true);
-        setIsCreatingOrder(false);
-        return;
-      }
+
       const clientRequestId = 'req_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
       try {
+        let token = getAuthToken();
+        const isPrivileged = ['admin', 'super_admin', 'support'].includes(activeUser.role || '');
+        if (!token && !isPrivileged) {
+          const session = await requestDemoSession(activeUser.id);
+          if (session?.token) {
+            token = session.token;
+            setAuthToken(token);
+          }
+        }
+        if (!token) {
+          setIsLoginModalOpen(true);
+          return;
+        }
+
         const sendOrderRequest = (tok: string) =>
           fetch('/api/orders', {
             method: 'POST',
