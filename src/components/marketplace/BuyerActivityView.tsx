@@ -6,7 +6,8 @@ import {
   ChevronDown,
   ThumbsUp,
   Heart,
-  MapPin
+  MapPin,
+  FileText
 } from 'lucide-react';
 import { Project, UserAccount, Order, WorkstreamOffer, Gig, Proposal } from '../../types';
 import { getAuthToken, setAuthToken, requestDemoSession } from '../../utils/authToken';
@@ -27,7 +28,7 @@ interface BuyerActivityViewProps {
 }
 
 type MainSectionTab = 'projects' | 'gigs';
-type ProjectSubTab = 'all' | 'open_proposals' | 'in_progress' | 'completed';
+type ProjectSubTab = 'all' | 'open' | 'in_progress' | 'completed' | 'pending' | 'declined' | 'archived';
 type GigSubTab = 'all' | 'active' | 'delivered' | 'completed' | 'pending' | 'declined';
 
 function formatActivityDate(rawDate?: string): string {
@@ -76,7 +77,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
   navigate,
   onOpenWorkstream
 }) => {
-  const [activeSection, setActiveSection] = useState<MainSectionTab>('gigs');
+  const [activeSection, setActiveSection] = useState<MainSectionTab>('projects');
   const [projectSubTab, setProjectSubTab] = useState<ProjectSubTab>('all');
   const [gigSubTab, setGigSubTab] = useState<GigSubTab>('all');
   const [activeDropdownId, setActiveDropdownId] = useState<string | null>(null);
@@ -162,7 +163,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
           </div>
           <h1 className="text-2xl font-bold text-slate-900">My Buyer Activity</h1>
           <p className="text-slate-500 max-w-md mx-auto text-sm">
-            Please log in to view and manage your ordered gigs, project requests, and ongoing escrow workstreams.
+            Please log in to view and manage your posted projects, ordered gigs, and escrow workstreams.
           </p>
           <button
             onClick={() => navigate('/login')}
@@ -187,7 +188,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
     return Array.from(byId.values());
   }, [orders, fetchedOrders]);
 
-  // Filter projects belonging to current buyer
+  // Filter projects belonging strictly to current buyer
   const myProjects = useMemo(() => {
     return projects
       .filter(p => p.buyerId === currentUser.id)
@@ -265,31 +266,9 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
     [onOpenWorkstream, navigate]
   );
 
-  // Build unified items for PROJECTS tab (includes Buyer's Posted Projects + Active/Completed Orders)
+  // Build unified items for PROJECTS tab (strictly Buyer's own posted projects)
   const buyerProjectItems = useMemo(() => {
-    const items: Array<{
-      id: string;
-      title: string;
-      counterpartyName: string;
-      counterpartyUsername?: string;
-      counterpartyAvatar: string;
-      dateLabel: string;
-      dateValue: string;
-      amountLabel: string;
-      amountValue: number;
-      rightAmount: number;
-      rightLabel: string;
-      location: string;
-      refNumber: string;
-      statusCategory: 'open_proposals' | 'in_progress' | 'completed';
-      statusBadgeText?: string;
-      order?: Order;
-      projectId?: string;
-      sortTimestamp: number;
-    }> = [];
-
-    // 1. Posted Projects
-    myProjects.forEach((proj, idx) => {
+    return myProjects.map((proj, idx) => {
       const linkedOrders = myWorkstreams.filter(o => o.projectId === proj.id);
       const primaryOrder = linkedOrders[0];
       const sellerInfo = primaryOrder ? resolveOrderSeller(primaryOrder) : null;
@@ -302,20 +281,24 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
               primaryOrder.status
             )
         );
+      const isOpen = proj.status === 'open' || proj.status === 'published' || (!isCompleted && !isInProgress);
 
-      const statusCategory: 'open_proposals' | 'in_progress' | 'completed' = isCompleted
-        ? 'completed'
-        : isInProgress
-        ? 'in_progress'
-        : 'open_proposals';
+      let subCat: ProjectSubTab = 'open';
+      if (isCompleted) subCat = 'completed';
+      else if (isInProgress) subCat = 'in_progress';
+      else if (proj.moderationStatus === 'pending') subCat = 'pending';
+      else if (proj.moderationStatus === 'rejected' || proj.status === 'suspended') subCat = 'declined';
+      else if (proj.status === 'unpublished') subCat = 'archived';
 
       const budgetVal = primaryOrder
         ? Number(primaryOrder.amount || 0)
         : Number(proj.budgetMax || proj.budgetMin || 0);
 
-      items.push({
-        id: `proj-${proj.id}`,
+      return {
+        id: proj.id,
         title: proj.title,
+        slug: proj.slug,
+        description: proj.description,
         counterpartyName: sellerInfo ? sellerInfo.sellerName : `${proj.proposalsCount || 0} Proposals`,
         counterpartyUsername: sellerInfo?.sellerUsername,
         counterpartyAvatar: sellerInfo ? sellerInfo.sellerAvatar : currentUser.avatar || DEFAULT_AVATAR,
@@ -323,58 +306,21 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
         dateValue: formatActivityDate(proj.createdAt),
         amountLabel: primaryOrder ? 'Escrow:' : 'Budget:',
         amountValue: budgetVal,
-        rightAmount: budgetVal,
-        rightLabel: primaryOrder ? 'ESCROW' : 'BUDGET',
+        proposalsCount: proj.proposalsCount || 0,
+        status: proj.status,
+        subCategory: subCat,
         location: 'Remote',
         refNumber: toNumericRef(proj.id, idx + 1),
-        statusCategory,
-        statusBadgeText: isCompleted
-          ? 'Completed'
-          : isInProgress
-          ? 'In progress'
-          : 'Open for Proposals',
         order: primaryOrder,
         projectId: proj.id,
         sortTimestamp: new Date(proj.createdAt || 0).getTime() || 0
-      });
+      };
     });
-
-    // 2. Gig Orders (so Buyer's ordered gigs from Elena Rostova & others are also visible in Projects & Orders view)
-    myGigOrders.forEach((ord, idx) => {
-      const { sellerName, sellerUsername, sellerAvatar, gigTitle } = resolveOrderSeller(ord);
-      const isCompleted = ord.status === 'completed';
-      const statusCategory: 'open_proposals' | 'in_progress' | 'completed' = isCompleted
-        ? 'completed'
-        : 'in_progress';
-      const amt = Number(ord.amount || 0);
-
-      items.push({
-        id: `ord-${ord.id}`,
-        title: gigTitle,
-        counterpartyName: sellerName,
-        counterpartyUsername: sellerUsername,
-        counterpartyAvatar: sellerAvatar,
-        dateLabel: 'Ordered:',
-        dateValue: formatActivityDate(ord.createdAt),
-        amountLabel: 'Order:',
-        amountValue: amt,
-        rightAmount: amt,
-        rightLabel: 'ESCROW',
-        location: 'Remote',
-        refNumber: toNumericRef(ord.id, idx + 100),
-        statusCategory,
-        statusBadgeText: isCompleted ? 'Completed' : 'Gig Order',
-        order: ord,
-        sortTimestamp: new Date(ord.createdAt || 0).getTime() || 0
-      });
-    });
-
-    return items.sort((a, b) => b.sortTimestamp - a.sortTimestamp);
-  }, [myProjects, myWorkstreams, myGigOrders, resolveOrderSeller, currentUser.avatar]);
+  }, [myProjects, myWorkstreams, resolveOrderSeller, currentUser.avatar]);
 
   const filteredProjectItems = useMemo(() => {
     if (projectSubTab === 'all') return buyerProjectItems;
-    return buyerProjectItems.filter(item => item.statusCategory === projectSubTab);
+    return buyerProjectItems.filter(item => item.subCategory === projectSubTab);
   }, [buyerProjectItems, projectSubTab]);
 
   // Filter Gig orders for GIGS tab
@@ -401,35 +347,32 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
     });
   }, [myGigOrders, gigSubTab]);
 
-  // Sidebar Statistics matching UserActivitySummarySidebar structure
-  const projectStats = useMemo(() => {
-    const myProjectIdSet = new Set(myProjects.map(p => p.id));
-    const liveProposalCount = proposals.filter(
-      pr => myProjectIdSet.has(pr.projectId) && pr.status === 'pending'
+  // Sidebar Statistics matching PeoplePerHour Buyer Activity Sidebar from user image exactly
+  const summary = useMemo(() => {
+    const projectsIPosted = myProjects.length;
+    const projectsIAwarded = myWorkstreams.filter(o => o.projectId && myProjectIds.has(o.projectId)).length;
+    const projectsInProgress = myWorkstreams.filter(
+      o => o.projectId && myProjectIds.has(o.projectId) && ['funded_in_escrow', 'in_progress', 'work_in_progress', 'delivered', 'revision', 'revision_requested'].includes(o.status)
     ).length;
-    const pendingProposalsCount = Math.max(
+    const liveProposalCount = proposals.filter(pr => myProjectIds.has(pr.projectId) && pr.status === 'pending').length;
+    const pendingProposals = Math.max(
       liveProposalCount,
       myProjects.reduce((sum, p) => sum + (p.proposalsCount || 0), 0)
     );
-    const awardedCount = myWorkstreams.length;
-    const inProgressCount = myWorkstreams.filter(o =>
-      ['funded_in_escrow', 'in_progress', 'work_in_progress', 'delivered', 'revision', 'revision_requested'].includes(
-        o.status
-      )
-    ).length;
-    const totalSpent = myWorkstreams
-      .filter(o => o.status !== 'cancelled' && (o.status as string) !== 'refunded')
+    const paidOut = myWorkstreams
+      .filter(o => o.status === 'completed')
       .reduce((sum, o) => sum + Number(o.amount || 0), 0);
 
     return {
-      pendingProposalsCount,
-      awardedCount,
-      inProgressCount,
-      totalSpent
+      projectsIPosted,
+      projectsIAwarded,
+      projectsInProgress,
+      pendingProposals,
+      paidOut
     };
-  }, [myProjects, myWorkstreams, proposals]);
+  }, [myProjects, myWorkstreams, myProjectIds, proposals]);
 
-  const gigStats = useMemo(() => {
+  const gigSummary = useMemo(() => {
     const orderedCount = myGigOrders.length;
     const activeCount = myGigOrders.filter(o =>
       ['funded_in_escrow', 'in_progress', 'work_in_progress', 'delivered', 'revision', 'revision_requested'].includes(
@@ -450,10 +393,13 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
   }, [myGigOrders]);
 
   const projectSubTabs: { id: ProjectSubTab; label: string }[] = [
-    { id: 'all', label: 'All' },
-    { id: 'open_proposals', label: 'Open for Proposals' },
-    { id: 'in_progress', label: 'In progress' },
-    { id: 'completed', label: 'Completed' }
+    { id: 'all', label: 'All projects' },
+    { id: 'open', label: 'Open for Proposals' },
+    { id: 'in_progress', label: 'Work in progress' },
+    { id: 'completed', label: 'Completed' },
+    { id: 'pending', label: 'Pending' },
+    { id: 'declined', label: 'Declined' },
+    { id: 'archived', label: 'Archived' }
   ];
 
   const gigSubTabs: { id: GigSubTab; label: string }[] = [
@@ -503,7 +449,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
         </div>
       )}
 
-      {/* Main 2-Column Layout with Fiverr-aligned site styling (Identical to FreelancerActivityView) */}
+      {/* Main 2-Column Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         {/* Left Main Content Area */}
         <div className="lg:col-span-8 bg-white border border-slate-200/90 rounded-2xl p-6 sm:p-8 shadow-xs">
@@ -514,25 +460,25 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
                 My Buyer Activity
               </h1>
               <p className="text-xs text-slate-500 mt-1">
-                Manage your ordered gigs, project proposals, and escrow workstreams.
+                Manage your posted projects, ordered gigs, proposals, and ongoing escrow workstreams.
               </p>
             </div>
 
-            {activeSection === 'gigs' ? (
+            {activeSection === 'projects' ? (
+              <button
+                onClick={() => navigate('/post-project')}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg shadow-xs transition-colors cursor-pointer self-start sm:self-auto"
+              >
+                <PlusCircle className="w-4 h-4" />
+                <span>POST PROJECT</span>
+              </button>
+            ) : (
               <button
                 onClick={() => navigate('/gigs')}
                 className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg shadow-xs transition-colors cursor-pointer self-start sm:self-auto"
               >
                 <PlusCircle className="w-4 h-4" />
                 <span>Order New Gig</span>
-              </button>
-            ) : (
-              <button
-                onClick={() => navigate('/post-project')}
-                className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg shadow-xs transition-colors cursor-pointer self-start sm:self-auto"
-              >
-                <PlusCircle className="w-4 h-4" />
-                <span>Post New Project</span>
               </button>
             )}
           </div>
@@ -559,13 +505,13 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
                   : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
               }`}
             >
-              GIGS
+              GIGS ORDERED
             </button>
           </div>
 
-          {/* Sub-filter Navigation Bar (Fiverr Tab Bar Style) */}
+          {/* Sub-filter Navigation Bar (PeoplePerHour Style) */}
           {activeSection === 'projects' ? (
-            <div className="border-b border-slate-200 px-1 flex flex-wrap items-center gap-6 mb-2">
+            <div className="border-b border-slate-200 px-1 flex flex-wrap items-center gap-5 mb-2">
               {projectSubTabs.map(tab => {
                 const isActive = projectSubTab === tab.id;
                 return (
@@ -614,103 +560,73 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
                   No projects found under &ldquo;{projectSubTabs.find(t => t.id === projectSubTab)?.label || 'All'}&rdquo;.
                 </p>
                 <p className="text-slate-500 text-sm">
-                  Projects you have posted, ordered services, and active escrow workstreams will appear here.
+                  Projects you have posted will appear here with proposal counts and management controls.
                 </p>
               </div>
             ) : (
               <div className="bg-white divide-y divide-slate-200/80 font-sans">
                 {filteredProjectItems.map(item => {
-                  const isCompleted = item.statusCategory === 'completed';
-                  const handleAction = () => {
-                    if (item.order) {
-                      handleOpenOrderWorkstream(item.order);
-                    } else if (item.projectId) {
-                      navigate(`/projects/${item.projectId}`);
-                    }
-                  };
+                  const isCompleted = item.subCategory === 'completed';
+                  const isInProgress = item.subCategory === 'in_progress';
+                  const isAwarded = Boolean(item.order);
 
                   return (
                     <div
                       key={item.id}
                       className="py-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 transition-colors"
                     >
-                      {/* Left Side: Title + Metadata Row (Identical to UserFreelanceProjectsList) */}
-                      <div className="space-y-3 flex-1 min-w-0">
+                      {/* Left Side: Project Title + Metadata Row (PeoplePerHour Layout) */}
+                      <div className="space-y-2 flex-1 min-w-0">
                         <button
                           type="button"
-                          onClick={handleAction}
+                          onClick={() => navigate(`/projects/${item.id}`)}
                           className="text-left text-base font-bold text-slate-900 hover:text-emerald-600 transition-colors leading-snug cursor-pointer block"
                         >
                           {item.title}
                         </button>
 
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[13px] text-slate-500">
-                          <div
-                            onClick={() => {
-                              if (item.counterpartyUsername) {
-                                navigate(`/${item.counterpartyUsername}`);
-                              }
-                            }}
-                            className={`inline-flex items-center gap-2 text-slate-800 font-semibold ${
-                              item.counterpartyUsername ? 'hover:text-emerald-600 cursor-pointer' : ''
-                            }`}
-                          >
-                            <img
-                              src={item.counterpartyAvatar || DEFAULT_AVATAR}
-                              alt={item.counterpartyName}
-                              className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
-                              onError={e => {
-                                (e.target as HTMLImageElement).src = DEFAULT_AVATAR;
-                              }}
-                            />
-                            <span>{item.counterpartyName}</span>
-                          </div>
-
+                          <span className={`font-semibold ${isCompleted ? 'text-emerald-600' : isInProgress ? 'text-blue-600' : 'text-slate-600'}`}>
+                            {isCompleted ? 'Completed' : isInProgress ? 'Awarded' : 'Open for Proposals'}
+                          </span>
                           <span>
-                            {item.dateLabel}{' '}
-                            <strong className="font-semibold text-slate-700">{item.dateValue}</strong>
+                            Posted: <strong className="font-semibold text-slate-700">{item.dateValue}</strong>
                           </span>
-
                           <span>
-                            {item.amountLabel}{' '}
-                            <strong className="font-bold text-slate-900">
-                              ${item.amountValue.toLocaleString()}
-                            </strong>
+                            Budget: <strong className="font-bold text-slate-900">${item.amountValue.toLocaleString()}</strong>
                           </span>
-
-                          <span className="inline-flex items-center gap-1 text-slate-500">
-                            <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                            <span>{item.location}</span>
-                          </span>
-
                           <span className="text-slate-400 font-medium">#{item.refNumber}</span>
-
-                          {isCompleted ? (
-                            <span className="text-emerald-600 font-semibold">· Completed</span>
-                          ) : item.statusBadgeText ? (
-                            <span className="text-emerald-600 font-semibold">· {item.statusBadgeText}</span>
-                          ) : null}
                         </div>
                       </div>
 
-                      {/* Right Side: Amount + VIEW PROGRESS Button */}
-                      <div className="flex sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto shrink-0 sm:min-w-[155px] gap-2.5">
+                      {/* Right Side: Proposals Count / Action Button (PeoplePerHour Style) */}
+                      <div className="flex sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto shrink-0 sm:min-w-[170px] gap-2.5">
                         <div className="text-left sm:text-right leading-none">
                           <span className="block text-xl font-bold text-slate-900 tracking-tight">
-                            ${formatCompactAmount(item.rightAmount)}
+                            {item.proposalsCount}
                           </span>
                           <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">
-                            {item.rightLabel}
+                            PROPOSALS ACCEPTED
                           </span>
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={handleAction}
-                          className="px-4 py-2 bg-white hover:bg-emerald-50/50 text-slate-700 hover:text-emerald-600 border border-slate-200 hover:border-emerald-600 rounded-lg text-xs font-bold uppercase tracking-wider transition-all shadow-2xs cursor-pointer whitespace-nowrap"
-                        >
-                          VIEW PROGRESS
-                        </button>
+                        {item.order ? (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenOrderWorkstream(item.order!)}
+                            className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold uppercase tracking-wider transition-all shadow-2xs cursor-pointer whitespace-nowrap"
+                          >
+                            VIEW PROGRESS
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/projects/${item.id}`)}
+                            className="px-4 py-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-lg text-xs font-bold uppercase tracking-wider transition-all shadow-2xs cursor-pointer whitespace-nowrap"
+                          >
+                            POST SIMILAR
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -744,7 +660,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
                       isCancelled ? 'opacity-65' : ''
                     }`}
                   >
-                    {/* Left + Middle: Thumbnail and Gig Order Metadata (Identical to UserFreelanceOffersList) */}
+                    {/* Left + Middle: Thumbnail and Gig Order Metadata */}
                     <div className="flex items-start gap-4 flex-1 min-w-0">
                       <div
                         onClick={() => handleOpenOrderWorkstream(ord)}
@@ -915,9 +831,9 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
           )}
         </div>
 
-        {/* Right Column: MY ACTIVITY SUMMARY (Identical to UserActivitySummarySidebar) */}
-        <div className="lg:col-span-4">
-          <div className="bg-white border border-slate-200/80 rounded-2xl p-6 shadow-xs space-y-5 font-sans">
+        {/* Right Column: MY ACTIVITY SUMMARY (Matching PeoplePerHour image layout exactly) */}
+        <div className="lg:col-span-4 space-y-6">
+          <div className="bg-white border border-slate-200/80 rounded-2xl p-6 shadow-xs space-y-4 font-sans">
             <div className="flex items-center gap-2.5 pb-3.5 border-b border-slate-100">
               <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 ring-4 ring-emerald-50 inline-block shrink-0" />
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900">
@@ -928,21 +844,25 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
             {activeSection === 'projects' ? (
               <div className="space-y-3.5 text-sm">
                 <div className="flex items-center justify-between text-slate-600">
-                  <span>Projects with pending Proposals</span>
-                  <span className="font-bold text-slate-900">{projectStats.pendingProposalsCount}</span>
+                  <span>Projects I posted</span>
+                  <span className="font-bold text-slate-900">{summary.projectsIPosted}</span>
                 </div>
                 <div className="flex items-center justify-between text-slate-600">
-                  <span>Projects & Orders awarded</span>
-                  <span className="font-bold text-slate-900">{projectStats.awardedCount}</span>
+                  <span>Projects I awarded</span>
+                  <span className="font-bold text-slate-900">{summary.projectsIAwarded}</span>
                 </div>
                 <div className="flex items-center justify-between text-slate-600">
-                  <span>Orders in progress</span>
-                  <span className="font-bold text-slate-900">{projectStats.inProgressCount}</span>
+                  <span>Projects in progress</span>
+                  <span className="font-bold text-slate-900">{summary.projectsInProgress}</span>
+                </div>
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Pending Proposals</span>
+                  <span className="font-bold text-slate-900">{summary.pendingProposals}</span>
                 </div>
                 <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
-                  <span className="font-semibold text-slate-700">Total Escrow / Spent</span>
+                  <span className="font-semibold text-slate-700">Paid Out</span>
                   <span className="font-bold text-emerald-600 text-base">
-                    ${projectStats.totalSpent.toLocaleString()}
+                    ${summary.paidOut.toLocaleString()}
                   </span>
                 </div>
               </div>
@@ -950,20 +870,20 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
               <div className="space-y-3.5 text-sm">
                 <div className="flex items-center justify-between text-slate-600">
                   <span>Gigs I ordered</span>
-                  <span className="font-bold text-slate-900">{gigStats.orderedCount}</span>
+                  <span className="font-bold text-slate-900">{gigSummary.orderedCount}</span>
                 </div>
                 <div className="flex items-center justify-between text-slate-600">
                   <span>Active Gig Orders</span>
-                  <span className="font-bold text-slate-900">{gigStats.activeCount}</span>
+                  <span className="font-bold text-slate-900">{gigSummary.activeCount}</span>
                 </div>
                 <div className="flex items-center justify-between text-slate-600">
                   <span>Completed Gig Orders</span>
-                  <span className="font-bold text-slate-900">{gigStats.completedCount}</span>
+                  <span className="font-bold text-slate-900">{gigSummary.completedCount}</span>
                 </div>
                 <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
                   <span className="font-semibold text-slate-700">Total Escrow / Spent</span>
                   <span className="font-bold text-emerald-600 text-base">
-                    ${gigStats.totalSpent.toLocaleString()}
+                    ${gigSummary.totalSpent.toLocaleString()}
                   </span>
                 </div>
               </div>

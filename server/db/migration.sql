@@ -509,12 +509,13 @@ CREATE TABLE IF NOT EXISTS financial_idempotency (
   operation TEXT,
   status TEXT,
   result JSONB,
-  request_fingerprint TEXT,
+  request_fingerprint JSONB,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-ALTER TABLE financial_idempotency ADD COLUMN IF NOT EXISTS request_fingerprint TEXT;
+ALTER TABLE financial_idempotency ADD COLUMN IF NOT EXISTS request_fingerprint JSONB;
+ALTER TABLE financial_idempotency ALTER COLUMN request_fingerprint TYPE JSONB USING request_fingerprint::jsonb;
 ALTER TABLE payouts ADD COLUMN IF NOT EXISTS account_details TEXT;
 DROP INDEX IF EXISTS idx_unique_earnings_clearing_order;
 CREATE INDEX IF NOT EXISTS idx_earnings_clearing_order ON earnings_clearing (order_id);

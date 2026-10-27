@@ -138,7 +138,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
     if (typeof window !== 'undefined') {
       try {
-        const stored = localStorage.getItem('current_user') || localStorage.getItem('user');
+        const stored = localStorage.getItem('current_user');
         if (stored) {
           const parsed = JSON.parse(stored);
           if (parsed && parsed.id) return parsed;
@@ -146,6 +146,13 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       } catch {}
     }
     if (initialData?.users && initialData.users.length > 0) {
+      const marcus = initialData.users.find((u: any) => u.id === 'u2' || u.name?.includes('Marcus Vance'));
+      if (marcus) {
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('current_user', JSON.stringify(marcus));
+        }
+        return marcus;
+      }
       return initialData.users[0];
     }
     return null;
@@ -153,6 +160,19 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
 
   const [impersonatedUser, setImpersonatedUser] = useState<UserAccount | null>(null);
   const activeUser = impersonatedUser || currentUser;
+
+  // Keep currentUser in sync with canonical users list
+  useEffect(() => {
+    if (currentUser?.id && users.length > 0) {
+      const freshUser = users.find(u => u.id === currentUser.id);
+      if (freshUser && JSON.stringify(freshUser) !== JSON.stringify(currentUser)) {
+        setCurrentUser(freshUser);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('current_user', JSON.stringify(freshUser));
+        }
+      }
+    }
+  }, [users, currentUser?.id]);
 
   const updateCurrentUser = useCallback(
     (u: UserAccount | null | ((prev: UserAccount | null) => UserAccount | null)) => {
@@ -175,58 +195,19 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     let storedUser: any = null;
     try {
       const storedRaw = typeof window !== 'undefined'
-        ? (localStorage.getItem('current_user') || localStorage.getItem('user'))
+        ? localStorage.getItem('current_user')
         : null;
       storedUser = storedRaw ? JSON.parse(storedRaw) : null;
     } catch {}
 
-    const token = getAuthToken();
-    let tokenUserId: string | null = null;
-    let tokenUserRole: string | null = null;
-    if (token) {
-      try {
-        const [b64] = token.split('.');
-        if (b64 && typeof atob === 'function') {
-          const payload = JSON.parse(atob(b64.replace(/-/g, '+').replace(/_/g, '/')));
-          if (payload?.id) tokenUserId = payload.id;
-          if (payload?.role) tokenUserRole = payload.role;
-        }
-      } catch {}
-    }
-
-    const storedMismatchWithNonAdminToken = Boolean(
-      storedUser?.id &&
-      tokenUserId &&
-      storedUser.id !== tokenUserId &&
-      !['admin', 'super_admin', 'support'].includes(tokenUserRole || '') &&
-      !['admin', 'super_admin', 'support'].includes(storedUser.role || '')
-    );
-
-    if (token && !storedMismatchWithNonAdminToken) {
-      try {
-        const res = await fetch('/api/auth/me', {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data?.user) {
-            updateCurrentUser(data.user);
-            return true;
-          }
-        }
-      } catch {}
-    }
+    const targetUserId = storedUser?.id || 'u2';
 
     try {
-      const candidateId = storedUser?.id;
-      const candidateRole = storedUser?.role;
-      if (candidateId && !['admin', 'super_admin', 'support'].includes(candidateRole || '')) {
-        const demoSession = await requestDemoSession(candidateId);
-        if (demoSession?.token && demoSession?.user) {
-          setAuthToken(demoSession.token);
-          updateCurrentUser(demoSession.user);
-          return true;
-        }
+      const demoSession = await requestDemoSession(targetUserId);
+      if (demoSession?.token && demoSession?.user) {
+        setAuthToken(demoSession.token);
+        updateCurrentUser(demoSession.user);
+        return true;
       }
     } catch {}
     return false;
@@ -586,12 +567,15 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     }
   };
 
+  const [isCreatingOrder, setIsCreatingOrder] = useState(false);
   const handleCreateOrder = useCallback(
     async (orderTitle: string, priceUSD: number, sellerId: string, gigId?: string, extraIds?: string[]) => {
       if (!activeUser) {
         setIsLoginModalOpen(true);
         return;
       }
+      if (isCreatingOrder) return;
+      setIsCreatingOrder(true);
       let token = getAuthToken();
       const isPrivileged = ['admin', 'super_admin', 'support'].includes(activeUser.role || '');
       if (!token && !isPrivileged) {
@@ -603,8 +587,10 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       }
       if (!token) {
         setIsLoginModalOpen(true);
+        setIsCreatingOrder(false);
         return;
       }
+      const clientRequestId = 'req_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
       try {
         const sendOrderRequest = (tok: string) =>
           fetch('/api/orders', {
@@ -612,6 +598,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
             headers: {
               'Content-Type': 'application/json',
               'x-device-id': getDeviceId(),
+              'x-idempotency-key': clientRequestId,
               Authorization: `Bearer ${tok}`
             },
             body: JSON.stringify({
@@ -642,9 +629,11 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         }
       } catch (e) {
         console.error('Order creation failed:', e);
+      } finally {
+        setIsCreatingOrder(false);
       }
     },
-    [activeUser, navigate, refresh, setOrders]
+    [activeUser, isCreatingOrder, navigate, refresh, setOrders]
   );
 
   const handleContactSeller = useCallback(

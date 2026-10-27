@@ -43,6 +43,7 @@ export const UserSwitchModal: React.FC<UserSwitchModalProps> = ({
       setImpersonatedUser(null);
       if (typeof window !== 'undefined') {
         localStorage.setItem('current_user', JSON.stringify(session.user || user));
+        localStorage.removeItem('user');
       }
       if (refresh) refresh();
       onClose();

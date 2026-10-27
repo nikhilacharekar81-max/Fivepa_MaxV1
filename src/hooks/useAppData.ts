@@ -61,7 +61,7 @@ export const useAppData = (initialData?: any) => {
       let tokenUserRole: string | null = null;
       try {
         if (typeof window !== 'undefined') {
-          const cached = localStorage.getItem('current_user') || localStorage.getItem('user');
+          const cached = localStorage.getItem('current_user');
           if (cached) {
             const parsed = JSON.parse(cached);
             if (parsed?.id && !cachedUserId) cachedUserId = parsed.id;

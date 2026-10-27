@@ -286,19 +286,6 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
       isInquiry
     };
 
-    if (scopedIdempKey) {
-      const idempCheck = await postgresStore.executeInTransaction(async (client) => {
-        return checkOrRecordIdempotency(client, scopedIdempKey, 'createOrder', orderPayloadFingerprint);
-      });
-      if (idempCheck.replayed) {
-        return res.status(201).json(idempCheck.result);
-      }
-      const existingOrder = await store.getOrder(id);
-      if (existingOrder && (existingOrder.status === 'funded_in_escrow' || existingOrder.status === 'in_progress')) {
-        return res.status(201).json(enrichOrderWithServiceInfo(existingOrder));
-      }
-    }
-
     const requirements = typeof req.body?.requirements === 'string' ? escapeHtml(req.body.requirements.trim()).slice(0, 2000) : '';
 
     let deliveryDays = 10;
@@ -391,58 +378,51 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
       };
     }
 
-    await workspaceService.ensureWorkspaceForOrderAsync(newOrd);
-    const enriched = enrichOrderWithServiceInfo(newOrd);
-    await recordOrder(enriched);
-    await store.saveOrder(enriched);
-
-    if (!isInquiry) {
-      try {
-        await fundOrderEscrowWithEvent({
-          orderId: id,
-          orderTitle: title,
-          amount: rawAmount,
-          buyerId,
-          sellerId,
-          actor: `user:${buyerId}`,
-          idempotencyKey: scopedIdempKey ? `${scopedIdempKey}:fund` : undefined
-        });
-
-        enriched.status = 'funded_in_escrow';
-        await store.saveOrder(enriched);
-        await syncUserBalances();
-      } catch (fundingErr: any) {
-        if (scopedIdempKey) {
-          await postgresStore.getPool().query(
-            "DELETE FROM financial_idempotency WHERE key = $1 AND operation = 'createOrder' AND status = 'in_progress'",
-            [scopedIdempKey]
-          );
+    const txResult = await postgresStore.executeInTransaction(async (client) => {
+      if (scopedIdempKey) {
+        const idempCheck = await checkOrRecordIdempotency(client, scopedIdempKey, 'createOrder', orderPayloadFingerprint);
+        if (idempCheck.replayed) {
+          return { replayed: true, result: idempCheck.result };
         }
-        const escCheck = await postgresStore.getPool().query('SELECT 1 FROM escrows WHERE order_id = $1', [id]);
-        if (escCheck.rows.length === 0) {
-          await postgresStore.getPool().query('DELETE FROM orders WHERE id = $1', [id]);
-
-          const wsId = (enriched as any).workspaceId;
-          if (wsId) {
-            const wsCheck = await postgresStore.getPool().query('SELECT id FROM orders WHERE workspace_id = $1', [wsId]);
-            if (wsCheck.rows.length === 0) {
-              await workspaceService.deleteWorkspace(wsId);
-            }
-          }
-        } else {
-          enriched.status = 'payment_pending';
-          await store.saveOrder(enriched);
-        }
-
-        return res.status(400).json({ error: fundingErr.message || 'Failed to fund escrow. Order creation rolled back.' });
       }
+
+      await workspaceService.ensureWorkspaceForOrderAsync(newOrd);
+      const enriched = enrichOrderWithServiceInfo(newOrd);
+      await recordOrder(enriched);
+      await store.saveOrder(enriched);
+
+      if (!isInquiry) {
+        try {
+          await fundOrderEscrowWithEvent({
+            orderId: id,
+            orderTitle: title,
+            amount: rawAmount,
+            buyerId,
+            sellerId,
+            actor: `user:${buyerId}`,
+            idempotencyKey: scopedIdempKey ? `${scopedIdempKey}:fund` : undefined
+          });
+
+          enriched.status = 'funded_in_escrow';
+          await store.saveOrder(enriched);
+          await syncUserBalances();
+        } catch (fundingErr: any) {
+          throw new Error(fundingErr.message || 'Failed to fund escrow.');
+        }
+      }
+
+      if (scopedIdempKey) {
+        await recordIdempotencyResult(client, scopedIdempKey, 'createOrder', enriched, orderPayloadFingerprint);
+      }
+
+      return { replayed: false, result: enriched };
+    });
+
+    if (txResult.replayed) {
+      return res.status(201).json(txResult.result);
     }
 
-    if (scopedIdempKey) {
-      await postgresStore.executeInTransaction(async (client) => {
-        await recordIdempotencyResult(client, scopedIdempKey, 'createOrder', enriched, orderPayloadFingerprint);
-      });
-    }
+    const enriched = txResult.result;
 
     if (isInquiry) {
       await emitSystemEvent(newOrd.id, 'order_created', `Inquiry thread opened: ${title}.`);
