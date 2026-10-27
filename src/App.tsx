@@ -24,6 +24,7 @@ import { AdminPage } from './pages/AdminPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { WorkstreamWorkspace } from './components/workstream/WorkstreamWorkspace';
 import { WorkstreamList } from './components/workstream/WorkstreamList';
+import { PaymentsModule } from './components/PaymentsModule';
 import {
   LoginModal,
   SignupModal,
@@ -953,6 +954,19 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         />
       );
     }
+  } else if (cleanPath === '/payments' || cleanPath.startsWith('/payments')) {
+    mainContent = (
+      <div className="max-w-7xl mx-auto py-8 px-4">
+        <PaymentsModule
+          currentUser={activeUser}
+          orders={orders}
+          gigs={gigs}
+          projects={projects}
+          proposals={proposals}
+          onBalanceUpdate={refresh}
+        />
+      </div>
+    );
   } else if (pathParts.length === 1 && !RESERVED_ROUTES.includes(pathParts[0].toLowerCase())) {
     const usernameParam = pathParts[0].toLowerCase();
     const matchedUser = users.find(
