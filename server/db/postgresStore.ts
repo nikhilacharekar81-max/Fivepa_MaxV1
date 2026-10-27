@@ -383,14 +383,11 @@ export class PostgresStore {
   }
 
   async saveClearingEarning(e: ClearingEarning): Promise<void> {
-    const id = 'clr_' + (e.orderId || Math.random().toString(36).substring(2));
+    const id = (e as any).id || ('clr_' + (e.orderId || Math.random().toString(36).substring(2)));
     await this.getPool().query(
       `INSERT INTO earnings_clearing (id, order_id, seller_id, amount, clearance_end, status, payout_eligible)
        VALUES ($1, $2, $3, $4, $5, 'clearing', FALSE)
-       ON CONFLICT (id) DO UPDATE SET
-         amount = EXCLUDED.amount,
-         clearance_end = EXCLUDED.clearance_end,
-         status = EXCLUDED.status`,
+       ON CONFLICT (id) DO NOTHING`,
       [id, e.orderId, e.sellerId, e.amount, e.clearsAt]
     );
   }

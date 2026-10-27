@@ -516,7 +516,8 @@ CREATE TABLE IF NOT EXISTS financial_idempotency (
 
 ALTER TABLE financial_idempotency ADD COLUMN IF NOT EXISTS request_fingerprint TEXT;
 ALTER TABLE payouts ADD COLUMN IF NOT EXISTS account_details TEXT;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_earnings_clearing_order ON earnings_clearing (order_id);
+DROP INDEX IF EXISTS idx_unique_earnings_clearing_order;
+CREATE INDEX IF NOT EXISTS idx_earnings_clearing_order ON earnings_clearing (order_id);
 
 ALTER TABLE wallets ADD COLUMN IF NOT EXISTS pending_balance NUMERIC(14,2) DEFAULT 0.00 NOT NULL;
 

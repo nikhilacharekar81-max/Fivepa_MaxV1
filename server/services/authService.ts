@@ -53,7 +53,8 @@ export function isValidMobile(v: string): boolean {
 
 export async function verifyAndConsumeWithdrawalCode(
   userId: string,
-  code: unknown
+  code: unknown,
+  externalClient?: any
 ): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
   if (!code || typeof code !== 'string' || !code.trim()) {
     return { ok: false, status: 400, error: 'Email verification code is required for withdrawal. Please request a code first via /api/auth/withdrawal/request-code.' };
@@ -61,7 +62,7 @@ export async function verifyAndConsumeWithdrawalCode(
   const trimmedCode = code.trim();
 
   if (isPostgresEnabled()) {
-    return postgresStore.executeInTransaction(async (client) => {
+    const runVerification = async (client: any): Promise<{ ok: true } | { ok: false; status: number; error: string }> => {
       const res = await client.query(
         `SELECT * FROM auth_verification_codes
          WHERE (email = $1 OR email = (SELECT LOWER(email) FROM users WHERE id = $1 LIMIT 1))
@@ -95,7 +96,12 @@ export async function verifyAndConsumeWithdrawalCode(
       }
       await client.query(`DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'withdrawal'`, [row.email]);
       return { ok: true };
-    });
+    };
+
+    if (externalClient) {
+      return runVerification(externalClient);
+    }
+    return postgresStore.executeInTransaction(runVerification);
   }
 
   if (IS_PRODUCTION) {

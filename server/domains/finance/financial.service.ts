@@ -1082,9 +1082,10 @@ export class FinancialTransactionService {
       const freelancerNet = Number((gross - platformFee).toFixed(2));
 
       // Update Escrow
+      const nextReleaseSeq = Number(escrow.release_seq || 0) + 1;
       await client.query(
-        'UPDATE escrows SET remaining = 0, released_gross = released_gross + $1, status = CASE WHEN refunded_total > 0 THEN ' + "'split'" + ' ELSE ' + "'released'" + ' END WHERE order_id = $2',
-        [gross, params.orderId]
+        'UPDATE escrows SET remaining = 0, released_gross = released_gross + $1, release_seq = $2, status = CASE WHEN refunded_total > 0 THEN ' + "'split'" + ' ELSE ' + "'released'" + ' END WHERE order_id = $3',
+        [gross, nextReleaseSeq, params.orderId]
       );
 
       // Update Wallets (Buyer Hold reduced)
@@ -1093,16 +1094,20 @@ export class FinancialTransactionService {
       // Update Order
       await client.query('UPDATE orders SET status = $1, completed_at = COALESCE(completed_at, NOW()::text) WHERE id = $2 AND status NOT IN (\'completed\', \'cancelled\')', ['completed', params.orderId]);
 
-      // 14-day Earnings Clearing Entry in Authoritative Table
+      // 14-day Earnings Clearing Entry in Authoritative Table (immutable insert, never resets existing clearing records)
       const existingClrRes = await client.query('SELECT id FROM earnings_clearing WHERE order_id = $1 FOR UPDATE', [params.orderId]);
-      const clearingId = existingClrRes.rows.length === 0
-        ? 'clr_' + params.orderId
-        : 'clr_' + params.orderId + '_' + (existingClrRes.rows.length + 1);
+      const existingClrIds = new Set(existingClrRes.rows.map((r: any) => String(r.id)));
+      const candidateSeq = Math.max(nextReleaseSeq, existingClrIds.size + 1);
+      let clearingId = existingClrIds.size === 0 && nextReleaseSeq === 1
+        ? `clr_${params.orderId}`
+        : `clr_${params.orderId}_${candidateSeq}`;
+      if (existingClrIds.has(clearingId)) {
+        clearingId = `clr_${params.orderId}_${candidateSeq}_${randomUUID().slice(0, 8)}`;
+      }
       const clearanceEnd = new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString();
       await client.query(
         `INSERT INTO earnings_clearing (id, order_id, seller_id, amount, clearance_end, status, payout_eligible)
-         VALUES ($1, $2, $3, $4, $5, 'clearing', FALSE)
-         ON CONFLICT (id) DO UPDATE SET amount = EXCLUDED.amount, clearance_end = EXCLUDED.clearance_end, status = 'clearing', payout_eligible = FALSE`,
+         VALUES ($1, $2, $3, $4, $5, 'clearing', FALSE)`,
         [clearingId, params.orderId, escrow.seller_id, freelancerNet, clearanceEnd]
       );
 

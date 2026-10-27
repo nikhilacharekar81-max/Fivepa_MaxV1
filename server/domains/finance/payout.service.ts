@@ -135,11 +135,6 @@ export async function handlePayoutRequest(req: Request, res: Response) {
       });
     }
 
-    const verification = await verifyAndConsumeWithdrawalCode(freelancerId, rawCode);
-    if (!verification.ok) {
-      return res.status(verification.status).json({ error: verification.error });
-    }
-
     // Deterministic payoutId if idempotencyKey provided, else random
     const id = idempotencyKey
       ? ('pay_' + createHash('sha256').update(`${freelancerId}:${idempotencyKey}`).digest('hex').slice(0, 12))
@@ -147,15 +142,34 @@ export async function handlePayoutRequest(req: Request, res: Response) {
 
     const accountDetails = String(req.body?.accountDetails || 'Primary Bank Account').slice(0, 500);
 
-    const payoutResult = await financialTransactionService.requestPayout({
-      payoutId: id,
-      freelancerId,
-      amount: numAmount,
-      method: rawMethod,
-      accountDetails,
-      actor: `user:${freelancerId}`,
-      idempotencyKey: idempotencyKey || undefined
+    // Atomic OTP consumption + Payout creation inside a single database transaction:
+    // - If OTP verification fails (invalid/expired/max attempts), commit the attempt counter increment and return error.
+    // - If OTP verification succeeds, consume the code on the same client and execute requestPayout on that client.
+    // - If requestPayout throws, the transaction rolls back and the valid OTP remains unconsumed.
+    const txOutcome = await postgresStore.executeInTransaction(async (client) => {
+      const verification = await verifyAndConsumeWithdrawalCode(freelancerId, rawCode, client);
+      if (!verification.ok) {
+        return { verified: false as const, verification };
+      }
+
+      const result = await financialTransactionService.requestPayout({
+        payoutId: id,
+        freelancerId,
+        amount: numAmount,
+        method: rawMethod,
+        accountDetails,
+        actor: `user:${freelancerId}`,
+        idempotencyKey: idempotencyKey || undefined
+      }, client);
+
+      return { verified: true as const, payoutResult: result };
     });
+
+    if (!txOutcome.verified) {
+      return res.status(txOutcome.verification.status).json({ error: txOutcome.verification.error });
+    }
+
+    const payoutResult = txOutcome.payoutResult;
 
     const activePayoutId = payoutResult.payoutId || id;
     let record = await store.getPayoutById(activePayoutId);
