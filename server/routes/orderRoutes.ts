@@ -207,6 +207,9 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
       return res.status(400).json({ error: 'Order cannot specify both gigId and projectId.' });
     }
 
+    let rawAmount = Number(req.body?.amount);
+    const isInquiry = rawAmount === 0 && /^inquiry:/i.test(title);
+
     const rawIdempKey = String(
       req.headers['idempotency-key'] ||
       req.headers['x-idempotency-key'] ||
@@ -215,14 +218,15 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
       req.body?.clientRequestId ||
       ''
     ).trim();
-    const scopedIdempKey = rawIdempKey ? `ORD-CREATE:${buyerId}:${rawIdempKey}` : '';
+
+    const timeWindowBucket = !isInquiry ? Math.floor(Date.now() / 15000) : Date.now();
+    const effectiveIdempKey = rawIdempKey || (isInquiry ? '' : `AUTO-PURCHASE:${buyerId}:${req.body?.gigId || req.body?.projectId || 'custom'}:${rawAmount}:${timeWindowBucket}`);
+    const scopedIdempKey = effectiveIdempKey ? `ORD-CREATE:${buyerId}:${effectiveIdempKey}` : '';
 
     const id = scopedIdempKey
       ? 'ord_' + createHash('sha256').update(scopedIdempKey).digest('hex').slice(0, 12)
       : 'ord_' + randomUUID().slice(0, 12);
     const today = new Date().toISOString().split('T')[0];
-    let rawAmount = Number(req.body?.amount);
-    const isInquiry = rawAmount === 0 && /^inquiry:/i.test(title);
 
     if (req.body?.gigId) {
       if (!isInquiry) {

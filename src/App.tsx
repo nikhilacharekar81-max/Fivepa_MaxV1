@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useAppData } from './hooks/useAppData';
 import { useWorkstream } from './hooks/workstream/useWorkstream';
 import { Header } from './layout/Header';
@@ -568,13 +568,15 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   };
 
   const [isCreatingOrder, setIsCreatingOrder] = useState(false);
+  const isCreatingOrderRef = useRef(false);
   const handleCreateOrder = useCallback(
     async (orderTitle: string, priceUSD: number, sellerId: string, gigId?: string, extraIds?: string[]) => {
       if (!activeUser) {
         setIsLoginModalOpen(true);
         return;
       }
-      if (isCreatingOrder) return;
+      if (isCreatingOrderRef.current || isCreatingOrder) return;
+      isCreatingOrderRef.current = true;
       setIsCreatingOrder(true);
       let token = getAuthToken();
       const isPrivileged = ['admin', 'super_admin', 'support'].includes(activeUser.role || '');
@@ -630,6 +632,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       } catch (e) {
         console.error('Order creation failed:', e);
       } finally {
+        isCreatingOrderRef.current = false;
         setIsCreatingOrder(false);
       }
     },
