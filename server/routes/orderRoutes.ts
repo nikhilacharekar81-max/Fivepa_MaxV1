@@ -219,9 +219,12 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
       ''
     ).trim();
 
-    const timeWindowBucket = !isInquiry ? Math.floor(Date.now() / 15000) : Date.now();
-    const effectiveIdempKey = rawIdempKey || (isInquiry ? '' : `AUTO-PURCHASE:${buyerId}:${req.body?.gigId || req.body?.projectId || 'custom'}:${rawAmount}:${timeWindowBucket}`);
-    const scopedIdempKey = effectiveIdempKey ? `ORD-CREATE:${buyerId}:${effectiveIdempKey}` : '';
+    const isPaidGig = Boolean(req.body?.gigId) && !isInquiry;
+    if (isPaidGig && !rawIdempKey) {
+      return res.status(400).json({ error: 'Idempotency-Key header is required for paid Gig purchase requests.' });
+    }
+
+    const scopedIdempKey = rawIdempKey ? `ORD-CREATE:${buyerId}:${rawIdempKey}` : '';
 
     const id = scopedIdempKey
       ? 'ord_' + createHash('sha256').update(scopedIdempKey).digest('hex').slice(0, 12)
