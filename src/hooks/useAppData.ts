@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { UserAccount, Gig, Project, Proposal, Order, Dispute, Refund, Payout, Category, Review, SupportTicket, AuditLog, Message, WorkstreamOffer } from '../types';
-import { getAuthToken } from '../utils/authToken';
+import { getAuthToken, setAuthToken, requestDemoSession } from '../utils/authToken';
 import { getDeviceId } from '../utils/deviceId';
 
 
@@ -54,35 +54,58 @@ export const useAppData = (initialData?: any) => {
     setIsLoading(true);
     setError(null);
     try {
-      const token = getAuthToken();
-      const authHeaders: Record<string, string> = {
-        'x-device-id': getDeviceId(),
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-      };
-      const reqOpt = { headers: authHeaders };
-
+      let token = getAuthToken();
+      let cachedUserId: string | null = currentUserId || null;
       let userRole: string | null = null;
+      let tokenUserId: string | null = null;
+      let tokenUserRole: string | null = null;
       try {
         if (typeof window !== 'undefined') {
           const cached = localStorage.getItem('current_user') || localStorage.getItem('user');
           if (cached) {
             const parsed = JSON.parse(cached);
+            if (parsed?.id && !cachedUserId) cachedUserId = parsed.id;
             if (parsed?.role) userRole = parsed.role;
           }
         }
-        if (!userRole && token) {
+        if (token) {
           const [b64] = token.split('.');
           if (b64 && typeof atob === 'function') {
             const json = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
             const payload = JSON.parse(json);
-            if (payload?.role) userRole = payload.role;
+            if (payload?.role) {
+              tokenUserRole = payload.role;
+              if (!userRole) userRole = payload.role;
+            }
+            if (payload?.id) {
+              tokenUserId = payload.id;
+              if (!cachedUserId) cachedUserId = payload.id;
+            }
           }
         }
       } catch {}
 
       const isAdminOrSupport = Boolean(userRole && ['admin', 'super_admin', 'support'].includes(userRole));
+      const isTokenAdmin = Boolean(tokenUserRole && ['admin', 'super_admin', 'support'].includes(tokenUserRole));
 
-      const [uRes, gRes, pRes, prRes, offRes, oRes, cRes, revRes] = await Promise.all([
+      if ((!token || (!isTokenAdmin && cachedUserId && tokenUserId !== cachedUserId)) && cachedUserId && !isAdminOrSupport) {
+        const recovered = await requestDemoSession(cachedUserId);
+        if (recovered?.token) {
+          token = recovered.token;
+          setAuthToken(token);
+        }
+      }
+
+      const buildReqOpt = (tok: string | null) => ({
+        headers: {
+          'x-device-id': getDeviceId(),
+          ...(tok ? { 'Authorization': `Bearer ${tok}` } : {})
+        }
+      });
+
+      let reqOpt = buildReqOpt(token);
+
+      let [uRes, gRes, pRes, prRes, offRes, oRes, cRes, revRes] = await Promise.all([
         fetch('/api/users', reqOpt),
         fetch('/api/gigs', reqOpt),
         fetch('/api/projects', reqOpt),
@@ -92,6 +115,20 @@ export const useAppData = (initialData?: any) => {
         fetch('/api/categories', reqOpt),
         fetch('/api/reviews', reqOpt)
       ]);
+
+      if (oRes && oRes.status === 401 && cachedUserId && !isAdminOrSupport) {
+        const recovered = await requestDemoSession(cachedUserId);
+        if (recovered?.token) {
+          token = recovered.token;
+          setAuthToken(token);
+          reqOpt = buildReqOpt(token);
+          [prRes, offRes, oRes] = await Promise.all([
+            fetch('/api/proposals', reqOpt),
+            fetch('/api/offers', reqOpt),
+            fetch('/api/orders', reqOpt)
+          ]);
+        }
+      }
 
       const usersData = await safeJson(uRes, null);
       const gigsData = await safeJson(gRes, null);

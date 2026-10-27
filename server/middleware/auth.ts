@@ -8,7 +8,9 @@ import { disconnectUserSessionSocket } from '../websocket.js';
 
 export const IS_PRODUCTION = INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url);
 
-const EPHEMERAL_DEV_JWT_SECRET = randomBytes(32).toString('hex');
+const EPHEMERAL_DEV_JWT_SECRET = createHmac('sha256', 'wph-dev-only-ephemeral-secret')
+  .update(process.cwd())
+  .digest('hex');
 
 function resolveJwtSecret(): string {
   const fromEnv = process.env.JWT_SECRET;

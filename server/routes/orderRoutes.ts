@@ -184,9 +184,14 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
 
     const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
     if (title.length < 3) return res.status(400).json({ error: 'A valid order title is required.' });
-    const buyerId = userCaller.id;
+    const isAdminCaller = userCaller.role === 'admin' || userCaller.role === 'super_admin';
+    const requestedBuyerId = isAdminCaller && typeof req.body?.buyerId === 'string' && req.body.buyerId.trim()
+      ? req.body.buyerId.trim()
+      : userCaller.id;
+    const buyer = requestedBuyerId === userCaller.id ? userCaller : await store.getUser(requestedBuyerId);
+    if (!buyer) return res.status(404).json({ error: 'Buyer account not found.' });
+    const buyerId = buyer.id;
     const sellerId = String(req.body?.sellerId || '');
-    const buyer = userCaller;
 
     const seller = await store.getUser(sellerId);
     if (!seller) return res.status(404).json({ error: 'Seller not found.' });

@@ -35,7 +35,7 @@ import {
   EmailNotificationsModal
 } from './components/modals';
 import { slugify, getGigUrl } from './utils/slugify';
-import { getAuthToken, setAuthToken, clearAuthToken } from './utils/authToken';
+import { getAuthToken, setAuthToken, clearAuthToken, requestDemoSession } from './utils/authToken';
 import { getDeviceId } from './utils/deviceId';
 import { DEFAULT_GIG_IMAGE } from './constants';
 import { RESERVED_ROUTES } from './shared/routes';
@@ -172,31 +172,71 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   );
 
   const loadUserSession = useCallback(async (): Promise<boolean> => {
-    const token = getAuthToken();
-    if (!token) {
-      return false;
-    }
+    let storedUser: any = null;
     try {
-      const res = await fetch('/api/auth/me', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.user) {
-          updateCurrentUser(data.user);
+      const storedRaw = typeof window !== 'undefined'
+        ? (localStorage.getItem('current_user') || localStorage.getItem('user'))
+        : null;
+      storedUser = storedRaw ? JSON.parse(storedRaw) : null;
+    } catch {}
+
+    const token = getAuthToken();
+    let tokenUserId: string | null = null;
+    let tokenUserRole: string | null = null;
+    if (token) {
+      try {
+        const [b64] = token.split('.');
+        if (b64 && typeof atob === 'function') {
+          const payload = JSON.parse(atob(b64.replace(/-/g, '+').replace(/_/g, '/')));
+          if (payload?.id) tokenUserId = payload.id;
+          if (payload?.role) tokenUserRole = payload.role;
+        }
+      } catch {}
+    }
+
+    const storedMismatchWithNonAdminToken = Boolean(
+      storedUser?.id &&
+      tokenUserId &&
+      storedUser.id !== tokenUserId &&
+      !['admin', 'super_admin', 'support'].includes(tokenUserRole || '') &&
+      !['admin', 'super_admin', 'support'].includes(storedUser.role || '')
+    );
+
+    if (token && !storedMismatchWithNonAdminToken) {
+      try {
+        const res = await fetch('/api/auth/me', {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.user) {
+            updateCurrentUser(data.user);
+            return true;
+          }
+        }
+      } catch {}
+    }
+
+    try {
+      const candidateId = storedUser?.id;
+      const candidateRole = storedUser?.role;
+      if (candidateId && !['admin', 'super_admin', 'support'].includes(candidateRole || '')) {
+        const demoSession = await requestDemoSession(candidateId);
+        if (demoSession?.token && demoSession?.user) {
+          setAuthToken(demoSession.token);
+          updateCurrentUser(demoSession.user);
           return true;
         }
       }
-      return false;
-    } catch {
-      return false;
-    }
+    } catch {}
+    return false;
   }, [updateCurrentUser]);
 
   // Initial client hydration fetch
   useEffect(() => {
-    loadUserSession();
-    refresh();
+    loadUserSession().finally(() => {
+      refresh();
+    });
   }, [loadUserSession, refresh]);
 
   // Liked Gigs state
@@ -548,29 +588,55 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
 
   const handleCreateOrder = useCallback(
     async (orderTitle: string, priceUSD: number, sellerId: string, gigId?: string, extraIds?: string[]) => {
-      const token = getAuthToken();
-      if (!token || !activeUser) {
+      if (!activeUser) {
+        setIsLoginModalOpen(true);
+        return;
+      }
+      let token = getAuthToken();
+      const isPrivileged = ['admin', 'super_admin', 'support'].includes(activeUser.role || '');
+      if (!token && !isPrivileged) {
+        const session = await requestDemoSession(activeUser.id);
+        if (session?.token) {
+          token = session.token;
+          setAuthToken(token);
+        }
+      }
+      if (!token) {
         setIsLoginModalOpen(true);
         return;
       }
       try {
-        const res = await fetch('/api/orders', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            title: orderTitle,
-            amount: priceUSD,
-            sellerId,
-            gigId,
-            extraIds
-          })
-        });
+        const sendOrderRequest = (tok: string) =>
+          fetch('/api/orders', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-device-id': getDeviceId(),
+              Authorization: `Bearer ${tok}`
+            },
+            body: JSON.stringify({
+              title: orderTitle,
+              amount: priceUSD,
+              buyerId: activeUser.id,
+              sellerId,
+              gigId,
+              extraIds
+            })
+          });
+
+        let res = await sendOrderRequest(token);
+        if (res.status === 401 && !isPrivileged) {
+          const recovered = await requestDemoSession(activeUser.id);
+          if (recovered?.token) {
+            token = recovered.token;
+            setAuthToken(token);
+            res = await sendOrderRequest(token);
+          }
+        }
         if (res.ok) {
           const newOrder = await res.json();
-          await refresh();
+          setOrders(prev => [newOrder, ...prev.filter(o => o.id !== newOrder.id)]);
+          await refresh(activeUser.id);
           setSelectedOrder(newOrder);
           navigate(`/messages/${newOrder.id}`);
         }
@@ -578,7 +644,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         console.error('Order creation failed:', e);
       }
     },
-    [activeUser, navigate, refresh]
+    [activeUser, navigate, refresh, setOrders]
   );
 
   const handleContactSeller = useCallback(
@@ -741,8 +807,15 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         projects={projects}
         orders={orders}
         offers={offers}
+        gigs={gigs}
+        users={users}
+        proposals={proposals}
         currentUser={activeUser}
         navigate={navigate}
+        onOpenWorkstream={(ord) => {
+          setSelectedOrder(ord);
+          navigate(`/messages/${ord.id}`);
+        }}
       />
     );
   } else if (cleanPath === '/freelance-activity' || cleanPath === '/freelancer') {

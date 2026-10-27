@@ -1,428 +1,975 @@
-import React, { useState, useMemo } from 'react';
-import { 
-  Search, 
-  Briefcase, 
-  Clock, 
-  DollarSign, 
-  Filter, 
-  Check, 
-  ChevronDown, 
-  ChevronRight, 
-  List, 
-  Star, 
-  ShieldCheck, 
-  Sparkles, 
-  Zap, 
-  PlusCircle, 
-  X, 
-  SlidersHorizontal,
-  Building2,
-  Tag,
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import {
+  Briefcase,
   CheckCircle2,
-  MessageSquare,
-  FileText,
-  AlertCircle,
-  Archive,
-  ArrowRight,
-  TrendingUp,
-  Layout,
-  Users,
-  Activity
+  PlusCircle,
+  ChevronDown,
+  ThumbsUp,
+  Heart,
+  MapPin
 } from 'lucide-react';
-import { Project, UserAccount, Order, WorkstreamOffer } from '../../types';
+import { Project, UserAccount, Order, WorkstreamOffer, Gig, Proposal } from '../../types';
+import { getAuthToken, setAuthToken, requestDemoSession } from '../../utils/authToken';
+import { getDeviceId } from '../../utils/deviceId';
+import { DEFAULT_AVATAR, DEFAULT_GIG_IMAGE } from '../../constants';
+import { getGigUrl } from '../../utils/slugify';
 
 interface BuyerActivityViewProps {
   projects: Project[];
   orders: Order[];
   offers: WorkstreamOffer[];
+  gigs?: Gig[];
+  users?: UserAccount[];
+  proposals?: Proposal[];
   currentUser: UserAccount | null;
   navigate: (path: string, e?: React.MouseEvent) => void;
+  onOpenWorkstream?: (order: Order) => void;
+}
+
+type MainSectionTab = 'projects' | 'gigs';
+type ProjectSubTab = 'all' | 'open_proposals' | 'in_progress' | 'completed';
+type GigSubTab = 'all' | 'active' | 'delivered' | 'completed' | 'pending' | 'declined';
+
+function formatActivityDate(rawDate?: string): string {
+  if (!rawDate) return 'Recent';
+  const parsed = new Date(rawDate);
+  if (Number.isNaN(parsed.getTime())) {
+    return rawDate;
+  }
+  return parsed.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  });
+}
+
+function toNumericRef(id?: string, fallbackIndex = 0): string {
+  if (!id) return String(3980000 + fallbackIndex);
+  const digits = id.replace(/\D/g, '');
+  if (digits.length >= 6) return digits.slice(0, 7);
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) % 9000000;
+  }
+  return String(1000000 + Math.abs(hash));
+}
+
+function formatCompactAmount(amount: number): string {
+  if (!Number.isFinite(amount)) return '0';
+  if (amount >= 1000 && amount % 100 !== 0) {
+    return `${(amount / 1000).toFixed(1)}k`;
+  }
+  if (amount >= 10000) {
+    return `${(amount / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  }
+  return amount.toLocaleString();
 }
 
 export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
   projects,
   orders,
-  offers,
+  offers = [],
+  gigs = [],
+  users = [],
+  proposals = [],
   currentUser,
-  navigate
+  navigate,
+  onOpenWorkstream
 }) => {
-  const [activeTab, setActiveTab] = useState<'projects' | 'offers'>('projects');
-  const [projectFilter, setProjectFilter] = useState<string>('All Projects');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [activeSection, setActiveSection] = useState<MainSectionTab>('gigs');
+  const [projectSubTab, setProjectSubTab] = useState<ProjectSubTab>('all');
+  const [gigSubTab, setGigSubTab] = useState<GigSubTab>('all');
+  const [activeDropdownId, setActiveDropdownId] = useState<string | null>(null);
+  const [fetchedOrders, setFetchedOrders] = useState<Order[]>([]);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3500);
+  };
+
+  const loadLatestBuyerOrders = useCallback(async () => {
+    if (!currentUser) return;
+    try {
+      let token = getAuthToken();
+      let tokenUserId: string | null = null;
+      let tokenUserRole: string | null = null;
+      if (token) {
+        try {
+          const [b64] = token.split('.');
+          if (b64 && typeof atob === 'function') {
+            const payload = JSON.parse(atob(b64.replace(/-/g, '+').replace(/_/g, '/')));
+            if (payload?.id) tokenUserId = payload.id;
+            if (payload?.role) tokenUserRole = payload.role;
+          }
+        } catch {}
+      }
+      const isTokenAdmin = Boolean(tokenUserRole && ['admin', 'super_admin', 'support'].includes(tokenUserRole));
+      const isPrivileged = ['admin', 'super_admin', 'support'].includes(currentUser.role || '');
+      if ((!token || (!isTokenAdmin && tokenUserId !== currentUser.id)) && !isPrivileged) {
+        const session = await requestDemoSession(currentUser.id);
+        if (session?.token) {
+          token = session.token;
+          setAuthToken(token);
+        }
+      }
+      if (!token) return;
+
+      const buildHeaders = (tok: string): Record<string, string> => ({
+        'x-device-id': getDeviceId(),
+        Authorization: `Bearer ${tok}`
+      });
+
+      let res = await fetch('/api/orders', { headers: buildHeaders(token) });
+      if (res.status === 401 && !isPrivileged) {
+        const recovered = await requestDemoSession(currentUser.id);
+        if (recovered?.token) {
+          token = recovered.token;
+          setAuthToken(token);
+          res = await fetch('/api/orders', { headers: buildHeaders(token) });
+        }
+      }
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setFetchedOrders(data);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to refresh buyer orders:', e);
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    loadLatestBuyerOrders();
+  }, [loadLatestBuyerOrders]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleOutsideClick = () => setActiveDropdownId(null);
+    if (activeDropdownId) {
+      window.addEventListener('click', handleOutsideClick);
+      return () => window.removeEventListener('click', handleOutsideClick);
+    }
+  }, [activeDropdownId]);
 
   if (!currentUser) {
     return (
-      <div className="max-w-4xl mx-auto py-20 text-center">
-        <div className="bg-white p-12 rounded-3xl border border-slate-200 shadow-sm space-y-6">
-          <div className="w-20 h-20 bg-indigo-50 rounded-2xl flex items-center justify-center mx-auto text-indigo-600">
-            <ShieldCheck className="w-10 h-10" />
+      <div className="max-w-4xl mx-auto py-16 text-center font-sans">
+        <div className="bg-white p-10 rounded-2xl border border-slate-200 shadow-xs space-y-5">
+          <div className="w-16 h-16 bg-emerald-50 rounded-2xl flex items-center justify-center mx-auto text-emerald-600">
+            <Briefcase className="w-8 h-8" />
           </div>
-          <h1 className="text-3xl font-black text-slate-900">Private Dashboard</h1>
-          <p className="text-slate-500 max-w-md mx-auto">Please log in to your account to view and manage your private buyer activity, project requests, and ongoing workstreams.</p>
-          <button 
+          <h1 className="text-2xl font-bold text-slate-900">My Buyer Activity</h1>
+          <p className="text-slate-500 max-w-md mx-auto text-sm">
+            Please log in to view and manage your ordered gigs, project requests, and ongoing escrow workstreams.
+          </p>
+          <button
             onClick={() => navigate('/login')}
-            className="px-8 py-3.5 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 transition-all shadow-lg"
+            className="px-6 py-2.5 bg-slate-900 text-white font-semibold text-xs rounded-xl hover:bg-slate-800 transition-all shadow-sm cursor-pointer"
           >
-            Login to Dashboard
+            Sign In
           </button>
         </div>
       </div>
     );
   }
 
+  // Merge prop orders and freshly fetched orders so newly placed gig orders are always present
+  const mergedOrders = useMemo(() => {
+    const byId = new Map<string, Order>();
+    for (const o of orders) {
+      if (o && o.id) byId.set(o.id, o);
+    }
+    for (const o of fetchedOrders) {
+      if (o && o.id) byId.set(o.id, { ...(byId.get(o.id) || {}), ...o });
+    }
+    return Array.from(byId.values());
+  }, [orders, fetchedOrders]);
+
   // Filter projects belonging to current buyer
   const myProjects = useMemo(() => {
-    return projects.filter(p => p.buyerId === currentUser.id);
+    return projects
+      .filter(p => p.buyerId === currentUser.id)
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   }, [projects, currentUser.id]);
 
   // Filter orders (workstreams) belonging to current buyer
   const myWorkstreams = useMemo(() => {
-    return orders.filter(o => o.buyerId === currentUser.id);
-  }, [orders, currentUser.id]);
+    return mergedOrders
+      .filter(o => o.buyerId === currentUser.id)
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  }, [mergedOrders, currentUser.id]);
 
-  // Map projects to statuses for filtering
-  // Statuses: Open for Proposals, Work in Progress, Completed, Pending, Declined, Archived
-  const filteredProjects = useMemo(() => {
-    return myProjects.filter(proj => {
-      // Search
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        if (!proj.title.toLowerCase().includes(q) && !proj.description.toLowerCase().includes(q)) return false;
+  const myProjectIds = useMemo(() => new Set(myProjects.map(p => p.id)), [myProjects]);
+
+  const myGigOrders = useMemo(() => {
+    return myWorkstreams.filter(o => {
+      if (o.orderType === 'gig' || o.type === 'gig' || Boolean(o.gigId)) return true;
+      if (o.projectId && myProjectIds.has(o.projectId)) return false;
+      return !o.projectId;
+    });
+  }, [myWorkstreams, myProjectIds]);
+
+  const resolveOrderSeller = useCallback(
+    (ord: Order) => {
+      const linkedGig = ord.gigId ? gigs.find(g => g.id === ord.gigId) : undefined;
+      const sellerUser = users.find(u => u.id === ord.sellerId) || (ord as any).seller;
+      const sellerName =
+        (ord as any).sellerName ||
+        sellerUser?.name ||
+        linkedGig?.freelancerName ||
+        ord.sellerUsername ||
+        'Freelancer';
+      const sellerUsername =
+        ord.sellerUsername ||
+        sellerUser?.username ||
+        linkedGig?.freelancerUsername ||
+        'freelancer';
+      const sellerAvatar =
+        (ord as any).sellerAvatar ||
+        sellerUser?.avatar ||
+        linkedGig?.freelancerAvatar ||
+        DEFAULT_AVATAR;
+      const gigTitle = ord.serviceTitle || ord.title || linkedGig?.title || 'Gig Service Order';
+      const gigImage =
+        (ord as any).serviceImage ||
+        linkedGig?.image ||
+        DEFAULT_GIG_IMAGE;
+      const gigUrl =
+        ord.serviceUrl ||
+        (linkedGig ? getGigUrl(linkedGig) : ord.gigId ? `/gig/${ord.gigId}${ord.gigSlug ? `/${ord.gigSlug}` : ''}` : undefined);
+
+      return {
+        sellerName,
+        sellerUsername,
+        sellerAvatar,
+        gigTitle,
+        gigImage,
+        gigUrl,
+        linkedGig
+      };
+    },
+    [gigs, users]
+  );
+
+  const handleOpenOrderWorkstream = useCallback(
+    (ord: Order) => {
+      setActiveDropdownId(null);
+      if (onOpenWorkstream) {
+        onOpenWorkstream(ord);
+      } else {
+        navigate(`/messages/${ord.id}`);
       }
+    },
+    [onOpenWorkstream, navigate]
+  );
 
-      if (projectFilter === 'All Projects') return true;
-      if (projectFilter === 'Open for Proposals') return proj.status === 'open' || proj.status === 'published';
-      if (projectFilter === 'Work in Progress') return proj.status === 'in_progress';
-      if (projectFilter === 'Completed') return proj.status === 'completed';
-      if (projectFilter === 'Pending') return proj.moderationStatus === 'pending';
-      if (projectFilter === 'Declined') return proj.moderationStatus === 'rejected' || proj.status === 'suspended';
-      if (projectFilter === 'Archived') return proj.status === 'unpublished';
+  // Build unified items for PROJECTS tab (includes Buyer's Posted Projects + Active/Completed Orders)
+  const buyerProjectItems = useMemo(() => {
+    const items: Array<{
+      id: string;
+      title: string;
+      counterpartyName: string;
+      counterpartyUsername?: string;
+      counterpartyAvatar: string;
+      dateLabel: string;
+      dateValue: string;
+      amountLabel: string;
+      amountValue: number;
+      rightAmount: number;
+      rightLabel: string;
+      location: string;
+      refNumber: string;
+      statusCategory: 'open_proposals' | 'in_progress' | 'completed';
+      statusBadgeText?: string;
+      order?: Order;
+      projectId?: string;
+      sortTimestamp: number;
+    }> = [];
+
+    // 1. Posted Projects
+    myProjects.forEach((proj, idx) => {
+      const linkedOrders = myWorkstreams.filter(o => o.projectId === proj.id);
+      const primaryOrder = linkedOrders[0];
+      const sellerInfo = primaryOrder ? resolveOrderSeller(primaryOrder) : null;
+      const isCompleted = proj.status === 'completed' || primaryOrder?.status === 'completed';
+      const isInProgress =
+        proj.status === 'in_progress' ||
+        Boolean(
+          primaryOrder &&
+            ['funded_in_escrow', 'in_progress', 'work_in_progress', 'delivered', 'revision', 'revision_requested'].includes(
+              primaryOrder.status
+            )
+        );
+
+      const statusCategory: 'open_proposals' | 'in_progress' | 'completed' = isCompleted
+        ? 'completed'
+        : isInProgress
+        ? 'in_progress'
+        : 'open_proposals';
+
+      const budgetVal = primaryOrder
+        ? Number(primaryOrder.amount || 0)
+        : Number(proj.budgetMax || proj.budgetMin || 0);
+
+      items.push({
+        id: `proj-${proj.id}`,
+        title: proj.title,
+        counterpartyName: sellerInfo ? sellerInfo.sellerName : `${proj.proposalsCount || 0} Proposals`,
+        counterpartyUsername: sellerInfo?.sellerUsername,
+        counterpartyAvatar: sellerInfo ? sellerInfo.sellerAvatar : currentUser.avatar || DEFAULT_AVATAR,
+        dateLabel: primaryOrder ? 'Awarded:' : 'Posted:',
+        dateValue: formatActivityDate(proj.createdAt),
+        amountLabel: primaryOrder ? 'Escrow:' : 'Budget:',
+        amountValue: budgetVal,
+        rightAmount: budgetVal,
+        rightLabel: primaryOrder ? 'ESCROW' : 'BUDGET',
+        location: 'Remote',
+        refNumber: toNumericRef(proj.id, idx + 1),
+        statusCategory,
+        statusBadgeText: isCompleted
+          ? 'Completed'
+          : isInProgress
+          ? 'In progress'
+          : 'Open for Proposals',
+        order: primaryOrder,
+        projectId: proj.id,
+        sortTimestamp: new Date(proj.createdAt || 0).getTime() || 0
+      });
+    });
+
+    // 2. Gig Orders (so Buyer's ordered gigs from Elena Rostova & others are also visible in Projects & Orders view)
+    myGigOrders.forEach((ord, idx) => {
+      const { sellerName, sellerUsername, sellerAvatar, gigTitle } = resolveOrderSeller(ord);
+      const isCompleted = ord.status === 'completed';
+      const statusCategory: 'open_proposals' | 'in_progress' | 'completed' = isCompleted
+        ? 'completed'
+        : 'in_progress';
+      const amt = Number(ord.amount || 0);
+
+      items.push({
+        id: `ord-${ord.id}`,
+        title: gigTitle,
+        counterpartyName: sellerName,
+        counterpartyUsername: sellerUsername,
+        counterpartyAvatar: sellerAvatar,
+        dateLabel: 'Ordered:',
+        dateValue: formatActivityDate(ord.createdAt),
+        amountLabel: 'Order:',
+        amountValue: amt,
+        rightAmount: amt,
+        rightLabel: 'ESCROW',
+        location: 'Remote',
+        refNumber: toNumericRef(ord.id, idx + 100),
+        statusCategory,
+        statusBadgeText: isCompleted ? 'Completed' : 'Gig Order',
+        order: ord,
+        sortTimestamp: new Date(ord.createdAt || 0).getTime() || 0
+      });
+    });
+
+    return items.sort((a, b) => b.sortTimestamp - a.sortTimestamp);
+  }, [myProjects, myWorkstreams, myGigOrders, resolveOrderSeller, currentUser.avatar]);
+
+  const filteredProjectItems = useMemo(() => {
+    if (projectSubTab === 'all') return buyerProjectItems;
+    return buyerProjectItems.filter(item => item.statusCategory === projectSubTab);
+  }, [buyerProjectItems, projectSubTab]);
+
+  // Filter Gig orders for GIGS tab
+  const filteredGigOrders = useMemo(() => {
+    return myGigOrders.filter(ord => {
+      const st = (ord.status || '').toLowerCase();
+      if (gigSubTab === 'all') return true;
+      if (gigSubTab === 'active') {
+        return ['funded_in_escrow', 'in_progress', 'work_in_progress', 'revision', 'revision_requested'].includes(st);
+      }
+      if (gigSubTab === 'delivered') {
+        return st === 'delivered';
+      }
+      if (gigSubTab === 'completed') {
+        return st === 'completed';
+      }
+      if (gigSubTab === 'pending') {
+        return st === 'payment_pending' || st === 'pending';
+      }
+      if (gigSubTab === 'declined') {
+        return st === 'cancelled' || st === 'refunded' || st === 'disputed';
+      }
       return true;
-    }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [myProjects, projectFilter, searchQuery]);
+    });
+  }, [myGigOrders, gigSubTab]);
 
-  // Offers tab data
-  const myOffers = useMemo(() => {
-    // Offers where the order belongs to the buyer
-    const myOrderIds = new Set(myWorkstreams.map(o => o.id));
-    return offers.filter(of => myOrderIds.has(of.orderId)).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [offers, myWorkstreams]);
+  // Sidebar Statistics matching UserActivitySummarySidebar structure
+  const projectStats = useMemo(() => {
+    const myProjectIdSet = new Set(myProjects.map(p => p.id));
+    const liveProposalCount = proposals.filter(
+      pr => myProjectIdSet.has(pr.projectId) && pr.status === 'pending'
+    ).length;
+    const pendingProposalsCount = Math.max(
+      liveProposalCount,
+      myProjects.reduce((sum, p) => sum + (p.proposalsCount || 0), 0)
+    );
+    const awardedCount = myWorkstreams.length;
+    const inProgressCount = myWorkstreams.filter(o =>
+      ['funded_in_escrow', 'in_progress', 'work_in_progress', 'delivered', 'revision', 'revision_requested'].includes(
+        o.status
+      )
+    ).length;
+    const totalSpent = myWorkstreams
+      .filter(o => o.status !== 'cancelled' && (o.status as string) !== 'refunded')
+      .reduce((sum, o) => sum + Number(o.amount || 0), 0);
 
-  // Activity Summary Statistics
-  const summary = useMemo(() => {
-    const posted = myProjects.length;
-    const awarded = myWorkstreams.length; // Count workstreams started
-    const inProgress = myWorkstreams.filter(o => ['funded_in_escrow', 'in_progress', 'delivered', 'revision'].includes(o.status)).length;
-    const pendingProposals = myProjects.reduce((sum, p) => sum + (p.proposalsCount || 0), 0);
-    const paidOut = myWorkstreams.filter(o => o.status === 'completed').reduce((sum, o) => sum + (o.amount || 0), 0);
+    return {
+      pendingProposalsCount,
+      awardedCount,
+      inProgressCount,
+      totalSpent
+    };
+  }, [myProjects, myWorkstreams, proposals]);
 
-    return { posted, awarded, inProgress, pendingProposals, paidOut };
-  }, [myProjects, myWorkstreams]);
+  const gigStats = useMemo(() => {
+    const orderedCount = myGigOrders.length;
+    const activeCount = myGigOrders.filter(o =>
+      ['funded_in_escrow', 'in_progress', 'work_in_progress', 'delivered', 'revision', 'revision_requested'].includes(
+        o.status
+      )
+    ).length;
+    const completedCount = myGigOrders.filter(o => o.status === 'completed').length;
+    const totalSpent = myGigOrders
+      .filter(o => o.status !== 'cancelled' && (o.status as string) !== 'refunded')
+      .reduce((sum, o) => sum + Number(o.amount || 0), 0);
 
-  const getStatusColor = (status: string) => {
-    switch (status.toLowerCase()) {
-      case 'open':
-      case 'published': return 'bg-emerald-100 text-emerald-700 border-emerald-200';
-      case 'in_progress':
-      case 'funded_in_escrow': return 'bg-blue-100 text-blue-700 border-blue-200';
-      case 'completed': return 'bg-slate-100 text-slate-700 border-slate-200';
-      case 'suspended':
-      case 'unpublished': return 'bg-slate-100 text-slate-500 border-slate-200';
-      default: return 'bg-slate-100 text-slate-600 border-slate-200';
+    return {
+      orderedCount,
+      activeCount,
+      completedCount,
+      totalSpent
+    };
+  }, [myGigOrders]);
+
+  const projectSubTabs: { id: ProjectSubTab; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'open_proposals', label: 'Open for Proposals' },
+    { id: 'in_progress', label: 'In progress' },
+    { id: 'completed', label: 'Completed' }
+  ];
+
+  const gigSubTabs: { id: GigSubTab; label: string }[] = [
+    { id: 'all', label: 'All' },
+    { id: 'active', label: 'Active' },
+    { id: 'delivered', label: 'Delivered' },
+    { id: 'completed', label: 'Completed' },
+    { id: 'pending', label: 'Pending' },
+    { id: 'declined', label: 'Declined' }
+  ];
+
+  const renderOrderCornerRibbon = (status: string) => {
+    const normalized = (status || 'in_progress').toLowerCase();
+    let label = 'ACTIVE';
+    let bgClass = 'bg-emerald-600';
+
+    if (normalized === 'completed') {
+      label = 'COMPLETED';
+      bgClass = 'bg-emerald-600';
+    } else if (normalized === 'delivered') {
+      label = 'DELIVERED';
+      bgClass = 'bg-amber-500';
+    } else if (normalized === 'payment_pending' || normalized === 'pending') {
+      label = 'PENDING';
+      bgClass = 'bg-amber-500';
+    } else if (normalized === 'cancelled' || normalized === 'refunded') {
+      label = 'DECLINED';
+      bgClass = 'bg-rose-600';
     }
+
+    return (
+      <div
+        className={`absolute -left-7 top-2.5 w-24 -rotate-45 text-center py-0.5 text-[9px] font-bold uppercase tracking-wider text-white shadow-xs pointer-events-none ${bgClass}`}
+      >
+        {label}
+      </div>
+    );
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10 font-sans">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-10">
-        <div>
-          <h1 className="text-3xl font-black text-slate-900 tracking-tight flex items-center gap-3">
-            <Layout className="w-8 h-8 text-indigo-600" />
-            My Buyer Activity
-          </h1>
-          <p className="text-slate-500 mt-1">Manage your project requests, proposals, and ongoing collaborations.</p>
+    <div className="max-w-7xl mx-auto py-4 font-sans">
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed top-6 right-6 z-50 bg-slate-900 text-white px-5 py-3 rounded-xl shadow-xl flex items-center gap-3 border border-slate-800 text-xs font-semibold">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span>{toastMessage}</span>
         </div>
+      )}
 
-        <button 
-          onClick={() => navigate('/post-project')}
-          className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition-all shadow-md shadow-indigo-600/20"
-        >
-          <PlusCircle className="w-5 h-5" />
-          <span>Post New Project</span>
-        </button>
-      </div>
+      {/* Main 2-Column Layout with Fiverr-aligned site styling (Identical to FreelancerActivityView) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        {/* Left Main Content Area */}
+        <div className="lg:col-span-8 bg-white border border-slate-200/90 rounded-2xl p-6 sm:p-8 shadow-xs">
+          {/* Header Row */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+            <div>
+              <h1 className="text-2xl sm:text-[26px] font-bold text-slate-900 tracking-tight leading-tight">
+                My Buyer Activity
+              </h1>
+              <p className="text-xs text-slate-500 mt-1">
+                Manage your ordered gigs, project proposals, and escrow workstreams.
+              </p>
+            </div>
 
-      <div className="flex flex-col lg:flex-row gap-8 items-start">
-        {/* MAIN ACTIVITY AREA */}
-        <div className="flex-1 w-full space-y-6">
-          {/* TABS */}
-          <div className="bg-white rounded-2xl border border-slate-200/80 p-1 flex items-center gap-1 shadow-xs max-w-fit">
-            <button 
-              onClick={() => setActiveTab('projects')}
-              className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all ${activeTab === 'projects' ? 'bg-indigo-50 text-indigo-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}
+            {activeSection === 'gigs' ? (
+              <button
+                onClick={() => navigate('/gigs')}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg shadow-xs transition-colors cursor-pointer self-start sm:self-auto"
+              >
+                <PlusCircle className="w-4 h-4" />
+                <span>Order New Gig</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => navigate('/post-project')}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-lg shadow-xs transition-colors cursor-pointer self-start sm:self-auto"
+              >
+                <PlusCircle className="w-4 h-4" />
+                <span>Post New Project</span>
+              </button>
+            )}
+          </div>
+
+          {/* Primary Connected Tabs: PROJECTS | GIGS */}
+          <div className="grid grid-cols-2 mb-6 bg-slate-100/80 p-1 rounded-xl border border-slate-200/80">
+            <button
+              type="button"
+              onClick={() => setActiveSection('projects')}
+              className={`py-2.5 text-center text-xs font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer ${
+                activeSection === 'projects'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              }`}
             >
-              Projects
+              PROJECTS
             </button>
-            <button 
-              onClick={() => setActiveTab('offers')}
-              className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all ${activeTab === 'offers' ? 'bg-indigo-50 text-indigo-700 shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}
+            <button
+              type="button"
+              onClick={() => setActiveSection('gigs')}
+              className={`py-2.5 text-center text-xs font-bold uppercase tracking-wider rounded-lg transition-all cursor-pointer ${
+                activeSection === 'gigs'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              }`}
             >
-              Offers
+              GIGS
             </button>
           </div>
 
-          {activeTab === 'projects' ? (
-            <>
-              {/* FILTERS AND SEARCH */}
-              <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs space-y-5">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-                    {[
-                      'All Projects', 
-                      'Open for Proposals', 
-                      'Work in Progress', 
-                      'Completed', 
-                      'Pending', 
-                      'Declined', 
-                      'Archived'
-                    ].map(f => (
-                      <button
-                        key={f}
-                        onClick={() => setProjectFilter(f)}
-                        className={`shrink-0 px-4 py-1.5 rounded-full text-xs font-bold border transition-all ${projectFilter === f ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm' : 'bg-slate-50 text-slate-600 border-slate-200 hover:border-slate-300'}`}
-                      >
-                        {f}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+          {/* Sub-filter Navigation Bar (Fiverr Tab Bar Style) */}
+          {activeSection === 'projects' ? (
+            <div className="border-b border-slate-200 px-1 flex flex-wrap items-center gap-6 mb-2">
+              {projectSubTabs.map(tab => {
+                const isActive = projectSubTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setProjectSubTab(tab.id)}
+                    className={`py-3 text-[13px] transition-colors border-b-2 -mb-px cursor-pointer ${
+                      isActive
+                        ? 'border-emerald-600 text-emerald-600 font-bold'
+                        : 'border-transparent text-slate-500 hover:text-slate-800 font-medium'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="border-b border-slate-200 px-1 flex flex-wrap items-center gap-6 mb-2">
+              {gigSubTabs.map(tab => {
+                const isActive = gigSubTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setGigSubTab(tab.id)}
+                    className={`py-3 text-[13px] transition-colors border-b-2 -mb-px cursor-pointer ${
+                      isActive
+                        ? 'border-emerald-600 text-emerald-600 font-bold'
+                        : 'border-transparent text-slate-500 hover:text-slate-800 font-medium'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
-                <div className="relative">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-4 top-1/2 -translate-y-1/2" />
-                  <input 
-                    type="text" 
-                    placeholder="Search your projects by title or description..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all"
-                  />
-                </div>
+          {/* Tab Content */}
+          {activeSection === 'projects' ? (
+            filteredProjectItems.length === 0 ? (
+              <div className="text-center py-16 text-slate-500 text-sm space-y-1.5 bg-white font-sans">
+                <p className="font-bold text-slate-900 text-base">
+                  No projects found under &ldquo;{projectSubTabs.find(t => t.id === projectSubTab)?.label || 'All'}&rdquo;.
+                </p>
+                <p className="text-slate-500 text-sm">
+                  Projects you have posted, ordered services, and active escrow workstreams will appear here.
+                </p>
               </div>
+            ) : (
+              <div className="bg-white divide-y divide-slate-200/80 font-sans">
+                {filteredProjectItems.map(item => {
+                  const isCompleted = item.statusCategory === 'completed';
+                  const handleAction = () => {
+                    if (item.order) {
+                      handleOpenOrderWorkstream(item.order);
+                    } else if (item.projectId) {
+                      navigate(`/projects/${item.projectId}`);
+                    }
+                  };
 
-              {/* PROJECT LIST */}
-              <div className="space-y-4">
-                {filteredProjects.length === 0 ? (
-                  <div className="bg-white rounded-3xl border border-slate-200/80 p-16 text-center space-y-4">
-                    <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto text-slate-300">
-                      <Briefcase className="w-10 h-10" />
-                    </div>
-                    <h3 className="text-xl font-bold text-slate-900">No projects found</h3>
-                    <p className="text-slate-500 max-w-sm mx-auto">You haven't posted any projects matching the selected filter. Post your first project request to find top freelancers.</p>
-                    <button 
-                      onClick={() => navigate('/post-project')}
-                      className="px-6 py-2.5 bg-slate-900 text-white font-bold rounded-xl text-sm"
+                  return (
+                    <div
+                      key={item.id}
+                      className="py-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 transition-colors"
                     >
-                      Post Your First Project
-                    </button>
-                  </div>
-                ) : (
-                  filteredProjects.map(proj => (
-                    <div key={proj.id} className="bg-white rounded-2xl border border-slate-200 hover:border-indigo-300 hover:shadow-lg transition-all p-6 group">
-                      <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
-                        <div className="space-y-3 flex-1">
-                          <div className="flex flex-wrap items-center gap-3">
-                            <span className={`px-2.5 py-0.5 rounded-md text-[10px] font-black uppercase border ${getStatusColor(proj.status)}`}>
-                              {proj.status.replace('_', ' ')}
-                            </span>
-                            <span className="text-[11px] text-slate-400 font-medium">Posted on {proj.createdAt}</span>
-                            <span className="text-[11px] text-slate-400 font-medium">• Ref: {proj.id.split('_')[1]?.toUpperCase() || proj.id}</span>
+                      {/* Left Side: Title + Metadata Row (Identical to UserFreelanceProjectsList) */}
+                      <div className="space-y-3 flex-1 min-w-0">
+                        <button
+                          type="button"
+                          onClick={handleAction}
+                          className="text-left text-base font-bold text-slate-900 hover:text-emerald-600 transition-colors leading-snug cursor-pointer block"
+                        >
+                          {item.title}
+                        </button>
+
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[13px] text-slate-500">
+                          <div
+                            onClick={() => {
+                              if (item.counterpartyUsername) {
+                                navigate(`/${item.counterpartyUsername}`);
+                              }
+                            }}
+                            className={`inline-flex items-center gap-2 text-slate-800 font-semibold ${
+                              item.counterpartyUsername ? 'hover:text-emerald-600 cursor-pointer' : ''
+                            }`}
+                          >
+                            <img
+                              src={item.counterpartyAvatar || DEFAULT_AVATAR}
+                              alt={item.counterpartyName}
+                              className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
+                              onError={e => {
+                                (e.target as HTMLImageElement).src = DEFAULT_AVATAR;
+                              }}
+                            />
+                            <span>{item.counterpartyName}</span>
                           </div>
 
-                          <h3 
-                            onClick={() => navigate(`/projects/${proj.id}`)}
-                            className="text-lg font-bold text-slate-900 hover:text-indigo-600 transition-colors cursor-pointer"
-                          >
-                            {proj.title}
-                          </h3>
+                          <span>
+                            {item.dateLabel}{' '}
+                            <strong className="font-semibold text-slate-700">{item.dateValue}</strong>
+                          </span>
 
-                          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-                            <div className="flex items-center gap-1.5 text-slate-600">
-                              <DollarSign className="w-4 h-4 text-emerald-600" />
-                              <span className="font-bold text-slate-900">${proj.budgetMin} - ${proj.budgetMax}</span>
-                            </div>
-                            <div className="flex items-center gap-1.5 text-slate-600">
-                              <FileText className="w-4 h-4 text-indigo-500" />
-                              <span className="font-bold text-slate-900">{proj.proposalsCount} Proposals</span>
-                            </div>
-                            {myWorkstreams.some(o => o.projectId === proj.id) && (
-                              <div className="flex items-center gap-1.5 text-slate-600">
-                                <Users className="w-4 h-4 text-blue-500" />
-                                <span className="font-bold text-slate-900">Hired</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
+                          <span>
+                            {item.amountLabel}{' '}
+                            <strong className="font-bold text-slate-900">
+                              ${item.amountValue.toLocaleString()}
+                            </strong>
+                          </span>
 
-                        <div className="shrink-0 flex flex-col gap-2 min-w-[140px]">
-                          <button 
-                            onClick={() => navigate(`/projects/${proj.id}`)}
-                            className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition-colors shadow-sm"
-                          >
-                            MANAGE PROJECT
-                          </button>
-                          
-                          {myWorkstreams.filter(o => o.projectId === proj.id).map(ord => (
-                            <button 
-                              key={ord.id}
-                              onClick={() => navigate(`/messages/${ord.id}`)}
-                              className="w-full py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-[10px] rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                            >
-                              <MessageSquare className="w-3 h-3" />
-                              <span>WORKSTREAM: {ord.sellerUsername || 'Freelancer'}</span>
-                            </button>
-                          ))}
+                          <span className="inline-flex items-center gap-1 text-slate-500">
+                            <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span>{item.location}</span>
+                          </span>
+
+                          <span className="text-slate-400 font-medium">#{item.refNumber}</span>
+
+                          {isCompleted ? (
+                            <span className="text-emerald-600 font-semibold">· Completed</span>
+                          ) : item.statusBadgeText ? (
+                            <span className="text-emerald-600 font-semibold">· {item.statusBadgeText}</span>
+                          ) : null}
                         </div>
                       </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </>
-          ) : (
-            /* OFFERS TAB CONTENT */
-            <div className="space-y-4">
-              {myOffers.length === 0 ? (
-                <div className="bg-white rounded-3xl border border-slate-200/80 p-16 text-center space-y-4">
-                  <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mx-auto text-slate-300">
-                    <Tag className="w-10 h-10" />
-                  </div>
-                  <h3 className="text-xl font-bold text-slate-900">No offers yet</h3>
-                  <p className="text-slate-500 max-w-sm mx-auto">Offers, invoices, and deposit requests from freelancers will appear here.</p>
-                </div>
-              ) : (
-                myOffers.map(offer => {
-                  const order = myWorkstreams.find(o => o.id === offer.orderId);
-                  return (
-                    <div key={offer.id} className="bg-white rounded-2xl border border-slate-200 p-6 hover:shadow-md transition-all">
-                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div className="space-y-1.5">
-                          <div className="flex items-center gap-2">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
-                              offer.status === 'pending' ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                              offer.status === 'accepted' || offer.status === 'paid' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                              'bg-slate-100 text-slate-500 border-slate-200'
-                            }`}>
-                              {offer.kind}: {offer.status}
-                            </span>
-                            <span className="text-xs text-slate-400">#{offer.number}</span>
-                          </div>
-                          <h4 className="font-bold text-slate-900">{offer.title}</h4>
-                          <p className="text-xs text-slate-500 line-clamp-1">For Workstream: {order?.title || 'Unknown Order'}</p>
+
+                      {/* Right Side: Amount + VIEW PROGRESS Button */}
+                      <div className="flex sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto shrink-0 sm:min-w-[155px] gap-2.5">
+                        <div className="text-left sm:text-right leading-none">
+                          <span className="block text-xl font-bold text-slate-900 tracking-tight">
+                            ${formatCompactAmount(item.rightAmount)}
+                          </span>
+                          <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">
+                            {item.rightLabel}
+                          </span>
                         </div>
 
-                        <div className="flex items-center gap-6">
-                          <div className="text-right">
-                            <span className="block text-[10px] text-slate-400 font-black uppercase">Amount</span>
-                            <span className="text-lg font-black text-indigo-600">${offer.amount}</span>
-                          </div>
-                          
-                          <button 
-                            onClick={() => navigate(`/messages/${offer.orderId}`)}
-                            className="px-5 py-2.5 bg-slate-900 text-white font-bold text-xs rounded-xl shadow-sm hover:bg-slate-800 transition-colors flex items-center gap-2"
-                          >
-                            <span>VIEW IN CHAT</span>
-                            <ArrowRight className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
+                        <button
+                          type="button"
+                          onClick={handleAction}
+                          className="px-4 py-2 bg-white hover:bg-emerald-50/50 text-slate-700 hover:text-emerald-600 border border-slate-200 hover:border-emerald-600 rounded-lg text-xs font-bold uppercase tracking-wider transition-all shadow-2xs cursor-pointer whitespace-nowrap"
+                        >
+                          VIEW PROGRESS
+                        </button>
                       </div>
                     </div>
                   );
-                })
-              )}
+                })}
+              </div>
+            )
+          ) : filteredGigOrders.length === 0 ? (
+            <div className="text-center py-16 text-slate-500 text-sm space-y-1.5 bg-white font-sans">
+              <p className="font-bold text-slate-900 text-base">
+                No gigs found under &ldquo;{gigSubTabs.find(t => t.id === gigSubTab)?.label || 'All'}&rdquo;.
+              </p>
+              <p className="text-slate-500 text-sm">
+                Order a gig from the marketplace or switch filters above to view your active gig orders.
+              </p>
+            </div>
+          ) : (
+            <div className="bg-white divide-y divide-slate-200/80 font-sans">
+              {filteredGigOrders.map((ord, idx) => {
+                const { sellerName, sellerUsername, sellerAvatar, gigTitle, gigImage, gigUrl, linkedGig } =
+                  resolveOrderSeller(ord);
+                const isCancelled = ord.status === 'cancelled' || (ord.status as string) === 'refunded';
+                const isDropdownOpen = activeDropdownId === ord.id;
+                const ratingPercent = Math.round(((linkedGig?.rating || 5) / 5) * 100);
+                const reviewsCount = linkedGig?.reviewsCount ?? 1;
+                const refNum = toNumericRef(ord.id, idx + 1);
+
+                return (
+                  <div
+                    key={ord.id}
+                    className={`py-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 transition-colors ${
+                      isCancelled ? 'opacity-65' : ''
+                    }`}
+                  >
+                    {/* Left + Middle: Thumbnail and Gig Order Metadata (Identical to UserFreelanceOffersList) */}
+                    <div className="flex items-start gap-4 flex-1 min-w-0">
+                      <div
+                        onClick={() => handleOpenOrderWorkstream(ord)}
+                        className="relative w-28 h-20 sm:w-32 sm:h-[84px] overflow-hidden bg-slate-100 border border-slate-200/90 shrink-0 rounded-lg shadow-2xs cursor-pointer"
+                      >
+                        <img
+                          src={gigImage}
+                          alt={gigTitle}
+                          className={`w-full h-full object-cover ${isCancelled ? 'grayscale' : ''}`}
+                          onError={e => {
+                            (e.target as HTMLImageElement).src = DEFAULT_GIG_IMAGE;
+                          }}
+                        />
+                        {renderOrderCornerRibbon(ord.status)}
+                      </div>
+
+                      <div className="flex-1 min-w-0 flex flex-col justify-between min-h-[76px]">
+                        <div>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenOrderWorkstream(ord)}
+                            className="text-left text-base font-bold text-slate-900 hover:text-emerald-600 transition-colors line-clamp-2 leading-snug cursor-pointer block"
+                          >
+                            {gigTitle}
+                          </button>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-slate-500 mt-2">
+                          <div
+                            onClick={() => navigate(`/${sellerUsername}`)}
+                            className="inline-flex items-center gap-2 text-slate-800 hover:text-emerald-600 font-semibold cursor-pointer"
+                          >
+                            <img
+                              src={sellerAvatar}
+                              alt={sellerName}
+                              className="w-5 h-5 rounded-full object-cover border border-slate-200 shrink-0"
+                              onError={e => {
+                                (e.target as HTMLImageElement).src = DEFAULT_AVATAR;
+                              }}
+                            />
+                            <span>{sellerName}</span>
+                          </div>
+
+                          <span>
+                            Ordered:{' '}
+                            <strong className="font-semibold text-slate-700">
+                              {formatActivityDate(ord.createdAt)}
+                            </strong>
+                          </span>
+
+                          <span className="inline-flex items-center gap-1 text-emerald-600 font-semibold">
+                            <ThumbsUp className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>{ratingPercent}%</span>
+                          </span>
+
+                          <span>
+                            Price:{' '}
+                            <strong className="font-bold text-slate-900">
+                              ${Number(ord.amount || 0).toLocaleString()}
+                            </strong>
+                          </span>
+
+                          <span className="inline-flex items-center gap-1 text-slate-500">
+                            <Heart className="w-3.5 h-3.5 fill-slate-300 text-slate-400" />
+                            <span>{reviewsCount}</span>
+                          </span>
+
+                          <span className="text-slate-400 font-medium">#{refNum}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Right: Amount Counter + Split Button with Small Dropdown at the End */}
+                    <div className="flex sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto shrink-0 self-stretch sm:min-w-[175px] gap-2.5">
+                      <div className="text-left sm:text-right leading-none">
+                        <span className="block text-xl font-bold text-slate-900 tracking-tight">
+                          ${formatCompactAmount(Number(ord.amount || 0))}
+                        </span>
+                        <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">
+                          ESCROW
+                        </span>
+                      </div>
+
+                      {!isCancelled ? (
+                        <div className="relative">
+                          <div
+                            className={`inline-flex items-stretch rounded-lg border overflow-hidden shadow-2xs transition-colors ${
+                              isDropdownOpen
+                                ? 'border-emerald-600 ring-2 ring-emerald-500/15'
+                                : 'border-slate-200 hover:border-slate-300'
+                            } bg-white`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => handleOpenOrderWorkstream(ord)}
+                              className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors cursor-pointer ${
+                                isDropdownOpen
+                                  ? 'text-emerald-600 bg-emerald-50/40'
+                                  : 'text-slate-700 hover:text-emerald-600 hover:bg-slate-50'
+                              }`}
+                            >
+                              VIEW PROGRESS
+                            </button>
+                            <button
+                              type="button"
+                              onClick={e => {
+                                e.stopPropagation();
+                                setActiveDropdownId(prev => (prev === ord.id ? null : ord.id));
+                              }}
+                              aria-label="Gig order actions"
+                              className={`px-2.5 py-2 border-l flex items-center justify-center transition-colors cursor-pointer ${
+                                isDropdownOpen
+                                  ? 'bg-emerald-600 text-white border-emerald-600'
+                                  : 'bg-white hover:bg-slate-50 text-slate-500 hover:text-slate-800 border-slate-200'
+                              }`}
+                            >
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          {isDropdownOpen && (
+                            <div
+                              className="absolute right-0 top-full mt-1.5 w-44 bg-white rounded-xl shadow-lg border border-slate-200/90 py-1.5 z-50 text-[13px] text-slate-700 font-sans"
+                              onClick={e => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => handleOpenOrderWorkstream(ord)}
+                                className="w-full text-left px-4 py-2 hover:bg-slate-50 hover:text-emerald-600 text-slate-700 font-semibold transition-colors cursor-pointer block"
+                              >
+                                View Progress
+                              </button>
+                              {gigUrl && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActiveDropdownId(null);
+                                    navigate(gigUrl);
+                                  }}
+                                  className="w-full text-left px-4 py-2 hover:bg-slate-50 hover:text-emerald-600 text-slate-700 font-semibold transition-colors cursor-pointer block"
+                                >
+                                  View Gig Listing
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setActiveDropdownId(null);
+                                  navigate(`/${sellerUsername}`);
+                                }}
+                                className="w-full text-left px-4 py-2 hover:bg-slate-50 hover:text-emerald-600 text-slate-700 font-semibold transition-colors cursor-pointer block"
+                              >
+                                Freelancer Profile
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="px-3.5 py-1.5 bg-slate-100 text-slate-500 rounded-lg text-xs font-bold uppercase tracking-wider">
+                          Declined
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
 
-        {/* SIDEBAR SUMMARY PANEL */}
-        <aside className="w-full lg:w-80 shrink-0 space-y-6">
-          <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-xs space-y-6">
-            <div className="pb-4 border-b border-slate-100">
-              <h2 className="text-sm font-black text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                <Activity className="w-4 h-4 text-indigo-600" />
-                My Activity Summary
-              </h2>
+        {/* Right Column: MY ACTIVITY SUMMARY (Identical to UserActivitySummarySidebar) */}
+        <div className="lg:col-span-4">
+          <div className="bg-white border border-slate-200/80 rounded-2xl p-6 shadow-xs space-y-5 font-sans">
+            <div className="flex items-center gap-2.5 pb-3.5 border-b border-slate-100">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-600 ring-4 ring-emerald-50 inline-block shrink-0" />
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900">
+                MY ACTIVITY SUMMARY
+              </h3>
             </div>
 
-            <div className="space-y-5">
-              <div className="flex items-center justify-between group">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-slate-50 text-slate-400 flex items-center justify-center group-hover:bg-indigo-50 group-hover:text-indigo-600 transition-colors">
-                    <Briefcase className="w-5 h-5" />
-                  </div>
-                  <span className="text-sm font-bold text-slate-600">Projects Posted</span>
+            {activeSection === 'projects' ? (
+              <div className="space-y-3.5 text-sm">
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Projects with pending Proposals</span>
+                  <span className="font-bold text-slate-900">{projectStats.pendingProposalsCount}</span>
                 </div>
-                <span className="text-lg font-black text-slate-900">{summary.posted}</span>
-              </div>
-
-              <div className="flex items-center justify-between group">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-slate-50 text-slate-400 flex items-center justify-center group-hover:bg-emerald-50 group-hover:text-emerald-600 transition-colors">
-                    <CheckCircle2 className="w-5 h-5" />
-                  </div>
-                  <span className="text-sm font-bold text-slate-600">Projects Awarded</span>
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Projects & Orders awarded</span>
+                  <span className="font-bold text-slate-900">{projectStats.awardedCount}</span>
                 </div>
-                <span className="text-lg font-black text-slate-900">{summary.awarded}</span>
-              </div>
-
-              <div className="flex items-center justify-between group">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-slate-50 text-slate-400 flex items-center justify-center group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors">
-                    <TrendingUp className="w-5 h-5" />
-                  </div>
-                  <span className="text-sm font-bold text-slate-600">Work in Progress</span>
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Orders in progress</span>
+                  <span className="font-bold text-slate-900">{projectStats.inProgressCount}</span>
                 </div>
-                <span className="text-lg font-black text-slate-900">{summary.inProgress}</span>
-              </div>
-
-              <div className="flex items-center justify-between group">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-slate-50 text-slate-400 flex items-center justify-center group-hover:bg-amber-50 group-hover:text-amber-600 transition-colors">
-                    <Clock className="w-5 h-5" />
-                  </div>
-                  <span className="text-sm font-bold text-slate-600">Pending Proposals</span>
-                </div>
-                <span className="text-lg font-black text-slate-900">{summary.pendingProposals}</span>
-              </div>
-
-              <div className="pt-4 border-t border-slate-100 flex items-center justify-between">
-                <div>
-                  <span className="block text-[10px] text-slate-400 font-black uppercase">Total Paid Out</span>
-                  <span className="text-2xl font-black text-emerald-600">${summary.paidOut.toLocaleString()}</span>
-                </div>
-                <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
-                  <DollarSign className="w-6 h-6" />
+                <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                  <span className="font-semibold text-slate-700">Total Escrow / Spent</span>
+                  <span className="font-bold text-emerald-600 text-base">
+                    ${projectStats.totalSpent.toLocaleString()}
+                  </span>
                 </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-3.5 text-sm">
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Gigs I ordered</span>
+                  <span className="font-bold text-slate-900">{gigStats.orderedCount}</span>
+                </div>
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Active Gig Orders</span>
+                  <span className="font-bold text-slate-900">{gigStats.activeCount}</span>
+                </div>
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Completed Gig Orders</span>
+                  <span className="font-bold text-slate-900">{gigStats.completedCount}</span>
+                </div>
+                <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                  <span className="font-semibold text-slate-700">Total Escrow / Spent</span>
+                  <span className="font-bold text-emerald-600 text-base">
+                    ${gigStats.totalSpent.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
-
-          {/* Quick Tips / Actions Card */}
-          <div className="bg-indigo-600 rounded-3xl p-6 text-white shadow-lg shadow-indigo-600/20 space-y-4">
-            <h3 className="font-bold flex items-center gap-2">
-              <Zap className="w-5 h-5 text-indigo-200 fill-indigo-200" />
-              Pro Buyer Tip
-            </h3>
-            <p className="text-xs text-indigo-100 leading-relaxed">
-              Accepting multiple proposals for the same project allows you to hire a team of specialists. Each hire starts a dedicated secure escrow workstream.
-            </p>
-            <button 
-              onClick={() => navigate('/support')}
-              className="w-full py-2.5 bg-white/10 hover:bg-white/20 rounded-xl text-xs font-bold transition-colors border border-white/20"
-            >
-              Learn About Escrow
-            </button>
-          </div>
-        </aside>
+        </div>
       </div>
     </div>
   );
