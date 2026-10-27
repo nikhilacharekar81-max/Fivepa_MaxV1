@@ -54,25 +54,31 @@ export async function handlePayoutRequest(req: Request, res: Response) {
     if (user.status === 'frozen') {
       return res.status(403).json({ error: 'User account is frozen. Financial transactions are restricted.' });
     }
-    await financialTransactionService.ensureWallet(freelancerId);
+    await financialTransactionService.ensureWallet({
+      userId: freelancerId,
+      name: user.name,
+      email: user.email,
+      role: user.role || 'freelancer'
+    });
 
-    const idempotencyKey = String(req.body?.idempotencyKey || req.headers['x-idempotency-key'] || '').trim();
+    const idempotencyKey = String(req.body?.idempotencyKey || req.body?.requestKey || req.headers['x-idempotency-key'] || '').trim();
     if (idempotencyKey) {
       const pool = postgresStore.getPool();
       const checkRes = await pool.query(
-        "SELECT result FROM financial_idempotency WHERE idempotency_key = $1 AND operation = 'requestPayout' AND status = 'completed'",
-        [idempotencyKey]
+        "SELECT result FROM financial_idempotency WHERE key = $1 AND operation = 'requestPayout' AND status = 'completed' AND request_fingerprint->>'freelancerId' = $2",
+        [idempotencyKey, freelancerId]
       );
       if (checkRes.rows.length > 0) {
         const resVal = typeof checkRes.rows[0].result === 'string' ? JSON.parse(checkRes.rows[0].result) : checkRes.rows[0].result;
-        const activePayoutId = resVal.payoutId;
-        const record = await store.getPayoutById(activePayoutId);
+        const activePayoutId = resVal?.payoutId || resVal?.payout?.id;
+        const record = activePayoutId ? await store.getPayoutById(activePayoutId) : null;
         const newBalance = (await financialRepository.getWalletBalance(freelancerId)) ?? Number(user.walletBalance || 0);
         return res.status(200).json({
           success: true,
+          replayed: true,
           newBalance,
           payout: record,
-          ...record
+          ...(record || {})
         });
       }
     }
@@ -91,7 +97,7 @@ export async function handlePayoutRequest(req: Request, res: Response) {
     }
 
     const numAmount = Number(req.body?.amount);
-    if (!Number.isFinite(numAmount) || numAmount <= 0 || Math.round(numAmount * 100) !== numAmount * 100) {
+    if (!Number.isFinite(numAmount) || numAmount <= 0 || Math.abs(Math.round(numAmount * 100) - numAmount * 100) > 1e-6) {
       return res.status(400).json({ error: 'Please enter a valid withdrawal amount greater than $0.00' });
     }
 
@@ -105,7 +111,7 @@ export async function handlePayoutRequest(req: Request, res: Response) {
     const walletRes = await pool.query('SELECT available_balance, status, user_role FROM wallets WHERE user_id = $1', [freelancerId]);
     if (walletRes.rows.length > 0) {
       const wallet = walletRes.rows[0];
-      if (wallet.status === 'frozen' || wallet.status === 'suspended') {
+      if (wallet.status === 'frozen' || wallet.status === 'suspended' || wallet.status === 'restricted') {
         return res.status(400).json({ error: `Cannot request payout from a ${wallet.status} wallet.` });
       }
       if (wallet.user_role && wallet.user_role !== 'freelancer') {
@@ -136,7 +142,7 @@ export async function handlePayoutRequest(req: Request, res: Response) {
 
     // Deterministic payoutId if idempotencyKey provided, else random
     const id = idempotencyKey
-      ? ('pay_' + createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 12))
+      ? ('pay_' + createHash('sha256').update(`${freelancerId}:${idempotencyKey}`).digest('hex').slice(0, 12))
       : ('pay_' + randomUUID().slice(0, 8));
 
     const accountDetails = String(req.body?.accountDetails || 'Primary Bank Account').slice(0, 500);
@@ -160,13 +166,13 @@ export async function handlePayoutRequest(req: Request, res: Response) {
         amount: payoutResult.amount ?? numAmount,
         method: rawMethod as Payout['method'],
         status: 'pending',
-        createdAt: new Date().toISOString().substring(0, 10),
+        createdAt: new Date().toISOString(),
         accountDetails: payoutResult.accountDetails || accountDetails
       };
       await store.savePayout(record);
     }
 
-    await syncUserBalances();
+    await syncUserBalances([freelancerId]);
 
     registerAuditLog({
       id: 'log_' + Date.now(),
@@ -214,7 +220,6 @@ export const approvePayout = async (req: Request, res: Response) => {
       return mapPayoutRow(updated.rows[0]);
     });
 
-    await store.savePayout(updatedPayout);
     payoutAudit(req, 'PAYOUT_APPROVED', updatedPayout, `Approved payout of $${updatedPayout.amount} via ${updatedPayout.method} for freelancer ${updatedPayout.freelancerId}`);
     res.json(updatedPayout);
   } catch (err: any) {
@@ -247,12 +252,9 @@ export const processPayout = async (req: Request, res: Response) => {
     });
     const p = await store.getPayoutById(payoutId);
     if (p) {
-      p.status = 'processed';
-      p.processedAt = new Date().toISOString();
-      await store.savePayout(p);
       payoutAudit(req, 'PAYOUT_PROCESSED', p, `Processed payout of $${p.amount} via ${p.method}`);
     }
-    await syncUserBalances();
+    await syncUserBalances([preRow.freelancer_id]);
     res.json({ success: true, payout: p, journal, ...(p || {}) });
   } catch (err: any) {
     const status = typeof err?.status === 'number' ? err.status : 400;
@@ -272,11 +274,10 @@ export const rejectPayout = async (req: Request, res: Response) => {
       reason: String(req.body?.reason || 'Administrative rejection'),
       actor: adminActor(req)
     });
-    p.status = 'cancelled';
-    await store.savePayout(p);
-    payoutAudit(req, 'PAYOUT_REJECTED', p, `Rejected payout of $${p.amount}; funds returned to wallet`);
-    await syncUserBalances();
-    res.json({ success: true, payout: p, ...p });
+    const updated = (await store.getPayoutById(p.id)) || { ...p, status: 'cancelled' as const };
+    payoutAudit(req, 'PAYOUT_REJECTED', updated, `Rejected payout of $${updated.amount}; funds returned to wallet`);
+    await syncUserBalances([p.freelancerId]);
+    res.json({ success: true, payout: updated, ...updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -308,11 +309,9 @@ export const failPayout = async (req: Request, res: Response) => {
     });
     const p = await store.getPayoutById(payoutId);
     if (p) {
-      p.status = 'failed';
-      await store.savePayout(p);
       payoutAudit(req, 'PAYOUT_FAILED', p, `Payout of $${p.amount} failed; funds returned to wallet`);
     }
-    await syncUserBalances();
+    await syncUserBalances([currentPayout.freelancer_id]);
     res.json(p || mapPayoutRow(currentPayout));
   } catch (err: any) {
     const status = typeof err?.status === 'number' ? err.status : 400;
@@ -332,11 +331,9 @@ export const retryPayout = async (req: Request, res: Response) => {
     await financialTransactionService.retryPayout({ payoutId, actor: adminActor(req) });
     const updated = await store.getPayoutById(payoutId);
     if (updated) {
-      updated.status = 'pending';
-      await store.savePayout(updated);
       payoutAudit(req, 'PAYOUT_RETRIED', updated, `Re-queued failed payout of $${updated.amount}`);
     }
-    await syncUserBalances();
+    await syncUserBalances([p.freelancer_id]);
     res.json(updated || mapPayoutRow(p));
   } catch (err: any) {
     const status = typeof err?.status === 'number' ? err.status : 400;

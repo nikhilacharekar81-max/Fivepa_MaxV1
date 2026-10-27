@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import {
   DEFAULT_SITE_SETTINGS,
   store,
@@ -11,6 +11,7 @@ import {
   type WorkstreamOffer
 } from '../store.js';
 import { calculateOrderFees } from '../domains/finance/fees.js';
+import { checkOrRecordIdempotency, recordIdempotencyResult } from '../domains/finance/index.js';
 import { postgresStore } from '../db/postgresStore.js';
 import { financialRepository } from '../services/financialService.js';
 import {
@@ -201,7 +202,19 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
       return res.status(400).json({ error: 'Order cannot specify both gigId and projectId.' });
     }
 
-    const id = 'ord_' + randomUUID().slice(0, 12);
+    const rawIdempKey = String(
+      req.headers['idempotency-key'] ||
+      req.headers['x-idempotency-key'] ||
+      req.body?.idempotencyKey ||
+      req.body?.requestKey ||
+      req.body?.clientRequestId ||
+      ''
+    ).trim();
+    const scopedIdempKey = rawIdempKey ? `ORD-CREATE:${buyerId}:${rawIdempKey}` : '';
+
+    const id = scopedIdempKey
+      ? 'ord_' + createHash('sha256').update(scopedIdempKey).digest('hex').slice(0, 12)
+      : 'ord_' + randomUUID().slice(0, 12);
     const today = new Date().toISOString().split('T')[0];
     let rawAmount = Number(req.body?.amount);
     const isInquiry = rawAmount === 0 && /^inquiry:/i.test(title);
@@ -253,6 +266,31 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
     if (!isInquiry) {
       if (!Number.isFinite(rawAmount) || rawAmount < 1.00) {
         return res.status(400).json({ error: 'Minimum order amount is $1.00.' });
+      }
+    }
+
+    const orderPayloadFingerprint = {
+      buyerId,
+      sellerId,
+      title,
+      gigId: req.body?.gigId || null,
+      projectId: req.body?.projectId || null,
+      proposalId: req.body?.proposalId || null,
+      extraIds: Array.isArray(req.body?.extraIds) ? [...req.body.extraIds].map(String).sort() : null,
+      amount: isInquiry ? 0 : rawAmount,
+      isInquiry
+    };
+
+    if (scopedIdempKey) {
+      const idempCheck = await postgresStore.executeInTransaction(async (client) => {
+        return checkOrRecordIdempotency(client, scopedIdempKey, 'createOrder', orderPayloadFingerprint);
+      });
+      if (idempCheck.replayed) {
+        return res.status(201).json(idempCheck.result);
+      }
+      const existingOrder = await store.getOrder(id);
+      if (existingOrder && (existingOrder.status === 'funded_in_escrow' || existingOrder.status === 'in_progress')) {
+        return res.status(201).json(enrichOrderWithServiceInfo(existingOrder));
       }
     }
 
@@ -361,13 +399,20 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
           amount: rawAmount,
           buyerId,
           sellerId,
-          actor: `user:${buyerId}`
+          actor: `user:${buyerId}`,
+          idempotencyKey: scopedIdempKey ? `${scopedIdempKey}:fund` : undefined
         });
 
         enriched.status = 'funded_in_escrow';
         await store.saveOrder(enriched);
         await syncUserBalances();
       } catch (fundingErr: any) {
+        if (scopedIdempKey) {
+          await postgresStore.getPool().query(
+            "DELETE FROM financial_idempotency WHERE key = $1 AND operation = 'createOrder' AND status = 'in_progress'",
+            [scopedIdempKey]
+          );
+        }
         const escCheck = await postgresStore.getPool().query('SELECT 1 FROM escrows WHERE order_id = $1', [id]);
         if (escCheck.rows.length === 0) {
           await postgresStore.getPool().query('DELETE FROM orders WHERE id = $1', [id]);
@@ -386,6 +431,12 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
 
         return res.status(400).json({ error: fundingErr.message || 'Failed to fund escrow. Order creation rolled back.' });
       }
+    }
+
+    if (scopedIdempKey) {
+      await postgresStore.executeInTransaction(async (client) => {
+        await recordIdempotencyResult(client, scopedIdempKey, 'createOrder', enriched, orderPayloadFingerprint);
+      });
     }
 
     if (isInquiry) {
@@ -409,7 +460,9 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
 
     res.status(201).json(enriched);
   } catch (err: any) {
-    res.status(err.status || 400).json({ error: err.message });
+    const msg = String(err?.message || 'Failed to create order');
+    const status = err?.status || (/conflict|idempotency/i.test(msg) ? 409 : 400);
+    res.status(status).json({ error: msg });
   }
 });
 

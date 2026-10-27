@@ -48,6 +48,8 @@ export interface OrderFeeBreakdown {
   };
 }
 
+export const MAX_ORDER_AMOUNT = 1_000_000;
+
 /** Percent of an integer-cent amount, rounded half-up to a whole cent. */
 export function percentOfCents(cents: number, percent: number): number {
   const bps = Math.round(percent * 100); // 1% -> 100 basis points
@@ -55,21 +57,38 @@ export function percentOfCents(cents: number, percent: number): number {
 }
 
 export function toCents(amount: number): number {
-  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) {
-    throw new Error('Amount must be a non-negative number.');
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || Number.isNaN(amount) || amount < 0) {
+    throw new Error('Amount must be a non-negative finite number.');
+  }
+  if (amount > MAX_ORDER_AMOUNT) {
+    throw new Error(`Amount exceeds maximum allowed limit ($${MAX_ORDER_AMOUNT.toLocaleString()}).`);
+  }
+  if (Math.abs(Math.round(amount * 100) - amount * 100) > 1e-6) {
+    throw new Error('Amount can have at most 2 decimal places.');
   }
   return Math.round(amount * 100);
 }
 
 export function validateFeeConfig(cfg: FeeConfig): void {
-  const pct = (v: number) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100;
+  const pct = (v: number) => typeof v === 'number' && Number.isFinite(v) && !Number.isNaN(v) && v >= 0 && v <= 100;
   if (!pct(cfg.commissionPercent)) throw new Error('commissionPercent must be between 0 and 100.');
   if (!pct(cfg.buyerFeePercent)) throw new Error('buyerFeePercent must be between 0 and 100.');
-  if (typeof cfg.smallOrderFee !== 'number' || !Number.isFinite(cfg.smallOrderFee) || cfg.smallOrderFee < 0) {
-    throw new Error('smallOrderFee must be a non-negative number.');
+  if (typeof cfg.smallOrderFee !== 'number' || !Number.isFinite(cfg.smallOrderFee) || cfg.smallOrderFee < 0 || cfg.smallOrderFee > MAX_ORDER_AMOUNT) {
+    throw new Error('smallOrderFee must be a non-negative finite number.');
   }
-  if (typeof cfg.smallOrderThreshold !== 'number' || !Number.isFinite(cfg.smallOrderThreshold) || cfg.smallOrderThreshold < 0) {
-    throw new Error('smallOrderThreshold must be a non-negative number.');
+  if (Math.abs(Math.round(cfg.smallOrderFee * 100) - cfg.smallOrderFee * 100) > 1e-6) {
+    throw new Error('smallOrderFee can have at most 2 decimal places.');
+  }
+  if (typeof cfg.smallOrderThreshold !== 'number' || !Number.isFinite(cfg.smallOrderThreshold) || cfg.smallOrderThreshold < 0 || cfg.smallOrderThreshold > MAX_ORDER_AMOUNT) {
+    throw new Error('smallOrderThreshold must be a non-negative finite number.');
+  }
+  if (Math.abs(Math.round(cfg.smallOrderThreshold * 100) - cfg.smallOrderThreshold * 100) > 1e-6) {
+    throw new Error('smallOrderThreshold can have at most 2 decimal places.');
+  }
+  if (cfg.minimumOrderAmount !== undefined) {
+    if (typeof cfg.minimumOrderAmount !== 'number' || !Number.isFinite(cfg.minimumOrderAmount) || cfg.minimumOrderAmount < 0 || cfg.minimumOrderAmount > MAX_ORDER_AMOUNT) {
+      throw new Error('minimumOrderAmount must be a non-negative finite number.');
+    }
   }
 }
 
@@ -115,29 +134,36 @@ export function calculateOrderFees(gigPrice: number, cfg: FeeConfig = DEFAULT_FE
 export function resolveEffectiveFeePolicy(orderSnapshot?: any, fallbackConfig: FeeConfig = DEFAULT_FEE_CONFIG): FeeConfig {
   if (!orderSnapshot) return { ...fallbackConfig };
 
-  const commissionPercent = orderSnapshot.commission_percent ??
-    (orderSnapshot.feeBreakdown?.freelancerPercent !== undefined ? (100 - orderSnapshot.feeBreakdown.freelancerPercent) : undefined) ??
-    orderSnapshot.fee_breakdown?.commissionPercent ??
+  const numOrUndef = (v: any): number | undefined => {
+    if (v === null || v === undefined || v === '') return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  const freelancerPct = numOrUndef(orderSnapshot.feeBreakdown?.freelancerPercent);
+  const commissionPercent = numOrUndef(orderSnapshot.commission_percent) ??
+    (freelancerPct !== undefined ? (100 - freelancerPct) : undefined) ??
+    numOrUndef(orderSnapshot.fee_breakdown?.commissionPercent) ??
     fallbackConfig.commissionPercent;
 
-  const buyerFeePercent = orderSnapshot.buyer_fee_percent ??
-    orderSnapshot.feeBreakdown?.buyerFeePercent ??
-    orderSnapshot.fee_breakdown?.buyerFeePercent ??
+  const buyerFeePercent = numOrUndef(orderSnapshot.buyer_fee_percent) ??
+    numOrUndef(orderSnapshot.feeBreakdown?.buyerFeePercent) ??
+    numOrUndef(orderSnapshot.fee_breakdown?.buyerFeePercent) ??
     fallbackConfig.buyerFeePercent;
 
-  const smallOrderFee = orderSnapshot.small_order_fee_amount ??
-    orderSnapshot.feeBreakdown?.smallOrderFeeAmount ??
-    orderSnapshot.fee_breakdown?.smallOrderFee ??
+  const smallOrderFee = numOrUndef(orderSnapshot.small_order_fee_amount) ??
+    numOrUndef(orderSnapshot.feeBreakdown?.smallOrderFeeAmount) ??
+    numOrUndef(orderSnapshot.fee_breakdown?.smallOrderFee) ??
     fallbackConfig.smallOrderFee;
 
-  const smallOrderThreshold = orderSnapshot.small_order_threshold ??
-    orderSnapshot.feeBreakdown?.smallOrderThreshold ??
-    orderSnapshot.fee_breakdown?.smallOrderThreshold ??
+  const smallOrderThreshold = numOrUndef(orderSnapshot.small_order_threshold) ??
+    numOrUndef(orderSnapshot.feeBreakdown?.smallOrderThreshold) ??
+    numOrUndef(orderSnapshot.fee_breakdown?.smallOrderThreshold) ??
     fallbackConfig.smallOrderThreshold;
 
-  const minimumOrderAmount = orderSnapshot.minimum_order_amount ??
-    orderSnapshot.feeBreakdown?.minimumOrderAmount ??
-    orderSnapshot.fee_breakdown?.minimumOrderAmount ??
+  const minimumOrderAmount = numOrUndef(orderSnapshot.minimum_order_amount) ??
+    numOrUndef(orderSnapshot.feeBreakdown?.minimumOrderAmount) ??
+    numOrUndef(orderSnapshot.fee_breakdown?.minimumOrderAmount) ??
     fallbackConfig.minimumOrderAmount;
 
   return {
@@ -158,20 +184,24 @@ export function calculateDifferentialFees(previousOrderAmount: number, newTotalO
   const prev = calculateOrderFees(previousOrderAmount, policy);
   const next = calculateOrderFees(newTotalOrderAmount, policy);
 
-  const additionalGigPrice = Math.max(0, next.gigPrice - prev.gigPrice);
-  const additionalServiceFee = Number(Math.max(0, next.serviceFee - prev.serviceFee).toFixed(2));
-  const additionalSmallOrderFee = Number(Math.max(0, next.smallOrderFee - prev.smallOrderFee).toFixed(2));
-  const additionalClientTotal = Number((additionalGigPrice + additionalServiceFee + additionalSmallOrderFee).toFixed(2));
-  const additionalCommission = Number(Math.max(0, next.platformCommission - prev.platformCommission).toFixed(2));
-  const additionalFreelancerNet = Number((additionalGigPrice - additionalCommission).toFixed(2));
+  if (next.cents.gigPrice < prev.cents.gigPrice) {
+    throw new Error('New total order amount cannot be less than the previous order amount.');
+  }
+
+  const addGigCents = next.cents.gigPrice - prev.cents.gigPrice;
+  const addServiceCents = Math.max(0, next.cents.serviceFee - prev.cents.serviceFee);
+  const addSmallCents = Math.max(0, next.cents.smallOrderFee - prev.cents.smallOrderFee);
+  const addTotalCents = addGigCents + addServiceCents + addSmallCents;
+  const addCommCents = Math.max(0, next.cents.platformCommission - prev.cents.platformCommission);
+  const addNetCents = addGigCents - addCommCents;
 
   return {
-    additionalGigPrice,
-    additionalServiceFee,
-    additionalSmallOrderFee,
-    additionalClientTotal,
-    additionalCommission,
-    additionalFreelancerNet,
+    additionalGigPrice: addGigCents / 100,
+    additionalServiceFee: addServiceCents / 100,
+    additionalSmallOrderFee: addSmallCents / 100,
+    additionalClientTotal: addTotalCents / 100,
+    additionalCommission: addCommCents / 100,
+    additionalFreelancerNet: addNetCents / 100,
     next,
     prev
   };

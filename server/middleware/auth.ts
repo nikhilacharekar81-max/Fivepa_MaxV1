@@ -1,21 +1,25 @@
 import { Request, Response, NextFunction } from 'express';
-import { createHmac, timingSafeEqual } from 'crypto';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { IS_PRODUCTION as INIT_IS_PRODUCTION, resolveIsProduction } from '../initEnv.js';
 import { store, type User } from '../store.js';
+import { postgresStore } from '../db/postgresStore.js';
 import { siteSettings } from '../domains/admin/siteSettings.js';
 import { disconnectUserSessionSocket } from '../websocket.js';
 
-const isCompiledProductionBundle = path.basename(fileURLToPath(import.meta.url)).startsWith('server.js');
-export const IS_PRODUCTION = process.env.NODE_ENV === 'production' || isCompiledProductionBundle;
+export const IS_PRODUCTION = INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url);
 
-export const JWT_SECRET: string = (() => {
+const EPHEMERAL_DEV_JWT_SECRET = randomBytes(32).toString('hex');
+
+function resolveJwtSecret(): string {
   const fromEnv = process.env.JWT_SECRET;
-  if (IS_PRODUCTION && (!fromEnv || fromEnv.length < 32)) {
+  const isProdNow = IS_PRODUCTION || resolveIsProduction(import.meta.url);
+  if (isProdNow && (!fromEnv || fromEnv.length < 32)) {
     throw new Error('FATAL: JWT_SECRET must be configured in production and be at least 32 chars.');
   }
-  return fromEnv || 'wph_jwt_secret_internal_session_token_key_2026';
-})();
+  return fromEnv && fromEnv.length >= 16 ? fromEnv : EPHEMERAL_DEV_JWT_SECRET;
+}
+
+export const JWT_SECRET: string = resolveJwtSecret();
 
 export const MAX_ACTIVE_SESSIONS = 3;
 
@@ -30,7 +34,7 @@ export function escapeHtml(text: string): string {
 
 export function areSimulatedDepositsAllowed(): boolean {
   if (process.env.NODE_ENV === 'production') return false;
-  return !IS_PRODUCTION;
+  return !(IS_PRODUCTION || resolveIsProduction(import.meta.url));
 }
 
 export function apiError(res: Response, message: string, status: number = 400) {
@@ -40,7 +44,7 @@ export function apiError(res: Response, message: string, status: number = 400) {
 export function formatApiError(err: any, fallbackMessage = 'An unexpected error occurred'): { error: string } {
   if (!err) return { error: fallbackMessage };
   const rawMessage = typeof err === 'string' ? err : (err.message || fallbackMessage);
-  if (IS_PRODUCTION) {
+  if (IS_PRODUCTION || resolveIsProduction(import.meta.url)) {
     const isDbError = /SELECT|INSERT|UPDATE|DELETE|PG::|postgres|sql/i.test(rawMessage);
     if (isDbError) {
       return { error: 'A database error occurred. Please try again later.' };
@@ -50,14 +54,24 @@ export function formatApiError(err: any, fallbackMessage = 'An unexpected error 
 }
 
 export function getUserActiveSessions(user: User): number[] {
+  const current = user.sessionVersion ? Number(user.sessionVersion) : 1;
+  const minVer = Math.max(1, current - (MAX_ACTIVE_SESSIONS - 1));
   if (!Array.isArray((user as any).activeSessionVersions)) {
-    const current = user.sessionVersion ? Number(user.sessionVersion) : 1;
     const versions: number[] = [];
-    const minVer = Math.max(1, current - (MAX_ACTIVE_SESSIONS - 1));
     for (let v = minVer; v <= current; v++) {
       versions.push(v);
     }
     (user as any).activeSessionVersions = versions;
+  } else {
+    // Keep activeSessionVersions synchronized if sessionVersion advanced in PostgreSQL
+    const existing: number[] = (user as any).activeSessionVersions;
+    if (!existing.includes(current)) {
+      const versions: number[] = [];
+      for (let v = minVer; v <= current; v++) {
+        versions.push(v);
+      }
+      (user as any).activeSessionVersions = versions;
+    }
   }
   return (user as any).activeSessionVersions;
 }
@@ -66,7 +80,9 @@ export function registerNewUserSession(user: User): number {
   const nextVersion = (user.sessionVersion || 0) + 1;
   user.sessionVersion = nextVersion;
   const sessions = getUserActiveSessions(user);
-  sessions.push(nextVersion);
+  if (!sessions.includes(nextVersion)) {
+    sessions.push(nextVersion);
+  }
   while (sessions.length > MAX_ACTIVE_SESSIONS) {
     const evicted = sessions.shift();
     if (evicted !== undefined) {
@@ -77,24 +93,100 @@ export function registerNewUserSession(user: User): number {
   return nextVersion;
 }
 
+/**
+ * Atomically locks the user row in PostgreSQL, increments session_version,
+ * enforces the 3-device concurrent session limit without race conditions,
+ * and evicts expired WebSocket sessions.
+ */
+export async function registerNewUserSessionAtomic(user: User): Promise<number> {
+  let evictedVersions: number[] = [];
+  const nextVersion = await postgresStore.executeInTransaction(async (client) => {
+    const lockRes = await client.query(
+      'SELECT session_version, known_devices FROM users WHERE id = $1 FOR UPDATE',
+      [user.id]
+    );
+    if (lockRes.rows.length === 0) {
+      return registerNewUserSession(user);
+    }
+
+    const dbSessionVer = Number(lockRes.rows[0].session_version || user.sessionVersion || 0);
+    const nextVer = dbSessionVer + 1;
+    const minActiveVer = Math.max(1, nextVer - (MAX_ACTIVE_SESSIONS - 1));
+    const prevMinVer = Math.max(1, dbSessionVer - (MAX_ACTIVE_SESSIONS - 1));
+    for (let v = prevMinVer; v < minActiveVer; v++) {
+      evictedVersions.push(v);
+    }
+
+    // Merge knownDevices so concurrent logins on different devices don't clobber each other
+    let mergedDevices: string[] = [];
+    const rawDbDevices = lockRes.rows[0].known_devices;
+    const dbDevices = typeof rawDbDevices === 'string'
+      ? (() => { try { return JSON.parse(rawDbDevices); } catch { return []; } })()
+      : (Array.isArray(rawDbDevices) ? rawDbDevices : []);
+    const memDevices = Array.isArray(user.knownDevices) ? user.knownDevices : [];
+    for (const d of [...dbDevices, ...memDevices]) {
+      if (typeof d === 'string' && d && !mergedDevices.includes(d)) {
+        mergedDevices.push(d);
+      }
+    }
+    if (mergedDevices.length > 10) {
+      mergedDevices = mergedDevices.slice(mergedDevices.length - 10);
+    }
+
+    await client.query(
+      `UPDATE users
+       SET session_version = $1,
+           known_devices = $2,
+           email_verified = $3,
+           verified = $4
+       WHERE id = $5`,
+      [
+        nextVer,
+        mergedDevices,
+        Boolean(user.emailVerified),
+        Boolean(user.verified),
+        user.id
+      ]
+    );
+
+    user.sessionVersion = nextVer;
+    user.knownDevices = mergedDevices;
+    const activeVersions: number[] = [];
+    for (let v = minActiveVer; v <= nextVer; v++) {
+      activeVersions.push(v);
+    }
+    (user as any).activeSessionVersions = activeVersions;
+
+    return nextVer;
+  });
+
+  for (const evicted of evictedVersions) {
+    disconnectUserSessionSocket(user.id, evicted);
+  }
+
+  return nextVersion;
+}
+
 export function signToken(
   payload: { id: string; role: string; email: string; sessionVersion?: number },
   expiresInMs?: number
 ): string {
+  const secret = resolveJwtSecret();
   const defaultTtlMs = (siteSettings.getSettings()?.security?.sessionTimeoutMinutes || 60) * 60 * 1000;
   const ttl = typeof expiresInMs === 'number' ? expiresInMs : defaultTtlMs;
   const data = JSON.stringify({ ...payload, exp: Date.now() + ttl });
   const base64Data = Buffer.from(data).toString('base64url');
-  const signature = createHmac('sha256', JWT_SECRET).update(base64Data).digest('base64url');
+  const signature = createHmac('sha256', secret).update(base64Data).digest('base64url');
   return `${base64Data}.${signature}`;
 }
 
 export function verifyToken(token: string): { id: string; role: string; email: string; sessionVersion?: number } | null {
   try {
+    const secret = resolveJwtSecret();
     const parts = token.split('.');
     if (parts.length !== 2) return null;
     const [base64Data, signature] = parts;
-    const expectedSig = createHmac('sha256', JWT_SECRET).update(base64Data).digest('base64url');
+    const expectedSig = createHmac('sha256', secret).update(base64Data).digest('base64url');
 
     const sigBuf = Buffer.from(signature);
     const expBuf = Buffer.from(expectedSig);

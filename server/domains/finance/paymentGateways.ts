@@ -51,9 +51,16 @@ function getEncryptionKey(): Buffer {
   return crypto.createHash('sha256').update(keyHex).digest();
 }
 
+const GATEWAY_FETCH_TIMEOUT_MS = 10_000;
+
 export function encryptSecret(plaintext: string): string {
-  if (!plaintext || plaintext.trim() === '' || plaintext.includes('••••')) return plaintext;
-  if (plaintext.startsWith('enc:')) return plaintext;
+  if (!plaintext || plaintext.trim() === '') return '';
+  if (plaintext.startsWith('enc:gcm:')) {
+    // Validate that the existing GCM payload is authentic and decryptable before accepting
+    decryptSecret(plaintext);
+    return plaintext;
+  }
+  if (plaintext.includes('••••')) return '';
   try {
     const key = getEncryptionKey();
     const iv = crypto.randomBytes(12);
@@ -104,23 +111,29 @@ export class PaymentGatewayManager {
 
   public loadFromState(parsed: any) {
     if (parsed && typeof parsed === 'object') {
-      const decryptGw = (gw: any): GatewayConfig => {
-        const conf: GatewayConfig = { ...DEFAULT_GATEWAY, ...(gw || {}) };
+      const decryptGw = (gw: any, defaultPrimary = false): GatewayConfig => {
+        const conf: GatewayConfig = { ...DEFAULT_GATEWAY, primary: defaultPrimary, ...(gw || {}) };
         if (conf.clientSecret) {
-          conf.clientSecret = decryptSecret(conf.clientSecret);
+          try {
+            conf.clientSecret = decryptSecret(conf.clientSecret);
+          } catch (err) {
+            console.error('[PaymentGateway] Resetting unreadable gateway credential on load:', (err as Error).message);
+            conf.clientSecret = '';
+            conf.enabled = false;
+          }
         }
         return conf;
       };
       this.state = {
         production: {
-          paypal: decryptGw(parsed.production?.paypal),
-          stripe: decryptGw(parsed.production?.stripe),
-          razorpay: decryptGw(parsed.production?.razorpay)
+          paypal: decryptGw(parsed.production?.paypal, true),
+          stripe: decryptGw(parsed.production?.stripe, false),
+          razorpay: decryptGw(parsed.production?.razorpay, false)
         },
         sandbox: {
-          paypal: decryptGw(parsed.sandbox?.paypal),
-          stripe: decryptGw(parsed.sandbox?.stripe),
-          razorpay: decryptGw(parsed.sandbox?.razorpay)
+          paypal: decryptGw(parsed.sandbox?.paypal, true),
+          stripe: decryptGw(parsed.sandbox?.stripe, false),
+          razorpay: decryptGw(parsed.sandbox?.razorpay, false)
         }
       };
     }
@@ -188,14 +201,12 @@ export class PaymentGatewayManager {
 
     let secret = current.clientSecret;
     if (updates.clientSecret !== undefined) {
-      const trimmedSecret = String(updates.clientSecret || '').trim();
-      if (trimmedSecret && !trimmedSecret.includes('••••')) {
+      const trimmedSecret = String(updates.clientSecret ?? '').trim();
+      if (trimmedSecret === '') {
+        secret = '';
+      } else if (!trimmedSecret.includes('••••')) {
         if (trimmedSecret.startsWith('enc:gcm:')) {
-          try {
-            secret = decryptSecret(trimmedSecret);
-          } catch {
-            secret = trimmedSecret;
-          }
+          secret = decryptSecret(trimmedSecret);
         } else {
           secret = trimmedSecret;
         }
@@ -218,6 +229,11 @@ export class PaymentGatewayManager {
       primary: nextPrimary
     };
 
+    if (!envState.paypal.primary && !envState.stripe.primary && !envState.razorpay.primary) {
+      const fallback = (['paypal', 'stripe', 'razorpay'] as const).find(k => envState[k].enabled) || 'paypal';
+      envState[fallback].primary = true;
+    }
+
     await this.saveToDatabase();
     return this.state[env];
   }
@@ -235,35 +251,46 @@ export class PaymentGatewayManager {
       const sigHeader = params.headers['stripe-signature'];
       if (!sigHeader) return false;
 
-      const parts = String(sigHeader).split(',').reduce((acc: any, item) => {
-        const [k, v] = item.split('=');
-        if (k && v) acc[k.trim()] = v.trim();
-        return acc;
-      }, {});
+      let timestampStr = '';
+      const v1Sigs: string[] = [];
+      for (const item of String(sigHeader).split(',')) {
+        const eqIdx = item.indexOf('=');
+        if (eqIdx === -1) continue;
+        const k = item.slice(0, eqIdx).trim();
+        const v = item.slice(eqIdx + 1).trim();
+        if (k === 't' && v) timestampStr = v;
+        else if (k === 'v1' && v) v1Sigs.push(v);
+      }
 
-      if (!parts.t || !parts.v1) return false;
+      if (!timestampStr || v1Sigs.length === 0) return false;
 
-      const timestamp = Number(parts.t);
+      const timestamp = Number(timestampStr);
       const nowSec = Math.floor(Date.now() / 1000);
       if (!Number.isFinite(timestamp) || Math.abs(nowSec - timestamp) > 300) {
         return false;
       }
 
-      const signedPayload = `${parts.t}.${bodyStr}`;
+      const signedPayload = `${timestampStr}.${bodyStr}`;
       const expectedSig = crypto.createHmac('sha256', webhookSecret).update(signedPayload).digest('hex');
+      const expBuf = Buffer.from(expectedSig, 'hex');
 
-      const sigBuf = Buffer.from(parts.v1);
-      const expBuf = Buffer.from(expectedSig);
-      if (sigBuf.length !== expBuf.length) return false;
-      return crypto.timingSafeEqual(sigBuf, expBuf);
+      for (const candidateSig of v1Sigs) {
+        if (!/^[0-9a-fA-F]+$/.test(candidateSig) || candidateSig.length !== expectedSig.length) continue;
+        const sigBuf = Buffer.from(candidateSig, 'hex');
+        if (sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf)) {
+          return true;
+        }
+      }
+      return false;
     } else if (gateway === 'razorpay') {
       if (!webhookSecret) return false;
-      const sig = params.headers['x-razorpay-signature'];
-      if (!sig) return false;
+      const sig = String(params.headers['x-razorpay-signature'] || '').trim();
+      if (!sig || !/^[0-9a-fA-F]+$/.test(sig)) return false;
 
       const expectedSig = crypto.createHmac('sha256', webhookSecret).update(bodyStr).digest('hex');
-      const sigBuf = Buffer.from(String(sig));
-      const expBuf = Buffer.from(expectedSig);
+      if (sig.length !== expectedSig.length) return false;
+      const sigBuf = Buffer.from(sig, 'hex');
+      const expBuf = Buffer.from(expectedSig, 'hex');
       if (sigBuf.length !== expBuf.length) return false;
       return crypto.timingSafeEqual(sigBuf, expBuf);
     } else if (gateway === 'paypal') {
@@ -294,7 +321,8 @@ export class PaymentGatewayManager {
               'Authorization': `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`,
               'Content-Type': 'application/x-www-form-urlencoded'
             },
-            body: 'grant_type=client_credentials'
+            body: 'grant_type=client_credentials',
+            signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
           });
 
           if (!tokenRes.ok) return false;
@@ -314,7 +342,8 @@ export class PaymentGatewayManager {
               transmission_time: transmissionTime,
               webhook_id: gw.webhookId,
               webhook_event: webhookEventObj
-            })
+            }),
+            signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
           });
 
           if (!verifyRes.ok) return false;
@@ -330,11 +359,11 @@ export class PaymentGatewayManager {
       const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
       if (!simAllowed || !webhookSecret) return false;
 
-      const sig = params.headers['x-webhook-signature'] || params.headers['paypal-transmission-sig'];
+      const sig = String(params.headers['x-webhook-signature'] || params.headers['paypal-transmission-sig'] || '').trim();
       if (!sig) return false;
       const expectedSig = crypto.createHmac('sha256', webhookSecret).update(bodyStr).digest('hex');
-      const sigBuf = Buffer.from(String(sig));
-      const expBuf = Buffer.from(expectedSig);
+      const sigBuf = Buffer.from(sig.toLowerCase());
+      const expBuf = Buffer.from(expectedSig.toLowerCase());
       if (sigBuf.length !== expBuf.length) return false;
       return crypto.timingSafeEqual(sigBuf, expBuf);
     }
@@ -371,11 +400,12 @@ export class PaymentGatewayManager {
         if (!idToLookup) return { verified: false, error: 'Missing session or transaction ID for Stripe verification.' };
 
         const url = idToLookup.startsWith('cs_')
-          ? `https://api.stripe.com/v1/checkout/sessions/${idToLookup}`
-          : `https://api.stripe.com/v1/payment_intents/${idToLookup}`;
+          ? `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(idToLookup)}`
+          : `https://api.stripe.com/v1/payment_intents/${encodeURIComponent(idToLookup)}`;
 
         const res = await fetch(url, {
-          headers: { 'Authorization': `Bearer ${gw.clientSecret}` }
+          headers: { 'Authorization': `Bearer ${gw.clientSecret}` },
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!res.ok) {
           return { verified: false, error: `Stripe API verification returned status ${res.status}` };
@@ -405,21 +435,39 @@ export class PaymentGatewayManager {
             'Authorization': `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`,
             'Content-Type': 'application/x-www-form-urlencoded'
           },
-          body: 'grant_type=client_credentials'
+          body: 'grant_type=client_credentials',
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!tokenRes.ok) return { verified: false, error: 'PayPal OAuth handshake failed.' };
         const tokenData: any = await tokenRes.json();
 
-        const orderRes = await fetch(`${paypalHost}/v2/checkout/orders/${idToLookup}`, {
-          headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
+        const orderRes = await fetch(`${paypalHost}/v2/checkout/orders/${encodeURIComponent(idToLookup)}`, {
+          headers: { 'Authorization': `Bearer ${tokenData.access_token}` },
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!orderRes.ok) return { verified: false, error: `PayPal order lookup failed (${orderRes.status})` };
-        const orderData: any = await orderRes.json();
+        let orderData: any = await orderRes.json();
+
+        if (orderData.status === 'APPROVED') {
+          const captureRes = await fetch(`${paypalHost}/v2/checkout/orders/${encodeURIComponent(idToLookup)}/capture`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${tokenData.access_token}`,
+              'Content-Type': 'application/json'
+            },
+            signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
+          });
+          if (!captureRes.ok) {
+            return { verified: false, error: `PayPal order capture failed (${captureRes.status})` };
+          }
+          orderData = await captureRes.json();
+        }
 
         if (orderData.status !== 'COMPLETED') {
           return { verified: false, error: `PayPal order status is ${orderData.status}. Payment must be COMPLETED.` };
         }
-        const unit = orderData.purchase_units?.[0]?.amount;
+        const unit = orderData.purchase_units?.[0]?.amount ||
+          orderData.purchase_units?.[0]?.payments?.captures?.[0]?.amount;
         if (!unit) return { verified: false, error: 'PayPal purchase unit amount missing.' };
 
         if ((unit.currency_code || '').toUpperCase() !== params.expectedCurrency.toUpperCase()) {
@@ -434,8 +482,9 @@ export class PaymentGatewayManager {
         if (!idToLookup) return { verified: false, error: 'Missing transaction ID for Razorpay verification.' };
 
         const authHeader = `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`;
-        const res = await fetch(`https://api.razorpay.com/v1/payments/${idToLookup}`, {
-          headers: { 'Authorization': authHeader }
+        const res = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(idToLookup)}`, {
+          headers: { 'Authorization': authHeader },
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!res.ok) return { verified: false, error: `Razorpay payment lookup failed (${res.status})` };
         const data: any = await res.json();
@@ -482,7 +531,7 @@ export class PaymentGatewayManager {
       if (!simAllowed) {
         throw new Error(`Payout provider credentials missing for method "${params.method}". Enable provider credentials or configure PAYMENT_SIMULATION_ENABLED=true for explicit development simulation.`);
       }
-      if (!ref || ref.startsWith('MOCK') || ref.startsWith('SYNTHETIC') || ref.startsWith('GW-SETTLE-SIM')) {
+      if (!ref || ref.startsWith('MOCK') || ref.startsWith('SYNTHETIC') || ref.startsWith('GW-SETTLE-SIM') || ref.startsWith('GW-SETTLE-')) {
         return {
           verified: true,
           providerTxId: ref || `SIM-TX-${crypto.randomBytes(6).toString('hex').toUpperCase()}`,
@@ -497,8 +546,9 @@ export class PaymentGatewayManager {
 
     try {
       if (gwName === 'stripe' && gw && gw.clientSecret) {
-        const response = await fetch(`https://api.stripe.com/v1/transfers/${ref}`, {
-          headers: { 'Authorization': `Bearer ${gw.clientSecret}` }
+        const response = await fetch(`https://api.stripe.com/v1/transfers/${encodeURIComponent(ref)}`, {
+          headers: { 'Authorization': `Bearer ${gw.clientSecret}` },
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!response.ok) {
           throw new Error(`Stripe transfer lookup failed with status ${response.status}`);
@@ -522,12 +572,14 @@ export class PaymentGatewayManager {
             'Authorization': `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`,
             'Content-Type': 'application/x-www-form-urlencoded'
           },
-          body: 'grant_type=client_credentials'
+          body: 'grant_type=client_credentials',
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!tokenRes.ok) throw new Error('PayPal auth handshake failed during payout verification.');
         const tokenData: any = await tokenRes.json();
-        const payoutRes = await fetch(`${paypalHost}/v1/payments/payouts-item/${ref}`, {
-          headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
+        const payoutRes = await fetch(`${paypalHost}/v1/payments/payouts-item/${encodeURIComponent(ref)}`, {
+          headers: { 'Authorization': `Bearer ${tokenData.access_token}` },
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!payoutRes.ok) {
           throw new Error(`PayPal payout item lookup failed with status ${payoutRes.status}`);
@@ -544,8 +596,9 @@ export class PaymentGatewayManager {
         return { verified: true, providerTxId: payoutData.payout_item_id || ref, status: 'settled' };
       } else if (gwName === 'razorpay' && gw && gw.clientId && gw.clientSecret) {
         const authHeader = `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`;
-        const razorRes = await fetch(`https://api.razorpay.com/v1/payouts/${ref}`, {
-          headers: { 'Authorization': authHeader }
+        const razorRes = await fetch(`https://api.razorpay.com/v1/payouts/${encodeURIComponent(ref)}`, {
+          headers: { 'Authorization': authHeader },
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!razorRes.ok) {
           throw new Error(`Razorpay payout lookup failed with status ${razorRes.status}`);
@@ -605,6 +658,8 @@ export class PaymentGatewayManager {
       return { providerSessionId: simProviderSessionId, checkoutUrl };
     }
 
+    const baseAppUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+
     try {
       if (params.gateway === 'stripe') {
         const response = await fetch('https://api.stripe.com/v1/checkout/sessions', {
@@ -615,8 +670,8 @@ export class PaymentGatewayManager {
           },
           body: new URLSearchParams({
             'mode': 'payment',
-            'success_url': `https://fivepa.app/checkout/success?session_id=${params.checkoutId}`,
-            'cancel_url': `https://fivepa.app/checkout/cancel?session_id=${params.checkoutId}`,
+            'success_url': `${baseAppUrl}/checkout/success?session_id=${params.checkoutId}`,
+            'cancel_url': `${baseAppUrl}/checkout/cancel?session_id=${params.checkoutId}`,
             'client_reference_id': params.checkoutId,
             'line_items[0][price_data][currency]': 'usd',
             'line_items[0][price_data][unit_amount]': String(Math.round(params.amount * 100)),
@@ -624,7 +679,8 @@ export class PaymentGatewayManager {
             'line_items[0][quantity]': '1',
             'metadata[userId]': params.userId,
             'metadata[checkoutId]': params.checkoutId
-          }).toString()
+          }).toString(),
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!response.ok) {
           const errText = await response.text();
@@ -643,7 +699,8 @@ export class PaymentGatewayManager {
             'Authorization': `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`,
             'Content-Type': 'application/x-www-form-urlencoded'
           },
-          body: 'grant_type=client_credentials'
+          body: 'grant_type=client_credentials',
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!tokenRes.ok) throw new Error('PayPal auth handshake failed.');
         const tokenData: any = await tokenRes.json();
@@ -658,8 +715,13 @@ export class PaymentGatewayManager {
             purchase_units: [{
               reference_id: params.checkoutId,
               amount: { currency_code: 'USD', value: params.amount.toFixed(2) }
-            }]
-          })
+            }],
+            application_context: {
+              return_url: `${baseAppUrl}/checkout/success?session_id=${params.checkoutId}`,
+              cancel_url: `${baseAppUrl}/checkout/cancel?session_id=${params.checkoutId}`
+            }
+          }),
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!orderRes.ok) throw new Error('PayPal order creation failed.');
         const orderData: any = await orderRes.json();
@@ -681,7 +743,8 @@ export class PaymentGatewayManager {
             currency: 'USD',
             receipt: params.checkoutId,
             notes: { userId: params.userId, checkoutId: params.checkoutId }
-          })
+          }),
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!response.ok) {
           const errText = await response.text();
@@ -721,7 +784,8 @@ export class PaymentGatewayManager {
     try {
       if (gatewayName === 'stripe') {
         const res = await fetch('https://api.stripe.com/v1/balance', {
-          headers: { 'Authorization': `Bearer ${gw.clientSecret}` }
+          headers: { 'Authorization': `Bearer ${gw.clientSecret}` },
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!res.ok) {
           const errText = await res.text();
@@ -736,7 +800,8 @@ export class PaymentGatewayManager {
             'Authorization': `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`,
             'Content-Type': 'application/x-www-form-urlencoded'
           },
-          body: 'grant_type=client_credentials'
+          body: 'grant_type=client_credentials',
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!tokenRes.ok) {
           const errText = await tokenRes.text();
@@ -746,7 +811,8 @@ export class PaymentGatewayManager {
       } else if (gatewayName === 'razorpay') {
         const authHeader = `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`;
         const res = await fetch('https://api.razorpay.com/v1/payments?count=1', {
-          headers: { 'Authorization': authHeader }
+          headers: { 'Authorization': authHeader },
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!res.ok) {
           const errText = await res.text();

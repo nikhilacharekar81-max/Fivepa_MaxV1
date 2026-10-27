@@ -1,12 +1,12 @@
 import { randomUUID } from 'crypto';
 import { postgresStore, isPostgresEnabled } from '../db/postgresStore.js';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
-const LOGS_DIR = path.resolve(process.cwd(), 'logs123');
-if (!fs.existsSync(LOGS_DIR)) {
-  fs.mkdirSync(LOGS_DIR, { recursive: true });
-}
+const CONFIGURED_LOG_FILE = process.env.DIAGNOSTIC_LOG_FILE
+  ? path.resolve(process.env.DIAGNOSTIC_LOG_FILE)
+  : path.join(os.tmpdir(), 'wph-runtime-diagnostics.log');
 
 export type DiagnosticSeverity = 'info' | 'warning' | 'critical' | 'security' | 'INFO' | 'WARN' | 'ERROR' | 'CRITICAL' | 'SECURITY';
 export type DiagnosticOutcome = 'SUCCESS' | 'INTERCEPTED' | 'FAILED';
@@ -65,7 +65,9 @@ class DiagnosticService {
       this.queue.push(entry);
     }
     this.flush();
-    this.exportToFile(entry);
+    if (process.env.DIAGNOSTIC_LOG_FILE) {
+      this.exportToFile(entry);
+    }
     return entry;
   }
 
@@ -119,8 +121,7 @@ class DiagnosticService {
   private exportToFile(entry: any) {
     try {
       const logLine = JSON.stringify(entry) + '\n';
-      const logFilePath = path.join(LOGS_DIR, 'runtime-diagnostics.txt');
-      fs.promises.appendFile(logFilePath, logLine, 'utf8').catch((err) => {
+      fs.promises.appendFile(CONFIGURED_LOG_FILE, logLine, 'utf8').catch((err) => {
         console.error('Failed to write to diagnostic log file:', err);
       });
     } catch (err) {

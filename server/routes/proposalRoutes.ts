@@ -19,6 +19,7 @@ import {
 } from '../middleware/auth.js';
 import { workspaceService } from '../../src/server/workspaceService.js';
 import { calculateOrderFees } from '../domains/finance/fees.js';
+import { financialTransactionService } from '../domains/finance/index.js';
 import { siteSettings } from '../../src/server/siteSettings.js';
 import { emitSystemEvent } from '../services/messagingService.js';
 import { createNotification } from '../services/notificationService.js';
@@ -191,6 +192,8 @@ export async function processProposalAccept(req: any, res: any) {
     }
     const maxHires = lockResult.maxHires || Math.max(1, Number(proj.maxHires || (proj as any).freelancersNeeded || 1));
 
+    let escrowFundedAndAccepted = false;
+    let createdOrderId: string | null = null;
     try {
       await ensureWallet(buyerId);
       await ensureWallet(proposal.freelancerId);
@@ -203,6 +206,7 @@ export async function processProposalAccept(req: any, res: any) {
       });
 
       const orderId = 'ord_' + randomUUID().slice(0, 12);
+      createdOrderId = orderId;
       const today = new Date().toISOString().split('T')[0];
       const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays;
       const deliveryDays = proposal.deliveryDays || 7;
@@ -256,91 +260,108 @@ export async function processProposalAccept(req: any, res: any) {
       await recordOrder(order);
       await store.saveOrder(order);
 
+      const resolvedAt = new Date().toISOString();
       try {
-        await fundOrderEscrowWithEvent({
-          orderId: order.id,
-          orderTitle: order.title,
-          amount: order.amount,
-          buyerId: order.buyerId,
-          sellerId: order.sellerId,
-          actor: `user:${order.buyerId}`
+        await postgresStore.executeInTransaction(async (client) => {
+          await financialTransactionService.fundEscrow({
+            orderId: order.id,
+            orderTitle: order.title,
+            amount: order.amount,
+            buyerId: order.buyerId,
+            sellerId: order.sellerId,
+            actor: `user:${order.buyerId}`
+          }, client);
+
+          await client.query(
+            "UPDATE orders SET status = 'funded_in_escrow' WHERE id = $1",
+            [order.id]
+          );
+
+          await client.query(
+            'UPDATE proposals SET status = $1, workstream_order_id = $2, offer_id = $3 WHERE id = $4',
+            ['accepted', order.id, offer.id, proposal.id]
+          );
+
+          const newHiresRes = await client.query(
+            "SELECT COUNT(*) FROM proposals WHERE project_id = $1 AND status = 'accepted'",
+            [proj.id]
+          );
+          const newHiresCount = parseInt(newHiresRes.rows[0]?.count || '0', 10);
+          if (newHiresCount >= maxHires) {
+            proj.status = 'in-progress';
+            await client.query("UPDATE projects SET status = 'in-progress' WHERE id = $1", [proj.id]);
+            await client.query("UPDATE proposals SET status = 'declined' WHERE project_id = $1 AND status = 'pending'", [proj.id]);
+          } else {
+            proj.status = 'open';
+            await client.query("UPDATE projects SET status = 'open' WHERE id = $1", [proj.id]);
+          }
+
+          await client.query(
+            'UPDATE workstream_offers SET status = $1, resolved_at = $2, resolved_by = $3 WHERE id = $4',
+            ['accepted', resolvedAt, caller.id, offer.id]
+          );
         });
 
+        escrowFundedAndAccepted = true;
         order.status = 'funded_in_escrow';
-        await store.saveOrder(order);
+        proposal.status = 'accepted';
+        proposal.workstreamOrderId = order.id;
+        proposal.offerId = offer.id;
+        offer.status = 'accepted';
+        offer.resolvedAt = resolvedAt;
+        offer.resolvedBy = caller.id;
       } catch (fundingErr: any) {
-        await postgresStore.getPool().query("UPDATE proposals SET status = 'pending', workstream_order_id = NULL, offer_id = NULL WHERE id = $1", [proposal.id]);
-        await postgresStore.getPool().query("UPDATE projects SET status = 'open' WHERE id = $1", [proj.id]);
         const escCheck = await postgresStore.getPool().query('SELECT 1 FROM escrows WHERE order_id = $1', [order.id]);
         if (escCheck.rows.length === 0) {
+          await postgresStore.getPool().query("UPDATE proposals SET status = 'pending', workstream_order_id = NULL, offer_id = NULL WHERE id = $1", [proposal.id]);
+          await postgresStore.getPool().query("UPDATE projects SET status = 'open' WHERE id = $1", [proj.id]);
           await postgresStore.getPool().query('DELETE FROM orders WHERE id = $1', [order.id]);
+          await postgresStore.getPool().query('DELETE FROM workstream_offers WHERE id = $1', [offer.id]);
+          if (workspace) {
+            await workspaceService.deleteWorkspace(workspace.workspaceId);
+          }
         } else {
-          order.status = 'payment_pending';
-          await store.saveOrder(order);
-        }
-        await postgresStore.getPool().query('DELETE FROM workstream_offers WHERE id = $1', [offer.id]);
-
-        if (workspace) {
-          await workspaceService.deleteWorkspace(workspace.workspaceId);
+          escrowFundedAndAccepted = true;
         }
 
         return res.status(400).json({ error: fundingErr.message || 'Failed to fund escrow for proposal.' });
       }
 
-      await emitSystemEvent(order.id, 'order_created', `Order placed: ${order.title}. Payment is held in escrow until the work is approved.`);
-      await postOfferMessage(order, offer, null, `Proposal ${offer.number} was created.`, 'offer_created');
-
-      proposal.status = 'accepted';
-      proposal.workstreamOrderId = order.id;
-      proposal.offerId = offer.id;
-      await postgresStore.getPool().query(
-        'UPDATE proposals SET status = $1, workstream_order_id = $2, offer_id = $3 WHERE id = $4',
-        ['accepted', order.id, offer.id, proposal.id]
-      );
-
-      const newHiresRes = await postgresStore.getPool().query(
-        "SELECT COUNT(*) FROM proposals WHERE project_id = $1 AND status = 'accepted'",
-        [proj.id]
-      );
-      const newHiresCount = parseInt(newHiresRes.rows[0]?.count || '0', 10);
-      if (newHiresCount >= maxHires) {
-        proj.status = 'in-progress';
-        await postgresStore.getPool().query("UPDATE projects SET status = 'in-progress' WHERE id = $1", [proj.id]);
-        await postgresStore.getPool().query("UPDATE proposals SET status = 'declined' WHERE project_id = $1 AND status = 'pending'", [proj.id]);
-      } else {
-        proj.status = 'open';
-        await postgresStore.getPool().query("UPDATE projects SET status = 'open' WHERE id = $1", [proj.id]);
-      }
       if (Array.isArray((proj as any).proposalsList)) {
         (proj as any).proposalsList = (proj as any).proposalsList.map((p: any) => p.id === proposal.id ? { ...p, status: 'accepted', workstreamOrderId: order.id, offerId: offer.id } : p);
       }
-      await store.saveProject(proj);
 
-      await syncUserBalances();
+      try { await store.saveOrder(order); } catch {}
+      try { await store.saveProject(proj); } catch {}
+      try { await syncUserBalances(); } catch {}
+      try {
+        await emitSystemEvent(order.id, 'order_created', `Order placed: ${order.title}. Payment is held in escrow until the work is approved.`);
+        await postOfferMessage(order, offer, null, `Proposal ${offer.number} was created.`, 'offer_created');
+        await postOfferMessage(order, offer, null, `Proposal ${offer.number} was accepted and escrow funded ($${order.amount}).`, 'offer_accepted');
+      } catch {}
 
-      offer.status = 'accepted';
-      offer.resolvedAt = new Date().toISOString();
-      offer.resolvedBy = caller.id;
-      await postgresStore.getPool().query(
-        'UPDATE workstream_offers SET status = $1, resolved_at = $2, resolved_by = $3 WHERE id = $4',
-        ['accepted', offer.resolvedAt, offer.resolvedBy, offer.id]
-      );
-
-      await postOfferMessage(order, offer, null, `Proposal ${offer.number} was accepted and escrow funded ($${order.amount}).`, 'offer_accepted');
-
-      createNotification({
-        userId: proposal.freelancerId,
-        type: 'proposal_accepted',
-        title: 'Proposal accepted',
-        message: `Your proposal for "${proj.title}" was accepted and escrow has been funded.`,
-        link: `/workstream/${order.id}`,
-        metadata: { orderId: order.id, projectId: proj.id, proposalId: proposal.id }
-      });
+      try {
+        await createNotification({
+          userId: proposal.freelancerId,
+          type: 'proposal_accepted',
+          title: 'Proposal accepted',
+          message: `Your proposal for "${proj.title}" was accepted and escrow has been funded.`,
+          link: `/workstream/${order.id}`,
+          metadata: { orderId: order.id, projectId: proj.id, proposalId: proposal.id }
+        });
+      } catch {}
 
       res.json({ success: true, proposal: await enrichProposalWithWorkstream(proposal), order: enrichOrderWithServiceInfo(order), workspace, offer: await viewOffer(offer) });
     } catch (acceptErr: any) {
-      await postgresStore.getPool().query("UPDATE proposals SET status = 'pending', workstream_order_id = NULL, offer_id = NULL WHERE id = $1 AND status = 'accepting'", [proposal.id]);
-      proposal.status = 'pending';
+      if (!escrowFundedAndAccepted) {
+        const hasEscrow = createdOrderId
+          ? (await postgresStore.getPool().query('SELECT 1 FROM escrows WHERE order_id = $1', [createdOrderId])).rows.length > 0
+          : false;
+        if (!hasEscrow) {
+          await postgresStore.getPool().query("UPDATE proposals SET status = 'pending', workstream_order_id = NULL, offer_id = NULL WHERE id = $1 AND status = 'accepting'", [proposal.id]);
+          proposal.status = 'pending';
+        }
+      }
       return res.status(400).json({ error: acceptErr.message || 'Failed to accept proposal.' });
     }
   } finally {

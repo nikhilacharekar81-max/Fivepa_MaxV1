@@ -7,6 +7,7 @@ import {
   signToken,
   safeUser,
   registerNewUserSession,
+  registerNewUserSessionAtomic,
   MAX_ACTIVE_SESSIONS,
   IS_PRODUCTION
 } from '../middleware/auth.js';
@@ -463,12 +464,11 @@ export async function handleLogin(req: Request, res: Response) {
     }
   }
 
-  const sessionVersion = registerNewUserSession(user);
-
   for (const key of attemptKeys) loginAttempts.delete(key);
 
+  let sessionVersion: number;
   try {
-    await store.saveUser(user);
+    sessionVersion = await registerNewUserSessionAtomic(user);
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to persist login session.' });
   }

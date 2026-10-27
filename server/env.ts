@@ -1,21 +1,8 @@
-import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-dotenv.config();
+import { IS_PRODUCTION, resolveIsProduction } from './initEnv.js';
 
 export function isProduction(): boolean {
-  const isCompiledProductionBundle = typeof __filename === 'string'
-    ? path.basename(__filename).startsWith('server.js')
-    : false;
-  const isNpmStart = process.env.npm_lifecycle_event === 'start';
-  const isExplicitProd = process.env.NODE_ENV === 'production';
-  const isTestEnv = process.env.NODE_ENV === 'test';
-
-  return (isExplicitProd || isNpmStart || isCompiledProductionBundle) && !isTestEnv;
+  return resolveIsProduction(import.meta.url);
 }
 
-export const IS_PRODUCTION = isProduction();
-if (IS_PRODUCTION) {
-  (process.env as any).NODE_ENV = 'production';
-}
+export { IS_PRODUCTION };
+

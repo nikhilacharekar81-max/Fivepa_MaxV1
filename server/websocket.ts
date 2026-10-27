@@ -175,7 +175,12 @@ export async function broadcastMessage(message: Message, orderId: string) {
       const clientUserId = (client as any).authenticatedUserId;
       if (!clientUserId) continue;
       const clientRole = (client as any).role;
-      const isAuthorized = clientUserId === senderId || clientUserId === buyerId || clientUserId === sellerId || isStaffUser({ role: clientRole });
+      const isParticipant = clientUserId === senderId || clientUserId === buyerId || clientUserId === sellerId;
+      const isSubscribedStaff =
+        isStaffUser({ role: clientRole }) &&
+        (orderId.startsWith('support_admin_') ||
+          ((client as any).subscribedOrderIds instanceof Set && (client as any).subscribedOrderIds.has(orderId)));
+      const isAuthorized = isParticipant || isSubscribedStaff;
 
       if (isAuthorized) {
         try {
@@ -345,6 +350,34 @@ function setupWebSocketHandlers(ws: WebSocket, authTimeout?: NodeJS.Timeout) {
         return;
       }
 
+      if (parsed.type === 'SUBSCRIBE_WORKSTREAM') {
+        const subOrderId = typeof parsed.orderId === 'string' ? parsed.orderId.trim() : '';
+        if (!subOrderId) {
+          ws.send(JSON.stringify({ error: 'Order ID is required' }));
+          return;
+        }
+        const subOrder = await store.getOrder(subOrderId);
+        if (!subOrder || !canAccessOrderWorkstream(currentDbUser, subOrder)) {
+          ws.send(JSON.stringify({ error: 'Unauthorized to subscribe to this workstream' }));
+          return;
+        }
+        if (!((ws as any).subscribedOrderIds instanceof Set)) {
+          (ws as any).subscribedOrderIds = new Set<string>();
+        }
+        (ws as any).subscribedOrderIds.add(subOrderId);
+        ws.send(JSON.stringify({ type: 'WORKSTREAM_SUBSCRIBED', orderId: subOrderId }));
+        return;
+      }
+
+      if (parsed.type === 'UNSUBSCRIBE_WORKSTREAM') {
+        const unsubOrderId = typeof parsed.orderId === 'string' ? parsed.orderId.trim() : '';
+        if ((ws as any).subscribedOrderIds instanceof Set && unsubOrderId) {
+          (ws as any).subscribedOrderIds.delete(unsubOrderId);
+        }
+        ws.send(JSON.stringify({ type: 'WORKSTREAM_UNSUBSCRIBED', orderId: unsubOrderId }));
+        return;
+      }
+
       if (parsed.type === 'NEW_MESSAGE') {
         const orderId = parsed.orderId;
         if (!orderId) {
@@ -367,6 +400,12 @@ function setupWebSocketHandlers(ws: WebSocket, authTimeout?: NodeJS.Timeout) {
           diagnosticService.log('security', 'websocket', 'onNewMessage', 'server/websocket.ts', 'order_authorization', 'INTERCEPTED', { orderId, userId: currentDbUser.id }, 'Unauthorized user attempted to message on order');
           ws.send(JSON.stringify({ error: 'Unauthorized to send messages in this order' }));
           return;
+        }
+        if (isStaffUser(currentDbUser)) {
+          if (!((ws as any).subscribedOrderIds instanceof Set)) {
+            (ws as any).subscribedOrderIds = new Set<string>();
+          }
+          (ws as any).subscribedOrderIds.add(order.id);
         }
         if (order.isMuted && !isStaffUser(currentDbUser)) {
           diagnosticService.log('warning', 'websocket', 'onNewMessage', 'server/websocket.ts', 'mute_check', 'INTERCEPTED', { orderId }, 'Chat is currently muted by Administrator');

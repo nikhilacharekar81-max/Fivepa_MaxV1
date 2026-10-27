@@ -7,6 +7,7 @@ import {
   mapPayoutRow,
   mapPaymentMethodRow
 } from '../../store.js';
+import { encryptSecret } from './paymentGateways.js';
 
 export type { PaymentMethodRecord };
 
@@ -36,7 +37,9 @@ export class FinanceRepo {
           await client.query(
             `INSERT INTO refunds (id, order_id, buyer_id, amount, reason, status, created_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (id) DO NOTHING`,
+             ON CONFLICT (id) DO UPDATE SET
+               status = EXCLUDED.status,
+               reason = COALESCE(EXCLUDED.reason, refunds.reason)`,
             [ref.id, ref.orderId, ref.buyerId, ref.amount, ref.reason || null, ref.status, ref.createdAt]
           );
         }
@@ -89,11 +92,13 @@ export class FinanceRepo {
           }
         }
         await client.query(
-          `INSERT INTO payouts (id, freelancer_id, amount, method, status, created_at, account_details)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `INSERT INTO payouts (id, freelancer_id, amount, method, status, created_at, processed_at, account_details)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (id) DO UPDATE SET
-             status = EXCLUDED.status`,
-          [p.id, p.freelancerId, p.amount, p.method, p.status, p.createdAt, p.accountDetails || null]
+             status = EXCLUDED.status,
+             processed_at = COALESCE(EXCLUDED.processed_at, payouts.processed_at),
+             updated_at = NOW()`,
+          [p.id, p.freelancerId, p.amount, p.method, p.status, p.createdAt, p.processedAt || null, p.accountDetails || null]
         );
         await client.query('COMMIT');
       } catch (e) {
@@ -126,11 +131,13 @@ export class FinanceRepo {
             }
           }
           await client.query(
-            `INSERT INTO payouts (id, freelancer_id, amount, method, status, created_at, account_details)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `INSERT INTO payouts (id, freelancer_id, amount, method, status, created_at, processed_at, account_details)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (id) DO UPDATE SET
-               status = EXCLUDED.status`,
-            [p.id, p.freelancerId, p.amount, p.method, p.status, p.createdAt, p.accountDetails || null]
+               status = EXCLUDED.status,
+               processed_at = COALESCE(EXCLUDED.processed_at, payouts.processed_at),
+               updated_at = NOW()`,
+            [p.id, p.freelancerId, p.amount, p.method, p.status, p.createdAt, p.processedAt || null, p.accountDetails || null]
           );
         }
         await client.query('COMMIT');
@@ -211,9 +218,12 @@ export class FinanceRepo {
         throw new Error('Invalid bank transfer method: account number or IBAN is required.');
       }
       const maskedAcct = acct.length > 4 ? `••••${acct.slice(-4)}` : acct;
+      const encryptedAcct = !acct.includes('••••') ? encryptSecret(acct) : (rawDetails.encryptedAccountNumber || undefined);
       return {
         ...rawDetails,
         accountNumber: maskedAcct,
+        accountLast4: acct.slice(-4),
+        encryptedAccountNumber: encryptedAcct,
         routingNumber: rawDetails.routingNumber ? String(rawDetails.routingNumber).trim() : undefined,
         bankName: rawDetails.bankName ? String(rawDetails.bankName).trim() : undefined
       };
@@ -242,6 +252,10 @@ export class FinanceRepo {
       const client = await this.ctx.getPool().connect();
       try {
         await client.query('BEGIN');
+        const existing = await client.query('SELECT user_id FROM payment_methods WHERE id = $1 FOR UPDATE', [pm.id]);
+        if (existing.rows.length > 0 && existing.rows[0].user_id !== pm.userId) {
+          throw new Error('Forbidden: Payment method ID belongs to another user.');
+        }
         if (pm.isDefault) {
           await client.query('UPDATE payment_methods SET is_default = false WHERE user_id = $1', [pm.userId]);
         }
@@ -249,11 +263,11 @@ export class FinanceRepo {
           `INSERT INTO payment_methods (id, user_id, type, name, details, is_default, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
            ON CONFLICT (id) DO UPDATE SET
-             user_id = EXCLUDED.user_id,
              type = EXCLUDED.type,
              name = EXCLUDED.name,
              details = EXCLUDED.details,
-             is_default = EXCLUDED.is_default`,
+             is_default = EXCLUDED.is_default
+           WHERE payment_methods.user_id = EXCLUDED.user_id`,
           [pm.id, pm.userId, pm.type, pm.name, JSON.stringify(validatedDetails), Boolean(pm.isDefault), pm.createdAt || new Date().toISOString().substring(0, 10)]
         );
         await client.query('COMMIT');
@@ -273,8 +287,28 @@ export class FinanceRepo {
   }
 
   async deletePaymentMethod(id: string): Promise<void> {
-    await this.ctx.getPool().query('SELECT * FROM payment_methods WHERE id = $1', [id]);
-    await this.ctx.getPool().query('DELETE FROM payment_methods WHERE id = $1', [id]);
+    const client = await this.ctx.getPool().connect();
+    try {
+      await client.query('BEGIN');
+      const existing = await client.query('SELECT user_id, is_default FROM payment_methods WHERE id = $1 FOR UPDATE', [id]);
+      if (existing.rows.length > 0) {
+        const { user_id: userId, is_default: wasDefault } = existing.rows[0];
+        await client.query('DELETE FROM payment_methods WHERE id = $1', [id]);
+        if (wasDefault && userId) {
+          await client.query(
+            `UPDATE payment_methods SET is_default = true
+             WHERE id = (SELECT id FROM payment_methods WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1)`,
+            [userId]
+          );
+        }
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
   }
 
   async setDefaultPaymentMethod(userId: string, id: string): Promise<void> {

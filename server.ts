@@ -1,4 +1,4 @@
-import './server/initEnv.js';
+import { IS_PRODUCTION } from './server/initEnv.js';
 import express from 'express';
 import fs from 'fs';
 import { createServer } from 'http';
@@ -90,12 +90,8 @@ if (!fs.existsSync(DATA_DIR)) {
 export const app = express();
 app.set('trust proxy', 1);
 
-// Production detection
-const isCompiledProductionBundle = path.basename(fileURLToPath(import.meta.url)).startsWith('server.js');
-const isNpmStart = process.env.npm_lifecycle_event === 'start';
-const isExplicitProd = process.env.NODE_ENV === 'production';
-const isTestEnv = process.env.NODE_ENV === 'test';
-export const IS_PRODUCTION = (isExplicitProd || isNpmStart || isCompiledProductionBundle) && !isTestEnv;
+// Production detection (authoritative from ./server/initEnv.js)
+export { IS_PRODUCTION };
 const IS_PROD = IS_PRODUCTION;
 
 if (IS_PROD) {

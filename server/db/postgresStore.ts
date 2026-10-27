@@ -1,6 +1,7 @@
 import pkg from 'pg';
 import { PGlite } from '@electric-sql/pglite';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import type { 
@@ -202,7 +203,7 @@ export function getPool(): pkg.Pool {
       try {
         const pgDataDir = process.env.NODE_ENV === 'test'
           ? undefined
-          : path.resolve(__dirname, '../../data/pgdata');
+          : (process.env.PGLITE_DATA_DIR || path.join(os.tmpdir(), 'wph-pglite-data'));
         global._appMockPool = new PGlitePool(pgDataDir);
       } catch (err) {
         console.warn('WARNING: PGlite disk storage failed to init, falling back to in-memory PGlite:', err);

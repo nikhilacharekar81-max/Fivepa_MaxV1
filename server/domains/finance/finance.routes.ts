@@ -530,24 +530,36 @@ const handlePaymentWebhook = async (req: Request, res: Response) => {
         source: 'webhook'
       }, client);
 
-      // Handle checkout purpose if linked to an order
+      // Handle checkout purpose if linked to an order (wrapped in SAVEPOINT so deposit is never lost if auto-funding escrow fails)
       const targetOrderId = sess?.order_id || payload?.orderId;
       const targetPurpose = sess?.purpose || payload?.purpose || 'deposit';
       if (targetOrderId && (targetPurpose === 'order_payment' || targetPurpose === 'order')) {
-        const ordRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [targetOrderId]);
-        const ord = ordRes.rows[0];
-        if (ord && (ord.status === 'payment_pending' || ord.status === 'pending')) {
-          const fundIdempKey = `${providerTxKey}:fundEscrow`;
-          await financialTransactionService.fundEscrow({
-            orderId: ord.id,
-            orderTitle: ord.title,
-            amount: Number(ord.amount),
-            buyerId: ord.buyer_id,
-            sellerId: ord.seller_id,
-            actor: `user:${resolvedUserId}`,
-            idempotencyKey: fundIdempKey
-          }, client);
-          await client.query("UPDATE orders SET status = 'funded_in_escrow' WHERE id = $1", [ord.id]);
+        await client.query('SAVEPOINT sp_webhook_fund_escrow');
+        try {
+          const ordRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [targetOrderId]);
+          const ord = ordRes.rows[0];
+          if (ord && (ord.status === 'payment_pending' || ord.status === 'pending')) {
+            const fundIdempKey = `${providerTxKey}:fundEscrow`;
+            await financialTransactionService.fundEscrow({
+              orderId: ord.id,
+              orderTitle: ord.title,
+              amount: Number(ord.amount),
+              buyerId: ord.buyer_id,
+              sellerId: ord.seller_id,
+              actor: `user:${resolvedUserId}`,
+              idempotencyKey: fundIdempKey
+            }, client);
+            await client.query("UPDATE orders SET status = 'funded_in_escrow' WHERE id = $1", [ord.id]);
+          }
+          await client.query('RELEASE SAVEPOINT sp_webhook_fund_escrow');
+        } catch (escrowErr: any) {
+          await client.query('ROLLBACK TO SAVEPOINT sp_webhook_fund_escrow');
+          diagnosticService.log('WARN', 'FinanceRoutes', 'handlePaymentWebhook', 'postgres', 'auto_fund_escrow_skipped', 'FALLBACK', {
+            orderId: targetOrderId,
+            userId: resolvedUserId,
+            depositedAmount: resolvedAmount,
+            reason: escrowErr?.message || String(escrowErr)
+          });
         }
       }
 
@@ -823,10 +835,11 @@ router.get('/payments/invoices/:userId', requireAuth, async (req: Request, res: 
     const userId = targetUserId;
     const userOrders = await store.listOrdersForUser(userId);
 
+    const currentUser = await store.getUser(userId);
     const orderInvoices = await Promise.all(userOrders.map(async o => {
       const isBuyer = o.buyerId === userId;
       const otherUser = await store.getUser(isBuyer ? o.sellerId : o.buyerId);
-      const currentUser = await store.getUser(userId);
+      const quote = financeLedger.quoteOrder(o.amount);
       return {
         id: `inv_ord_${o.id}`,
         invoiceNumber: `INV-${o.id.replace('ord_', '').toUpperCase()}`,
@@ -844,11 +857,11 @@ router.get('/payments/invoices/:userId', requireAuth, async (req: Request, res: 
           { description: o.title, quantity: 1, unitPrice: o.amount, amount: o.amount }
         ],
         subtotal: o.amount,
-        serviceFee: o.feeBreakdown?.serviceFee ?? financeLedger.quoteOrder(o.amount).serviceFee,
-        smallOrderFee: o.feeBreakdown?.smallOrderFee ?? financeLedger.quoteOrder(o.amount).smallOrderFee,
-        platformFee: o.feeBreakdown?.platformCommission ?? financeLedger.quoteOrder(o.amount).platformCommission,
+        serviceFee: o.feeBreakdown?.serviceFee ?? quote.serviceFee,
+        smallOrderFee: o.feeBreakdown?.smallOrderFee ?? quote.smallOrderFee,
+        platformFee: o.feeBreakdown?.platformCommission ?? quote.platformCommission,
         tax: 0,
-        total: o.feeBreakdown?.clientTotal ?? financeLedger.quoteOrder(o.amount).clientTotal,
+        total: o.feeBreakdown?.clientTotal ?? quote.clientTotal,
         notes: `WorkPerHour 14-Day Escrow Protection Order #${o.id}. 100% Protected.`,
         relatedOrderId: o.id
       };
@@ -857,21 +870,24 @@ router.get('/payments/invoices/:userId', requireAuth, async (req: Request, res: 
     let userCustom: any[] = [];
     try {
       const customInvoices = await store.listCustomInvoicesForUser(userId);
-      userCustom = customInvoices.map(r => ({
+      userCustom = customInvoices.map((r: any) => ({
         id: r.id,
         invoiceNumber: r.invoiceNumber,
         userId: r.buyerId,
-        recipientName: 'Client',
-        recipientEmail: 'client@example.com',
+        recipientName: r.recipientName || 'Client',
+        recipientEmail: r.recipientEmail || 'client@example.com',
         title: r.description || `Invoice ${r.invoiceNumber}`,
         issueDate: r.createdAt ? r.createdAt.slice(0, 10) : new Date().toISOString().slice(0, 10),
-        dueDate: r.paidAt || new Date().toISOString().slice(0, 10),
+        dueDate: r.dueDate || r.paidAt || new Date().toISOString().slice(0, 10),
         status: r.status,
-        items: [{ description: r.description || 'Service', quantity: 1, unitPrice: Number(r.amount), amount: Number(r.amount) }],
+        items: Array.isArray(r.items) && r.items.length > 0
+          ? r.items
+          : [{ description: r.description || 'Service', quantity: 1, unitPrice: Number(r.amount), amount: Number(r.amount) }],
         subtotal: Number(r.amount),
         platformFee: 0,
         tax: 0,
         total: Number(r.amount),
+        notes: r.notes || 'Standard WorkPerHour Invoice',
         relatedOrderId: r.relatedOrderId || undefined
       }));
     } catch {}
@@ -940,6 +956,11 @@ router.post('/payments/invoices', requireAuth, async (req: Request, res: Respons
       invoiceNumber: newInvoice.invoiceNumber,
       buyerId: authenticatedUserId,
       sellerId: authenticatedUserId,
+      recipientName: newInvoice.recipientName,
+      recipientEmail: newInvoice.recipientEmail,
+      dueDate: newInvoice.dueDate,
+      notes: newInvoice.notes,
+      items: newInvoice.items,
       amount: newInvoice.total,
       total: newInvoice.total,
       status: newInvoice.status,
@@ -1271,12 +1292,19 @@ router.get('/admin/finance/escrow', requireAdmin, async (req: Request, res: Resp
     const refundsRes = await postgresStore.getPool().query("SELECT * FROM refunds WHERE status = 'approved'");
     const activeRefunds = new Set(refundsRes.rows.map((r: any) => r.order_id));
 
-    const escrowOrders = await Promise.all(allOrders.map(async o => {
+    const [allUsers, escrowsRes] = await Promise.all([
+      store.listUsers(),
+      postgresStore.getPool().query('SELECT * FROM escrows')
+    ]);
+    const userMap = new Map(allUsers.map(u => [u.id, u]));
+    const escrowMap = new Map(escrowsRes.rows.map((r: any) => [r.order_id, financialRepository.formatEscrowRow(r)]));
+
+    const escrowOrders = allOrders.map(o => {
       const enriched = enrichOrderWithServiceInfo(o);
       const isDisputed = activeDisputes.has(o.id);
       const isRefunded = activeRefunds.has(o.id);
-      const buyer = await store.getUser(o.buyerId);
-      const seller = await store.getUser(o.sellerId);
+      const buyer = userMap.get(o.buyerId);
+      const seller = userMap.get(o.sellerId);
 
       let escrowState = 'in_progress';
       if (isDisputed) escrowState = 'disputed';
@@ -1285,7 +1313,11 @@ router.get('/admin/finance/escrow', requireAdmin, async (req: Request, res: Resp
       else if (o.status === 'delivered') escrowState = 'release_pending';
       else if (o.status === 'funded_in_escrow') escrowState = 'funded';
 
-      const esc = await financialRepository.getEscrow(o.id);
+      const esc = escrowMap.get(o.id);
+      const fbComm = (o.feeBreakdown as any)?.commissionPercent;
+      const effectiveCommRate = (esc?.commissionPercent !== undefined && esc?.commissionPercent !== null)
+        ? Number(esc.commissionPercent)
+        : (fbComm !== undefined && fbComm !== null ? Number(fbComm) : financeLedger.getPlatformCommissionRate());
 
       return {
         ...enriched,
@@ -1293,15 +1325,15 @@ router.get('/admin/finance/escrow', requireAdmin, async (req: Request, res: Resp
         buyerEmail: buyer?.email || '',
         sellerName: seller?.name || 'Freelancer #' + o.sellerId,
         sellerEmail: seller?.email || '',
-        platformFeeRate: `${financeLedger.getPlatformCommissionRate()}%`,
-        platformFeeAmount: FinanceLedgerEngine.round(o.amount * financeLedger.getPlatformCommissionRate() / 100),
-        freelancerNetAmount: FinanceLedgerEngine.round(o.amount - o.amount * financeLedger.getPlatformCommissionRate() / 100),
+        platformFeeRate: `${effectiveCommRate}%`,
+        platformFeeAmount: FinanceLedgerEngine.round(o.amount * effectiveCommRate / 100),
+        freelancerNetAmount: FinanceLedgerEngine.round(o.amount - o.amount * effectiveCommRate / 100),
         ledgerEscrowStatus: esc?.status || 'not_funded',
         ledgerEscrowHeld: esc?.remaining ?? 0,
         escrowState,
         isDisputed
       };
-    }));
+    });
     res.json(escrowOrders);
   } catch (err: any) {
     res.status(500).json(formatApiError(err));
@@ -1403,11 +1435,17 @@ router.post('/admin/finance/escrow/:orderId/refund', requireAdmin, async (req: R
 
 router.get('/admin/finance/payouts', requireAdmin, async (req: Request, res: Response) => {
   try {
-    const payoutsList = await store.listPayouts();
+    const [payoutsList, allUsers, allWallets] = await Promise.all([
+      store.listPayouts(),
+      store.listUsers(),
+      financialRepository.getWallets()
+    ]);
+    const userMap = new Map(allUsers.map(u => [u.id, u]));
+    const walletMap = new Map(allWallets.map(w => [w.userId, w]));
 
-    const enrichedPayouts = await Promise.all(payoutsList.map(async p => {
-      const freelancer = await store.getUser(p.freelancerId);
-      const wallet = await financialRepository.getWallet(p.freelancerId);
+    const enrichedPayouts = payoutsList.map(p => {
+      const freelancer = userMap.get(p.freelancerId);
+      const wallet = walletMap.get(p.freelancerId);
       return {
         ...p,
         freelancerName: freelancer?.name || 'Freelancer #' + p.freelancerId,
@@ -1415,7 +1453,7 @@ router.get('/admin/finance/payouts', requireAdmin, async (req: Request, res: Res
         walletAvailableBalance: wallet?.availableBalance || 0,
         currency: 'USD'
       };
-    }));
+    });
     res.json(enrichedPayouts);
   } catch (err: any) {
     res.status(500).json(formatApiError(err));

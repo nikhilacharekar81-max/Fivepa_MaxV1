@@ -119,10 +119,15 @@ export async function createNotification({
 
 export function notifyUser(message: Message, targetUserId: string) {
   const payload = JSON.stringify({ type: 'MESSAGE_RECEIVED', message });
+  const orderId = String(message?.orderId || '');
   for (const client of clients) {
     const clientUserId = (client as any).authenticatedUserId;
-    const clientRole = (client as any).authenticatedRole;
-    const isAuthorized = ['admin', 'super_admin', 'support'].includes(clientRole) || clientUserId === targetUserId;
+    const clientRole = (client as any).role || (client as any).authenticatedRole;
+    const isSubscribedStaff =
+      ['admin', 'super_admin', 'support'].includes(clientRole) &&
+      (orderId.startsWith('support_admin_') ||
+        ((client as any).subscribedOrderIds instanceof Set && (client as any).subscribedOrderIds.has(orderId)));
+    const isAuthorized = clientUserId === targetUserId || isSubscribedStaff;
 
     if (isAuthorized && client.readyState === WebSocket.OPEN) {
       client.send(payload);

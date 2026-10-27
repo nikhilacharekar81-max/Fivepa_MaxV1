@@ -11,6 +11,7 @@ import {
   safeUser,
   signToken,
   registerNewUserSession,
+  registerNewUserSessionAtomic,
   MAX_ACTIVE_SESSIONS,
   IS_PRODUCTION,
   apiError
@@ -257,8 +258,7 @@ authRouter.post('/verify-email', rateLimit(30, 3_600_000), async (req: Request, 
 
   user.emailVerified = true;
   user.verified = true;
-  const sessionVersion = registerNewUserSession(user);
-  await store.saveUser(user);
+  const sessionVersion = await registerNewUserSessionAtomic(user);
 
   const token = signToken({
     id: user.id,
@@ -424,9 +424,9 @@ authRouter.post('/demo-session', async (req: Request, res: Response) => {
   if (['admin', 'super_admin', 'support'].includes(user.role)) {
     return res.status(403).json({ error: 'Demo login is not available for privileged accounts.' });
   }
-  const sessionVersion = registerNewUserSession(user);
+  let sessionVersion: number;
   try {
-    await store.saveUser(user);
+    sessionVersion = await registerNewUserSessionAtomic(user);
   } catch (err: any) {
     return res.status(500).json({ error: 'Failed to persist demo session.' });
   }
