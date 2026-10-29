@@ -406,13 +406,6 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
       return res.status(500).json({ error: 'Feature fee is not configured.' });
     }
 
-    const existingGig = await store.getGig(req.params.id);
-    const existingUntilMs = existingGig?.featuredUntil ? new Date(existingGig.featuredUntil).getTime() : NaN;
-    const baseMs = Number.isFinite(existingUntilMs) && existingUntilMs > Date.now()
-      ? existingUntilMs
-      : Date.now();
-    const expiresAt = new Date(baseMs + 7 * 24 * 60 * 60 * 1000).toISOString();
-
     const callerIdempKey = (
       req.headers['idempotency-key'] ||
       req.headers['x-idempotency-key'] ||
@@ -432,7 +425,7 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
       gigId: req.params.id,
       sellerId: caller.id,
       feeAmount: fee,
-      featuredUntil: expiresAt,
+      extensionDays: 7,
       actor: `user:${caller.id}`,
       idempotencyKey: trimmedIdempKey,
       operationId: trimmedOpId

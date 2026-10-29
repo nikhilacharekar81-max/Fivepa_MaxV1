@@ -130,7 +130,11 @@ function getEncryptionKey(): Buffer {
         'FATAL: Production GATEWAY_ENCRYPTION_KEY must be independent of JWT_SECRET.'
       );
     }
-    return crypto.createHash('sha256').update(rawKey.trim()).digest();
+    const trimmed = rawKey.trim();
+    if (/^[0-9a-fA-F]{64}$/.test(trimmed)) {
+      return Buffer.from(trimmed, 'hex');
+    }
+    return crypto.createHash('sha256').update(trimmed).digest();
   }
   if (isProd) {
     assertProductionGatewayEncryptionKey();

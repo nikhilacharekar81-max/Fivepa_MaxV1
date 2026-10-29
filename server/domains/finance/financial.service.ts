@@ -1724,7 +1724,8 @@ export class FinancialTransactionService {
     gigId: string;
     sellerId: string;
     feeAmount: number;
-    featuredUntil: string;
+    extensionDays?: number;
+    featuredUntil?: string;
     actor: string;
     idempotencyKey?: string;
     operationId?: string;
@@ -1741,11 +1742,12 @@ export class FinancialTransactionService {
 
     const run = async (client: any) => {
       const idempKey = operationIdempKey;
+      const days = params.extensionDays && params.extensionDays > 0 ? params.extensionDays : 7;
       const payloadFingerprint = {
         gigId: params.gigId,
         sellerId: params.sellerId,
         feeAmount: params.feeAmount,
-        featuredUntil: params.featuredUntil
+        extensionDays: days
       };
 
       const check = await checkOrRecordIdempotency(client, idempKey, 'chargeFeaturedGigFee', payloadFingerprint);
@@ -1778,6 +1780,14 @@ export class FinancialTransactionService {
         throw new Error(`Insufficient wallet balance ($${currentBal.toFixed(2)}) to feature this gig. Required: $${params.feeAmount.toFixed(2)}.`);
       }
 
+      const existingUntilMs = gig.featured_until ? new Date(gig.featured_until).getTime() : NaN;
+      const baseMs = Number.isFinite(existingUntilMs) && existingUntilMs > Date.now()
+        ? existingUntilMs
+        : Date.now();
+      const calculatedExpiresAt = params.featuredUntil && !Number.isFinite(existingUntilMs)
+        ? params.featuredUntil
+        : new Date(baseMs + days * 24 * 60 * 60 * 1000).toISOString();
+
       const newBal = Number((currentBal - params.feeAmount).toFixed(2));
       await client.query('UPDATE wallets SET available_balance = $1 WHERE user_id = $2', [newBal, params.sellerId]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [params.sellerId]);
@@ -1789,7 +1799,7 @@ export class FinancialTransactionService {
 
       await client.query(
         'UPDATE gigs SET featured = TRUE, is_featured = TRUE, featured_until = $1 WHERE id = $2',
-        [params.featuredUntil, params.gigId]
+        [calculatedExpiresAt, params.gigId]
       );
 
       const journalId = 'jnl_' + randomUUID().slice(0, 12);
@@ -1811,7 +1821,7 @@ export class FinancialTransactionService {
         );
       }
 
-      const result = { success: true, gigId: params.gigId, feeCharged: params.feeAmount, newBalance: newBal, featuredUntil: params.featuredUntil };
+      const result = { success: true, gigId: params.gigId, feeCharged: params.feeAmount, newBalance: newBal, featuredUntil: calculatedExpiresAt };
       await recordIdempotencyResult(client, idempKey, 'chargeFeaturedGigFee', result, payloadFingerprint);
       
       return result;
