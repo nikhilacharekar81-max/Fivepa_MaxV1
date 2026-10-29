@@ -214,6 +214,11 @@ test('Legacy snapshot persistence and hydration cannot overwrite PostgreSQL fina
   await hydrateStoreFromPostgres();
 
   const userId = `USR-SNAPSHOT-GUARD-${Date.now()}`;
+  const pool = postgresStore.getPool();
+  await pool.query(
+    "INSERT INTO users (id, name, email, role, status) VALUES ($1, $2, $3, 'buyer', 'active') ON CONFLICT DO NOTHING",
+    [userId, 'Snapshot Guard User', `${userId.toLowerCase()}@example.com`]
+  );
   await financialTransactionService.ensureWallet(userId);
   await financialTransactionService.creditDeposit({
     userId,

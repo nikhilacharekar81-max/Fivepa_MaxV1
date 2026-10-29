@@ -941,4 +941,13 @@ BEGIN
   END LOOP;
 END $$;
 
+CREATE INDEX IF NOT EXISTS idx_workspaces_buyer ON workspaces (buyer_id);
+CREATE INDEX IF NOT EXISTS idx_workspaces_seller ON workspaces (seller_id);
+CREATE INDEX IF NOT EXISTS idx_workspaces_parties ON workspaces (buyer_id, seller_id);
+CREATE INDEX IF NOT EXISTS idx_workspaces_updated ON workspaces (updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_workspace_id ON orders (workspace_id);
+CREATE INDEX IF NOT EXISTS idx_orders_buyer_seller ON orders (buyer_id, seller_id);
+CREATE INDEX IF NOT EXISTS idx_workstream_offers_workspace ON workstream_offers (workspace_id);
+
+
 

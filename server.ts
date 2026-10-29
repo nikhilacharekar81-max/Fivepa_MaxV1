@@ -170,7 +170,7 @@ initWebSocketServer(server);
 
 const portArgIndex = process.argv.findIndex(arg => arg === '--port' || arg === '-p');
 const cliPort = portArgIndex !== -1 && process.argv[portArgIndex + 1] ? Number(process.argv[portArgIndex + 1]) : null;
-const PORT = cliPort || (process.env.PORT && process.env.PORT !== '8080' ? Number(process.env.PORT) : 3000);
+const PORT = cliPort || (process.env.PORT ? Number(process.env.PORT) : 3000);
 
 process.on('unhandledRejection', (reason) => {
   console.error('[UnhandledRejection]', reason);

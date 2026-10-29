@@ -28,12 +28,12 @@ export function useWorkstreamList({
   const hydratedWorkstreamItems: WorkstreamItem[] = useMemo(() => {
     const activeUid = impersonatedUser ? impersonatedUser.id : currentUser?.id;
     const relevantOrders = activeUid 
-      ? orders.filter(o => o.buyerId === activeUid || o.sellerId === activeUid || currentUser?.role === 'super_admin' || currentUser?.role === 'admin')
+      ? orders.filter(o => o.buyerId === activeUid || o.sellerId === activeUid || (o as any).clientId === activeUid || (o as any).freelancerId === activeUid || currentUser?.role === 'super_admin' || currentUser?.role === 'admin' || (currentUser as any)?.role === 'support_admin')
       : orders;
 
     return relevantOrders.map(o => {
-      const seller = usersList.find(u => u.id === o.sellerId);
-      const buyer = usersList.find(u => u.id === o.buyerId);
+      const seller = usersList.find(u => u.id === o.sellerId || u.id === (o as any).freelancerId);
+      const buyer = usersList.find(u => u.id === o.buyerId || u.id === (o as any).clientId);
       const gig = gigs.find(g => g.id === o.gigId);
       
       const orderMsgs = messages.filter(m => m.orderId === o.id);

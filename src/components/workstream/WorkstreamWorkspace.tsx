@@ -8,6 +8,7 @@ import { UserAccount, Order } from '../../types';
 import { WorkstreamActivityStream } from './WorkstreamActivityStream';
 import { WorkstreamMessageInput } from './WorkstreamMessageInput';
 import { WorkstreamFilesTab } from './WorkstreamFilesTab';
+import { WorkstreamInvoiceTab } from './WorkstreamInvoiceTab';
 import { WorkstreamSummaryCard } from './WorkstreamSummaryCard';
 import { WorkstreamActionsPanel } from './WorkstreamActionsPanel';
 import { WorkstreamReleaseModal } from './WorkstreamReleaseModal';
@@ -83,6 +84,11 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
   isSubmittingReview,
   escrowError
 }) => {
+  const [isMounted, setIsMounted] = useState(false);
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
   const [activeSubTab, setActiveSubTab] = useState<WorkstreamSubTab>('activity');
   const [isReleaseModalOpen, setIsReleaseModalOpen] = useState(false);
   const [isDeliverModalOpen, setIsDeliverModalOpen] = useState(false);
@@ -431,7 +437,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
   const isCancellationPending = (order as any).cancellationRequest?.status === 'pending';
 
   const getReviewCountdown = () => {
-    if (order.status !== 'delivered' || isCancellationPending || !order.reviewWindowExpiresAt) return null;
+    if (!isMounted || order.status !== 'delivered' || isCancellationPending || !order.reviewWindowExpiresAt) return null;
     const diff = new Date(order.reviewWindowExpiresAt).getTime() - Date.now();
     if (diff <= 0) return null;
     const hours = Math.floor(diff / (1000 * 60 * 60));
@@ -498,7 +504,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                   const remaining = getReviewCountdown();
                   if (!remaining) return null;
                   return (
-                    <span className="px-3 py-1 bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5 shadow-2xs">
+                    <span suppressHydrationWarning className="px-3 py-1 bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5 shadow-2xs">
                       <Clock className="w-3.5 h-3.5 text-amber-600" />
                       <span>{isBuyer ? 'Buyer Review: ' : 'Review Window: '}</span>
                       <strong className="font-mono text-amber-900">{remaining}</strong>
@@ -605,6 +611,20 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                     <span>Shared Files ({files.length})</span>
                   </div>
                 </button>
+
+                <button
+                  onClick={() => setActiveSubTab('invoices')}
+                  className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+                    activeSubTab === 'invoices'
+                      ? 'border-emerald-600 text-emerald-700'
+                      : 'border-transparent text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5">
+                    <Receipt className="w-3.5 h-3.5" />
+                    <span>Receipt & Invoice</span>
+                  </div>
+                </button>
               </div>
             </div>
 
@@ -661,7 +681,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                     currencySymbol={currencySymbol}
                   />
                 </>
-              ) : (
+              ) : activeSubTab === 'files' ? (
                 <WorkstreamFilesTab
                   key={`files_${order.id}`}
                   orderId={order.id}
@@ -669,6 +689,11 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                   files={files}
                   onUploadFile={onAttachFile}
                   onDownloadFile={handleDownloadFile}
+                />
+              ) : (
+                <WorkstreamInvoiceTab
+                  key={`inv_${order.id}`}
+                  orderId={order.id}
                 />
               )}
             </div>

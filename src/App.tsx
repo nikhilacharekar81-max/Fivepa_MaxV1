@@ -880,7 +880,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         navigate={navigate}
         onOpenWorkstream={(ord) => {
           setSelectedOrder(ord);
-          navigate(`/messages/${ord.id}`);
+          navigate(`/workstream/${ord.id}`);
         }}
       />
     );
@@ -904,13 +904,15 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     cleanPath === '/workstream' ||
     cleanPath === '/workspace' ||
     cleanPath.startsWith('/messages/') ||
-    cleanPath.startsWith('/orders/')
+    cleanPath.startsWith('/orders/') ||
+    cleanPath.startsWith('/workstream/') ||
+    cleanPath.startsWith('/workspace/')
   ) {
     const routeOrderId = pathParts.length >= 2 ? pathParts[1] : null;
     const rawActiveOrder = routeOrderId
-      ? workstream.hydratedWorkstreamItems.find(o => o.id === routeOrderId) ||
-        orders.find(o => o.id === routeOrderId) ||
-        (selectedOrder?.id === routeOrderId ? selectedOrder : null)
+      ? workstream.hydratedWorkstreamItems.find(o => o.id === routeOrderId || o.workspaceId === routeOrderId || (o as any).gigOrderId === routeOrderId || (o as any).projectOrderId === routeOrderId) ||
+        orders.find(o => o.id === routeOrderId || o.workspaceId === routeOrderId || (o as any).gigOrderId === routeOrderId || (o as any).projectOrderId === routeOrderId) ||
+        (selectedOrder?.id === routeOrderId || selectedOrder?.workspaceId === routeOrderId ? selectedOrder : null)
       : workstream.selectedOrder || selectedOrder;
 
     if (rawActiveOrder) {

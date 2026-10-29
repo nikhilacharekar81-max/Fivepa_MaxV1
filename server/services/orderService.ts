@@ -601,14 +601,14 @@ export async function processCancellationTimeouts() {
                   title: 'Inquiry Cancelled',
                   message: `Inquiry thread #${freshOrder.id} request timed out and was closed.`,
                   type: 'order',
-                  link: `/messages/${freshOrder.id}`
+                  link: `/workstream/${freshOrder.id}`
                 },
                 {
                   userId: otherId,
                   title: 'Inquiry Cancelled',
                   message: `Inquiry thread #${freshOrder.id} request timed out and was closed.`,
                   type: 'order',
-                  link: `/messages/${freshOrder.id}`
+                  link: `/workstream/${freshOrder.id}`
                 }
               ];
             }
@@ -646,14 +646,14 @@ export async function processCancellationTimeouts() {
                 title: 'Cancellation Auto-Cancelled',
                 message: `Order #${freshOrder.id} cancellation request timed out after 48h. Order cancelled & full refund issued ($${refundRes.refunded}).`,
                 type: 'order',
-                link: `/messages/${freshOrder.id}`
+                link: `/workstream/${freshOrder.id}`
               },
               {
                 userId: otherId,
                 title: 'Cancellation Auto-Cancelled',
                 message: `Order #${freshOrder.id} cancellation request timed out after 48h. Order cancelled & full refund issued ($${refundRes.refunded}).`,
                 type: 'order',
-                link: `/messages/${freshOrder.id}`
+                link: `/workstream/${freshOrder.id}`
               }
             ];
           });

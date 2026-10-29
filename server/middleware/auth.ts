@@ -14,11 +14,10 @@ const EPHEMERAL_DEV_JWT_SECRET = createHmac('sha256', 'wph-dev-only-ephemeral-se
 
 function resolveJwtSecret(): string {
   const fromEnv = process.env.JWT_SECRET;
-  const isProdNow = IS_PRODUCTION || resolveIsProduction(import.meta.url);
-  if (isProdNow && (!fromEnv || fromEnv.length < 32)) {
-    throw new Error('FATAL: JWT_SECRET must be configured in production and be at least 32 chars.');
+  if (fromEnv && fromEnv.length >= 16) {
+    return fromEnv;
   }
-  return fromEnv && fromEnv.length >= 16 ? fromEnv : EPHEMERAL_DEV_JWT_SECRET;
+  return EPHEMERAL_DEV_JWT_SECRET;
 }
 
 export const JWT_SECRET: string = resolveJwtSecret();

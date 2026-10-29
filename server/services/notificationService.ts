@@ -172,7 +172,7 @@ export async function notifyOrderParties(orderId: string, action: string, text: 
       type: 'order',
       title: rule.title,
       message: text,
-      link: `/messages/${orderId}`,
+      link: `/workstream/${orderId}`,
       dedupKey: `${action}_${msgId}_${userId}`,
       client
     }, client);

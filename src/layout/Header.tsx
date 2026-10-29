@@ -474,7 +474,7 @@ export function Header({
                           setSelectedOrder(ord);
                           fetchMessages(ord.id);
                           setIsWorkstreamsDropdownOpen(false);
-                          navigate('/messages/' + ord.id, e);
+                          navigate('/workstream/' + ord.id, e);
                         }}
                         className="p-3 hover:bg-slate-50 transition-colors cursor-pointer flex items-start gap-3"
                       >

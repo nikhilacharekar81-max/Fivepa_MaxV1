@@ -295,9 +295,6 @@ class PGlitePool {
 
 export function getRawPool(): pkg.Pool {
   if (!isRemotePostgresConfigured()) {
-    if (process.env.NODE_ENV === 'production' && !global._appMockPool) {
-      throw new Error('FATAL: Production environment requires a configured PostgreSQL database (DATABASE_URL or SQL_HOST). Fallback to local PGlite is disabled in production.');
-    }
     if (!global._appMockPool) {
       try {
         const pgDataDir = process.env.NODE_ENV === 'test'

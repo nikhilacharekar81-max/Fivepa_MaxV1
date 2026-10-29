@@ -17,6 +17,9 @@ test('Strict Auth Verification: Signup, Login Gating, and Verification Flow', as
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
+    const { hydrateStoreFromPostgres } = await import('../server/store.ts');
+    await hydrateStoreFromPostgres();
+
     const uniqueId = Date.now() + '_' + Math.floor(Math.random() * 10000);
     const testEmail = `test_gate_${uniqueId}@example.com`;
     const testPassword = 'Password123!';
@@ -112,6 +115,7 @@ test('Strict Auth Verification: Signup, Login Gating, and Verification Flow', as
     assert.strictEqual(verifiedLoginData.success, true);
     assert.ok(verifiedLoginData.token, 'Verified login must return session token');
   } finally {
+    try { (server as any).closeAllConnections?.(); } catch {}
     server.close();
     try {
       await postgresStore.getPool().end();

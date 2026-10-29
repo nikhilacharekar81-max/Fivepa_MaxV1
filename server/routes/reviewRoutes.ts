@@ -212,7 +212,7 @@ export const handleSubmitReview = async (req: Request, res: Response) => {
       type: 'review',
       title: 'New Review Received',
       message: `${caller.name} left a ${numRating}-star review for order "${order.title}".`,
-      link: `/messages/${order.id}`,
+      link: `/workstream/${order.id}`,
       dedupKey: `review_${newReview.id}`,
       actorId: caller.id
     });

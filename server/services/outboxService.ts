@@ -84,7 +84,7 @@ export async function processPendingOutboxEvents(): Promise<number> {
                 type: 'order',
                 title: event_type === 'ORDER_ESCROW_FUNDED' ? 'Order Funded in Escrow' : 'New Order Received',
                 message: payload.title ? `Order #${aggregate_id}: "${payload.title}" is active.` : `Order #${aggregate_id} update.`,
-                link: `/messages/${aggregate_id}`,
+                link: `/workstream/${aggregate_id}`,
                 dedupKey: canonicalDedupKey,
                 client
               }, client);
@@ -96,7 +96,7 @@ export async function processPendingOutboxEvents(): Promise<number> {
                 type: 'finance',
                 title: 'Escrow Payment Released',
                 message: `Payment of $${Number(payload.amount || 0).toFixed(2)} for order #${aggregate_id} has been released to your balance.`,
-                link: `/messages/${aggregate_id}`,
+                link: `/workstream/${aggregate_id}`,
                 dedupKey: `escrow_released_${aggregate_id}_${payload.sellerId}`,
                 client
               }, client);
@@ -108,7 +108,7 @@ export async function processPendingOutboxEvents(): Promise<number> {
                 type: 'finance',
                 title: 'Escrow Refund Issued',
                 message: `Refund of $${Number(payload.amount || 0).toFixed(2)} for order #${aggregate_id} has been credited to your wallet.`,
-                link: `/messages/${aggregate_id}`,
+                link: `/workstream/${aggregate_id}`,
                 dedupKey: `escrow_refunded_${aggregate_id}_${payload.buyerId}`,
                 client
               }, client);
@@ -149,6 +149,9 @@ export function startOutboxProcessor(intervalMs = 3000) {
   outboxIntervalTimer = setInterval(() => {
     processPendingOutboxEvents().catch(() => {});
   }, intervalMs);
+  if (typeof (outboxIntervalTimer as any)?.unref === 'function') {
+    (outboxIntervalTimer as any).unref();
+  }
 }
 
 export function stopOutboxProcessor() {

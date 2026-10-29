@@ -171,6 +171,90 @@ router.get('/orders/:id', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
+// Single Order Immutable Invoice / Receipt
+router.get('/orders/:id/invoice', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const order = await store.getOrder(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+
+    const authUserId = resolveAuthenticatedUserId(req)!;
+    const caller = await store.getUser(authUserId);
+    const isAdmin = caller?.role === 'admin' || caller?.role === 'super_admin';
+    if (!isAdmin && order.buyerId !== authUserId && order.sellerId !== authUserId) {
+      return res.status(403).json({ error: 'Forbidden: Access to this invoice is restricted to order participants.' });
+    }
+
+    const [buyer, seller] = await Promise.all([
+      store.getUser(order.buyerId),
+      store.getUser(order.sellerId)
+    ]);
+
+    const createdClean = (order.createdAt || '').slice(0, 10).replace(/-/g, '') || new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const shortOrdId = (order.id || '').replace(/^ord_/, '').toUpperCase().slice(0, 8);
+    const invoiceNumber = `INV-${createdClean}-${shortOrdId}`;
+
+    const rawAmount = Number(order.amount || 0);
+    const serviceFee = Number((order as any).serviceFee ?? order.feeBreakdown?.buyerFee ?? order.feeBreakdown?.serviceFee ?? 0);
+    const smallOrderFee = Number((order as any).smallOrderFee ?? order.feeBreakdown?.smallOrderFee ?? 0);
+    const platformCommission = Number(order.feeBreakdown?.platformCommission ?? 0);
+    const buyerTotal = Math.round((rawAmount + serviceFee + smallOrderFee) * 100) / 100;
+    const sellerNet = Math.max(0, Math.round((rawAmount - platformCommission) * 100) / 100);
+
+    const invoice = {
+      id: `inv_${order.id}`,
+      invoiceNumber,
+      orderId: order.id,
+      workspaceId: order.workspaceId || `ws-${order.id}`,
+      title: order.title,
+      status: order.status === 'completed' ? 'paid' : order.status === 'cancelled' ? 'refunded' : 'in_escrow',
+      issueDate: (order.createdAt || new Date().toISOString()).slice(0, 10),
+      dueDate: (order.dueDate || order.createdAt || new Date().toISOString()).slice(0, 10),
+      completedAt: order.completedAt || null,
+      buyer: {
+        id: order.buyerId,
+        name: buyer?.name || (order as any).buyerUsername || 'Buyer',
+        email: buyer?.email || 'buyer@fivepa.com',
+        country: (buyer as any)?.country || 'Global'
+      },
+      seller: {
+        id: order.sellerId,
+        name: seller?.name || (order as any).sellerUsername || 'Seller',
+        email: seller?.email || 'seller@fivepa.com',
+        country: (seller as any)?.country || 'Global'
+      },
+      items: [
+        {
+          description: order.title,
+          quantity: 1,
+          unitPrice: rawAmount,
+          amount: rawAmount
+        },
+        ...(Array.isArray((order as any).selectedExtras) && (order as any).selectedExtras.length > 0
+          ? (order as any).selectedExtras.map((ex: any) => ({
+              description: `Extra: ${ex.title || 'Add-on service'}`,
+              quantity: 1,
+              unitPrice: Number(ex.price || 0),
+              amount: Number(ex.price || 0)
+            }))
+          : [])
+      ],
+      subtotal: rawAmount,
+      serviceFee,
+      smallOrderFee,
+      tax: 0,
+      buyerTotal,
+      platformCommission,
+      sellerNet,
+      currency: 'USD',
+      notes: 'FivePA 100% Protected Escrow Transaction. Funds held safely in escrow until client approval.'
+    };
+
+    res.json(invoice);
+  } catch (err: any) {
+    res.status(500).json(formatApiError(err, 'Failed to generate order invoice'));
+  }
+});
+
 // Create Order / Inquiry
 router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), async (req: Request, res: Response) => {
   const caller = (req as any).authenticatedUser;
@@ -358,6 +442,24 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
           throw new Error('The provided workspace does not match the buyer and seller of this order.');
         }
         workspaceId = ws.workspace_id;
+        const currentMeta = typeof ws.metadata === 'string' ? JSON.parse(ws.metadata) : (ws.metadata || {});
+        const updatedMeta = { ...currentMeta, activeOrderId: id, status: 'active' };
+        await client.query(
+          `UPDATE workspaces SET
+             order_ids = (
+               SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
+               FROM (
+                 SELECT jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) AS elem
+                 UNION
+                 SELECT jsonb_array_elements_text($1::jsonb) AS elem
+               ) s
+             ),
+             updated_at = $2,
+             last_activity_at = $2,
+             metadata = $3
+           WHERE workspace_id = $4`,
+          [JSON.stringify([id]), new Date().toISOString(), JSON.stringify(updatedMeta), workspaceId]
+        );
       } else {
         workspaceId = 'ws_' + randomUUID().slice(0, 12);
         await client.query(
@@ -1567,7 +1669,7 @@ router.post('/orders/:id/cancel-request', requireAuth, requireActiveStatus, rate
       title: 'Cancellation Requested',
       message: `${requestedBy === 'buyer' ? 'Buyer' : 'Seller'} requested cancellation of order #${order.id}. Reason: ${reason}. You have 48 hours to respond.`,
       type: 'order',
-      link: `/messages/${order.id}`
+      link: `/workstream/${order.id}`
     });
 
     const requestsLast24h = (order.cancellationHistory || []).filter(h => Date.now() - new Date(h.requestedAt).getTime() < 24 * 3600 * 1000).length;
@@ -1576,7 +1678,7 @@ router.post('/orders/:id/cancel-request', requireAuth, requireActiveStatus, rate
         recipientId,
         'Action needed: cancellation requested on your order',
         `${requestedBy === 'buyer' ? 'The buyer' : 'The seller'} asked to cancel order #${order.id}.\n\nReason: ${String(reason).trim().slice(0, 300)}\n\nYou have 48 hours to accept or decline. If you do not respond, the order is cancelled automatically and the payment is refunded.`,
-        `/messages/${order.id}`
+        `/workstream/${order.id}`
       );
     }
 
@@ -1766,7 +1868,7 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
         title: 'Cancellation Accepted',
         message: `Your cancellation request for order #${order.id} was accepted.${refundedAmt > 0 ? ` Full refund issued ($${refundedAmt}).` : ' Order closed.'}`,
         type: 'order',
-        link: `/messages/${order.id}`
+        link: `/workstream/${order.id}`
       });
 
       await registerAuditLog({
@@ -1787,7 +1889,7 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
         title: 'Cancellation Rejected',
         message: `Your cancellation request for order #${order.id} was rejected. Reason: ${reason}. Order continues normally.`,
         type: 'order',
-        link: `/messages/${order.id}`
+        link: `/workstream/${order.id}`
       });
 
       await registerAuditLog({

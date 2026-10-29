@@ -181,7 +181,7 @@ export async function broadcastMessage(message: Message, orderId: string) {
       const clientUserId = (client as any).authenticatedUserId;
       if (!clientUserId) continue;
       const clientRole = (client as any).role;
-      const isParticipant = clientUserId === senderId || clientUserId === buyerId || clientUserId === sellerId;
+      const isParticipant = clientUserId === senderId || clientUserId === buyerId || clientUserId === sellerId || clientUserId === (order as any).clientId || clientUserId === (order as any).freelancerId;
       const isSubscribedStaff =
         isStaffUser({ role: clientRole }) &&
         (orderId.startsWith('support_admin_') ||

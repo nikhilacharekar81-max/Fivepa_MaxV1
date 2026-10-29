@@ -102,18 +102,18 @@ export interface StoreInterface {
   listPublicUsers(): Promise<User[]>;
 
   // Gigs
-  getGig(idOrSlug: string): Promise<Gig | undefined>;
+  getGig(idOrSlug: string, client?: any): Promise<Gig | undefined>;
   listGigs(status?: string): Promise<Gig[]>;
   listGigsForFreelancer(freelancerId: string): Promise<Gig[]>;
-  saveGig(gig: Gig): Promise<void>;
+  saveGig(gig: Gig, client?: any): Promise<void>;
   updateGig(id: string, updates: Record<string, any>, expectedFreelancerId?: string): Promise<Gig | null>;
   deleteGig(id: string): Promise<boolean>;
 
   // Projects
-  getProject(idOrSlug: string): Promise<Project | undefined>;
+  getProject(idOrSlug: string, client?: any): Promise<Project | undefined>;
   listProjects(status?: string): Promise<Project[]>;
   listProjectsForBuyer(buyerId: string): Promise<Project[]>;
-  saveProject(project: Project): Promise<void>;
+  saveProject(project: Project, client?: any): Promise<void>;
   deleteProject(id: string): Promise<boolean>;
 
   // Proposals
@@ -649,8 +649,9 @@ export class PostgresAsyncStore implements StoreInterface {
     return res.rows.map(mapUserRow);
   }
 
-  async getGig(idOrSlug: string): Promise<Gig | undefined> {
-    const res = await postgresStore.getPool().query(
+  async getGig(idOrSlug: string, client?: any): Promise<Gig | undefined> {
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query(
       'SELECT * FROM gigs WHERE id = $1 OR slug = $1 ORDER BY (CASE WHEN id = $1 THEN 0 ELSE 1 END) ASC LIMIT 1',
       [idOrSlug]
     );
@@ -677,12 +678,13 @@ export class PostgresAsyncStore implements StoreInterface {
     return res.rows.map(mapGigRow);
   }
 
-  async saveGig(g: Gig): Promise<void> {
+  async saveGig(g: Gig, client?: any): Promise<void> {
+    const dbRunner = client || postgresStore.getPool();
     let slug = g.slug || g.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || 'gig-' + g.id;
     if (slug.length < 2) slug = 'gig-' + g.id;
 
     try {
-      const collisionRes = await postgresStore.getPool().query(
+      const collisionRes = await dbRunner.query(
         'SELECT id FROM gigs WHERE slug = $1 AND id != $2 LIMIT 1',
         [slug, g.id]
       );
@@ -692,7 +694,7 @@ export class PostgresAsyncStore implements StoreInterface {
     } catch {}
 
     const executeInsert = async (targetSlug: string) => {
-      await postgresStore.getPool().query(
+      await dbRunner.query(
         `INSERT INTO gigs (
           id, freelancer_id, freelancer_name, freelancer_username, freelancer_avatar, freelancer_level,
           title, slug, category, subcategory, description, price, delivery_days, rating, reviews_count,
@@ -897,8 +899,9 @@ export class PostgresAsyncStore implements StoreInterface {
     return res.rowCount !== null && res.rowCount > 0;
   }
 
-  async getProject(idOrSlug: string): Promise<Project | undefined> {
-    const res = await postgresStore.getPool().query(
+  async getProject(idOrSlug: string, client?: any): Promise<Project | undefined> {
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query(
       'SELECT * FROM projects WHERE id = $1 OR slug = $1 LIMIT 1',
       [idOrSlug]
     );
@@ -925,9 +928,10 @@ export class PostgresAsyncStore implements StoreInterface {
     return res.rows.map(mapProjectRow);
   }
 
-  async saveProject(p: Project): Promise<void> {
+  async saveProject(p: Project, client?: any): Promise<void> {
+    const dbRunner = client || postgresStore.getPool();
     const slug = p.slug || p.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || 'project-' + p.id;
-    await postgresStore.getPool().query(
+    await dbRunner.query(
       `INSERT INTO projects (
         id, buyer_id, buyer_name, buyer_avatar, title, slug, category, subcategory,
         description, budget_min, budget_max, deadline_days, proposals_count, created_at,

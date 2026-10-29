@@ -482,7 +482,7 @@ router.post('/messages', requireAuth, rateLimit(120, 60_000), async (req: Reques
       type: 'message',
       title: 'New Message',
       message: `${caller.name} sent a message regarding order "${order.title}".`,
-      link: `/messages/${order.id}`,
+      link: `/workstream/${order.id}`,
       dedupKey: `msg_${newMsg.id}`,
       actorId: caller.id
     });

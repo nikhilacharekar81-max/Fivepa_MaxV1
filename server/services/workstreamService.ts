@@ -161,7 +161,7 @@ export async function postOfferMessage(order: Order, offer: WorkstreamOffer, sen
       type: 'offer',
       title: 'New Offer Activity',
       message: text,
-      link: `/messages/${order.id}`,
+      link: `/workstream/${order.id}`,
       dedupKey: `offer_${action}_${msg.id}_${userId}`,
       actorId: sender?.id,
       client
