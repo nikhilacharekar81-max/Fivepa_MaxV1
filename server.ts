@@ -314,10 +314,10 @@ if (process.env.NODE_ENV !== 'test' && !server.listening) {
           acceptedProposalId: r.accepted_proposal_id || undefined
         }));
       
-      return { gigs, users, projects, categories: [] };
+      return { gigs, users, projects, categories };
     } catch (err) {
       console.error('[SSR] Error fetching data for SSR:', err);
-      return { gigs: [], users: [], projects: [], categories: [] };
+      return { gigs: [], users: [], projects: [], categories };
     }
   });
 

@@ -81,3 +81,48 @@ export function getStatusBadge(status: string): React.ReactNode {
       );
   }
 }
+
+/**
+ * Shared Activity Date Formatter (e.g. "29 Oct 2026")
+ */
+export function formatActivityDate(rawDate?: string): string {
+  if (!rawDate) return 'Recent';
+  const parsed = new Date(rawDate);
+  if (Number.isNaN(parsed.getTime())) {
+    return rawDate;
+  }
+  return parsed.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  });
+}
+
+/**
+ * Shared Numeric Reference Code Generator
+ */
+export function toNumericRef(id?: string, fallbackIndex = 0): string {
+  if (!id) return String(3980000 + fallbackIndex);
+  const digits = id.replace(/\D/g, '');
+  if (digits.length >= 6) return digits.slice(0, 7);
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) % 9000000;
+  }
+  return String(1000000 + Math.abs(hash));
+}
+
+/**
+ * Shared Compact Currency Number Formatter (e.g. "1.5k", "10k")
+ */
+export function formatCompactAmount(amount: number): string {
+  if (!Number.isFinite(amount)) return '0';
+  if (amount >= 1000 && amount % 100 !== 0) {
+    return `${(amount / 1000).toFixed(1)}k`;
+  }
+  if (amount >= 10000) {
+    return `${(amount / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  }
+  return amount.toLocaleString();
+}
+

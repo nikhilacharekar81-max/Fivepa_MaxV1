@@ -12,7 +12,7 @@ import { financeLedger, FinanceLedgerEngine } from '../src/server/financeLedger.
 import { siteSettings, DEFAULT_SITE_SETTINGS } from '../src/server/siteSettings.js';
 import { workspaceService } from '../src/server/workspaceService.js';
 import { paymentGatewayManager } from '../src/server/paymentGateways.js';
-import { postgresStore, isPostgresEnabled } from './db/postgresStore.js';
+import { postgresStore, isPostgresEnabled, isRemotePostgresConfigured } from './db/postgresStore.js';
 import { financialRepository, financialTransactionService } from './services/financialService.js';
 
 export { financeLedger, siteSettings, DEFAULT_SITE_SETTINGS, FinanceLedgerEngine, postgresStore, isPostgresEnabled };
@@ -21,7 +21,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 export const ROOT_DIR = path.resolve(__dirname, '..');
 export const DATA_DIR = path.join(ROOT_DIR, 'data');
-export const WORKSTREAM_UPLOADS_DIR = path.join(DATA_DIR, 'workstream_uploads');
+export const WORKSTREAM_UPLOADS_DIR = path.join(DATA_DIR, 'uploads', 'workstream');
 
 import type {
   User,
@@ -1602,8 +1602,9 @@ export async function hydrateStoreFromPostgres() {
     }
 
 
-    const isProduction = process.env.NODE_ENV === 'production';
-    if (isProduction) {
+    const skipDemoSeeding = process.env.NODE_ENV === 'production' && isRemotePostgresConfigured();
+    if (skipDemoSeeding) {
+      await workspaceService.hydrateFromPostgres();
       return;
     }
 
@@ -1819,7 +1820,7 @@ export async function hydrateStoreFromPostgres() {
     const orderCount = Number(orderCountRes.rows[0]?.c || 0);
     const seedCheckUsers = await pool.query("SELECT id FROM users WHERE id IN ('u1', 'u2')");
 
-    if (!isProduction && orderCount === 0 && seedCheckUsers.rows.length === 2) {
+    if (!skipDemoSeeding && orderCount === 0 && seedCheckUsers.rows.length === 2) {
       const todayDate = new Date().toISOString().split('T')[0];
       const dueDate = new Date(Date.now() + 7 * 86400000).toISOString();
       const protectionEnd = new Date(Date.now() + 14 * 86400000).toISOString().split('T')[0];

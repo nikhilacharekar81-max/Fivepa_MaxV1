@@ -664,7 +664,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
             message: `Order #${newOrder.id} placed successfully! Funds are secured in escrow.`,
             orderId: newOrder.id
           });
-          navigate(`/messages/${newOrder.id}`);
+          navigate(`/workstream/${newOrder.id}`);
           void refresh(activeUser.id);
         } else {
           const errData = await res.json().catch(() => ({}));
@@ -697,7 +697,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         setIsLoginModalOpen(true);
         return;
       }
-      navigate('/messages');
+      navigate('/workstream');
     },
     [activeUser, navigate]
   );
@@ -719,16 +719,45 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   }, [cleanPath]);
 
   useEffect(() => {
-    if ((cleanPath.startsWith('/messages/') || cleanPath.startsWith('/orders/')) && pathParts.length >= 2) {
+    if (
+      (cleanPath.startsWith('/workstream/') ||
+        cleanPath.startsWith('/workspace/') ||
+        cleanPath.startsWith('/messages/') ||
+        cleanPath.startsWith('/orders/')) &&
+      pathParts.length >= 2
+    ) {
       const targetOrderId = pathParts[1];
-      if (targetOrderId && selectedOrder?.id !== targetOrderId) {
-        const matched = orders.find(o => o.id === targetOrderId);
-        if (matched) {
+      if (targetOrderId) {
+        const matched =
+          workstream.hydratedWorkstreamItems.find(
+            o =>
+              o.id === targetOrderId ||
+              o.workspaceId === targetOrderId ||
+              (o as any).gigOrderId === targetOrderId ||
+              (o as any).projectOrderId === targetOrderId
+          ) ||
+          orders.find(
+            o =>
+              o.id === targetOrderId ||
+              o.workspaceId === targetOrderId ||
+              (o as any).gigOrderId === targetOrderId ||
+              (o as any).projectOrderId === targetOrderId
+          );
+        if (matched && selectedOrder?.id !== matched.id) {
           setSelectedOrder(matched);
         }
       }
+    } else if (
+      cleanPath === '/workstream' ||
+      cleanPath === '/workspace' ||
+      cleanPath === '/messages' ||
+      cleanPath === '/orders'
+    ) {
+      if (selectedOrder !== null) {
+        setSelectedOrder(null);
+      }
     }
-  }, [cleanPath, pathParts, orders, selectedOrder?.id]);
+  }, [cleanPath, pathParts, orders, workstream.hydratedWorkstreamItems, selectedOrder]);
 
   // Route flags
   const isGigsList = cleanPath === '/gigs' || cleanPath.startsWith('/categories');
@@ -913,7 +942,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       ? workstream.hydratedWorkstreamItems.find(o => o.id === routeOrderId || o.workspaceId === routeOrderId || (o as any).gigOrderId === routeOrderId || (o as any).projectOrderId === routeOrderId) ||
         orders.find(o => o.id === routeOrderId || o.workspaceId === routeOrderId || (o as any).gigOrderId === routeOrderId || (o as any).projectOrderId === routeOrderId) ||
         (selectedOrder?.id === routeOrderId || selectedOrder?.workspaceId === routeOrderId ? selectedOrder : null)
-      : workstream.selectedOrder || selectedOrder;
+      : null;
 
     if (rawActiveOrder) {
       const hydratedActiveOrder = {
@@ -936,7 +965,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
           partner={workstreamPartner}
           onBack={() => {
             setSelectedOrder(null);
-            navigate('/messages');
+            navigate('/workstream');
           }}
           onSendMessage={workstream.sendMessage}
           onAttachFile={(file) => workstream.sendMessage(`Attached file: ${file.name}`, 'file', file)}
@@ -961,7 +990,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
             onSelectOrder={(id: string) => {
               const matched = orders.find(o => o.id === id);
               setSelectedOrder(matched || null);
-              navigate(`/messages/${id}`);
+              navigate(`/workstream/${id}`);
             }}
             starredIds={starredOrderIds}
             onToggleStar={toggleStarOrder}
@@ -1064,7 +1093,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
           navigate={navigate}
           onOpenWorkstream={(ord) => {
             setSelectedOrder(ord);
-            navigate(`/messages/${ord.id}`);
+            navigate(`/workstream/${ord.id}`);
           }}
           onBalanceUpdate={refresh}
         />
@@ -1181,10 +1210,10 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
                 }`}
               />
               <span className="font-bold">{orderFeedback.message}</span>
-              {orderFeedback.orderId && cleanPath !== `/messages/${orderFeedback.orderId}` && (
+              {orderFeedback.orderId && cleanPath !== `/workstream/${orderFeedback.orderId}` && cleanPath !== `/messages/${orderFeedback.orderId}` && (
                 <button
                   type="button"
-                  onClick={(e) => navigate(`/messages/${orderFeedback.orderId}`, e)}
+                  onClick={(e) => navigate(`/workstream/${orderFeedback.orderId}`, e)}
                   className="underline font-bold text-emerald-700 hover:text-emerald-900 cursor-pointer ml-1"
                 >
                   View Workstream #{orderFeedback.orderId}

@@ -105,14 +105,17 @@ export function Header({
   };
 
   useEffect(() => {
-    if (!currentUser?.id || typeof window === 'undefined') {
+    const token = getAuthToken();
+    if (!currentUser?.id || !token || typeof window === 'undefined') {
       setNotifications([]);
       return;
     }
     const fetchNotifs = async () => {
+      const currentToken = getAuthToken();
+      if (!currentToken) return;
       try {
         const res = await fetch('/api/notifications', {
-          headers: { 'Authorization': `Bearer ${getAuthToken() || ''}` }
+          headers: { 'Authorization': `Bearer ${currentToken}` }
         });
         if (res.ok) {
           const data = await res.json();

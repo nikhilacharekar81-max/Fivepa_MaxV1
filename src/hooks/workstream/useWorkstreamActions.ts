@@ -49,21 +49,19 @@ export function useWorkstreamActions({
         setOrders(prev => [savedOrder, ...prev]);
         setSelectedOrder(savedOrder);
         setIsStartWorkstreamModalOpen(false);
-        navigate(`/messages/${savedOrder.id}`);
+        navigate(`/workstream/${savedOrder.id}`);
         return;
       } else {
         const err = await res.json().catch(() => ({}));
         console.warn('Backend order creation returned status', res.status, err);
-        alert(err.error || 'Failed to create persistent workstream on server.');
       }
     } catch (err) {
       console.error('Failed to create persistent order on server:', err);
-      alert('Network error creating workstream.');
     }
   };
 
   const handleContactSeller = async (sellerId: string, _sellerName: string, _gigTitle: string) => {
-    navigate(`/messages?contact=${sellerId}`);
+    navigate(`/workstream?contact=${sellerId}`);
   };
 
   return {

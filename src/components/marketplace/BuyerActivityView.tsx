@@ -14,6 +14,7 @@ import { getAuthToken, setAuthToken, requestDemoSession } from '../../utils/auth
 import { getDeviceId } from '../../utils/deviceId';
 import { DEFAULT_AVATAR, DEFAULT_GIG_IMAGE } from '../../constants';
 import { getGigUrl } from '../../utils/slugify';
+import { formatActivityDate, toNumericRef, formatCompactAmount } from '../../utils/formatters';
 
 interface BuyerActivityViewProps {
   projects: Project[];
@@ -30,41 +31,6 @@ interface BuyerActivityViewProps {
 type MainSectionTab = 'projects' | 'gigs';
 type ProjectSubTab = 'all' | 'open' | 'in_progress' | 'completed' | 'pending' | 'declined' | 'archived';
 type GigSubTab = 'all' | 'active' | 'delivered' | 'completed' | 'pending' | 'declined';
-
-function formatActivityDate(rawDate?: string): string {
-  if (!rawDate) return 'Recent';
-  const parsed = new Date(rawDate);
-  if (Number.isNaN(parsed.getTime())) {
-    return rawDate;
-  }
-  return parsed.toLocaleDateString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric'
-  });
-}
-
-function toNumericRef(id?: string, fallbackIndex = 0): string {
-  if (!id) return String(3980000 + fallbackIndex);
-  const digits = id.replace(/\D/g, '');
-  if (digits.length >= 6) return digits.slice(0, 7);
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash * 31 + id.charCodeAt(i)) % 9000000;
-  }
-  return String(1000000 + Math.abs(hash));
-}
-
-function formatCompactAmount(amount: number): string {
-  if (!Number.isFinite(amount)) return '0';
-  if (amount >= 1000 && amount % 100 !== 0) {
-    return `${(amount / 1000).toFixed(1)}k`;
-  }
-  if (amount >= 10000) {
-    return `${(amount / 1000).toFixed(1).replace(/\.0$/, '')}k`;
-  }
-  return amount.toLocaleString();
-}
 
 export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
   projects,
@@ -260,7 +226,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
       if (onOpenWorkstream) {
         onOpenWorkstream(ord);
       } else {
-        navigate(`/messages/${ord.id}`);
+        navigate(`/workstream/${ord.id}`);
       }
     },
     [onOpenWorkstream, navigate]

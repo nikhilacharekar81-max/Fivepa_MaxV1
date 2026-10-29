@@ -10,7 +10,7 @@ import {
   type User,
   type WorkstreamOffer
 } from '../store.js';
-import { calculateOrderFees } from '../domains/finance/fees.js';
+import { calculateOrderFees, quoteOrderWithLiveSettings } from '../domains/finance/fees.js';
 import { checkOrRecordIdempotency, recordIdempotencyResult } from '../domains/finance/index.js';
 import { postgresStore } from '../db/postgresStore.js';
 import { financialRepository, financialTransactionService } from '../domains/finance/financial.service.js';
@@ -26,7 +26,8 @@ import {
   safeUser,
   orderParticipantSafeUser,
   isStaffUser,
-  formatApiError
+  formatApiError,
+  escapeHtml
 } from '../middleware/auth.js';
 import {
   tryAcquireOrderLock,
@@ -68,15 +69,6 @@ import {
 } from '../services/workstreamService.js';
 import { workspaceService } from '../../src/server/workspaceService.js';
 import { handleSubmitReview } from './reviewRoutes.js';
-
-function escapeHtml(text: string): string {
-  if (typeof text !== 'string') return '';
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
 
 const router = Router();
 
@@ -509,7 +501,7 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
           escrowProtectionEndDate: new Date(Date.now() + DEFAULT_SITE_SETTINGS.commission.escrowProtectionDays * 86400000).toISOString().split('T')[0],
           gigId: req.body.gigId,
           projectId: req.body.projectId,
-          feeBreakdown: calculateOrderFees(rawAmount),
+          feeBreakdown: await quoteOrderWithLiveSettings(rawAmount).catch(() => calculateOrderFees(rawAmount)),
           ...(requirements ? { requirements } : {}),
           selectedExtras: selectedExtrasDetails
         };

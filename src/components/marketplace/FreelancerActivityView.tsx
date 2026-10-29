@@ -15,6 +15,7 @@ import { getGigUrl } from '../../utils/slugify';
 import { getAuthToken } from '../../utils/authToken';
 import { getDeviceId } from '../../utils/deviceId';
 import { DEFAULT_AVATAR } from '../../constants';
+import { formatActivityDate, toNumericRef } from '../../utils/formatters';
 
 interface FreelancerActivityViewProps {
   currentUser: UserAccount | null;
@@ -32,30 +33,6 @@ interface FreelancerActivityViewProps {
 type MainSectionTab = 'projects' | 'gigs';
 type ProjectSubTab = 'all' | 'pending_proposals' | 'in_progress' | 'completed';
 type GigSubTab = 'all' | 'active' | 'paused' | 'pending' | 'declined' | 'featured';
-
-function formatActivityDate(rawDate?: string): string {
-  if (!rawDate) return 'Recent';
-  const parsed = new Date(rawDate);
-  if (Number.isNaN(parsed.getTime())) {
-    return rawDate;
-  }
-  return parsed.toLocaleDateString('en-GB', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric'
-  });
-}
-
-function toNumericRef(id?: string, fallbackIndex = 0): string {
-  if (!id) return String(3980000 + fallbackIndex);
-  const digits = id.replace(/\D/g, '');
-  if (digits.length >= 6) return digits.slice(0, 7);
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash * 31 + id.charCodeAt(i)) % 9000000;
-  }
-  return String(1000000 + Math.abs(hash));
-}
 
 function isOrderCompletedOrActive(order: Order): boolean {
   return (
@@ -374,7 +351,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       if (onOpenWorkstream) {
         onOpenWorkstream(order);
       } else {
-        navigate(`/messages/${order.id}`);
+        navigate(`/workstream/${order.id}`);
       }
       return;
     }
@@ -384,7 +361,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       if (matchedOrder && onOpenWorkstream) {
         onOpenWorkstream(matchedOrder);
       } else {
-        navigate(`/messages/${orderId}`);
+        navigate(`/workstream/${orderId}`);
       }
       return;
     }
@@ -397,7 +374,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
         if (onOpenWorkstream) {
           onOpenWorkstream(matchedProjectOrder);
         } else {
-          navigate(`/messages/${matchedProjectOrder.id}`);
+          navigate(`/workstream/${matchedProjectOrder.id}`);
         }
         return;
       }
@@ -405,7 +382,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       return;
     }
 
-    navigate('/messages');
+    navigate('/workstream');
   };
 
   // Gig action handlers
@@ -578,7 +555,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       if (onOpenWorkstream) {
         onOpenWorkstream(gigOrder);
       } else {
-        navigate(`/messages/${gigOrder.id}`);
+        navigate(`/workstream/${gigOrder.id}`);
       }
       return;
     }

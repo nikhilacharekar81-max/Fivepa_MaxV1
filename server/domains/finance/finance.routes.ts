@@ -31,7 +31,8 @@ import {
   rateLimit,
   resolveAuthenticatedUserId,
   IS_PRODUCTION,
-  formatApiError
+  formatApiError,
+  areSimulatedDepositsAllowed
 } from '../../middleware/auth.js';
 import {
   orderStateLocks,
@@ -61,14 +62,10 @@ import {
   processPayout,
   rejectPayout,
   failPayout,
-  retryPayout
+  retryPayout,
+  formatPayoutRow
 } from './payout.service.js';
 import { DEFAULT_FEE_CONFIG, calculateOrderFees, quoteOrderWithLiveSettings } from './fees.js';
-
-function areSimulatedDepositsAllowed(): boolean {
-  if (process.env.NODE_ENV === 'production') return false;
-  return true;
-}
 
 function formatRefundRow(r: any): Refund {
   return {
@@ -80,10 +77,6 @@ function formatRefundRow(r: any): Refund {
     status: r.status,
     createdAt: r.created_at
   };
-}
-
-function formatPayoutRow(r: any): Payout {
-  return mapPayoutRow(r);
 }
 
 function formatPaymentMethodRow(r: any): PaymentMethodRecord {
@@ -267,12 +260,14 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     const paidToDate = userPaidOrders.reduce((sum, o) => sum + (o.amount || 0), 0);
     const paidThisMonth = userPaidOrders.filter(o => (o.createdAt || '').startsWith(currentYearMonth)).reduce((sum, o) => sum + (o.amount || 0), 0);
 
+    const resolveOrderNet = (o: Order) =>
+      Number((o.feeBreakdown as any)?.freelancerNet ?? calculateOrderFees(o.amount).freelancerNet);
     const userEarnedOrders = userOrders.filter(o => o.sellerId === userId && o.status === 'completed');
-    const earnedToDate = Number(u?.earned || 0) || userEarnedOrders.reduce((sum, o) => sum + financeLedger.quoteOrder(o.amount).freelancerNet, 0);
-    const earnedThisMonth = userEarnedOrders.filter(o => (o.createdAt || '').startsWith(currentYearMonth)).reduce((sum, o) => sum + financeLedger.quoteOrder(o.amount).freelancerNet, 0);
+    const earnedToDate = Number(u?.earned || 0) || userEarnedOrders.reduce((sum, o) => sum + resolveOrderNet(o), 0);
+    const earnedThisMonth = userEarnedOrders.filter(o => (o.createdAt || '').startsWith(currentYearMonth)).reduce((sum, o) => sum + resolveOrderNet(o), 0);
     const earnedPastTwoMonths = userEarnedOrders
       .filter(o => (o.completedAt || o.createdAt || '') >= twoMonthsAgoDate)
-      .reduce((sum, o) => sum + financeLedger.quoteOrder(o.amount).freelancerNet, 0);
+      .reduce((sum, o) => sum + resolveOrderNet(o), 0);
 
     let userMethods: PaymentMethodRecord[] = [];
     try {
@@ -1185,17 +1180,20 @@ router.get('/payments/transactions/:userId', requireAuth, async (req: Request, r
           });
         }
         if (ord.sellerId === userId && ord.status === 'completed') {
+          const ordQuote = (ord.feeBreakdown as any)?.freelancerNet !== undefined
+            ? (ord.feeBreakdown as any)
+            : await quoteOrderWithLiveSettings(ord.amount).catch(() => calculateOrderFees(ord.amount));
           syn.push({
             id: `txn_rel_${ord.id}`,
             type: 'escrow_release',
-            amount: financeLedger.quoteOrder(ord.amount).freelancerNet,
+            amount: ordQuote.freelancerNet,
             currency: 'USD',
             timestamp: `${ord.dueDate} 15:30:00`,
             status: 'completed',
             userId: userId,
             userName: ord.sellerUsername || 'Freelancer',
             userRole: 'freelancer',
-            description: `Escrow earnings (${financeLedger.quoteOrder(ord.amount).freelancerPercent}% net) from: ${ord.title}`,
+            description: `Escrow earnings (${ordQuote.freelancerPercent}% net) from: ${ord.title}`,
             relatedOrderId: ord.id
           });
         }
@@ -1227,7 +1225,9 @@ router.get('/payments/invoices/:userId', requireAuth, async (req: Request, res: 
     const orderInvoices = await Promise.all(userOrders.map(async o => {
       const isBuyer = o.buyerId === userId;
       const otherUser = await store.getUser(isBuyer ? o.sellerId : o.buyerId);
-      const quote = financeLedger.quoteOrder(o.amount);
+      const quote = (o.feeBreakdown as any)?.clientTotal !== undefined
+        ? (o.feeBreakdown as any)
+        : await quoteOrderWithLiveSettings(o.amount).catch(() => calculateOrderFees(o.amount));
       return {
         id: `inv_ord_${o.id}`,
         invoiceNumber: `INV-${o.id.replace('ord_', '').toUpperCase()}`,
@@ -1848,9 +1848,10 @@ router.get('/admin/finance/escrow', requireAdmin, async (req: Request, res: Resp
 
       const esc = escrowMap.get(o.id);
       const fbComm = (o.feeBreakdown as any)?.commissionPercent;
+      const liveCommRate = siteSettings.getSettings()?.commission?.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent;
       const effectiveCommRate = (esc?.commissionPercent !== undefined && esc?.commissionPercent !== null)
         ? Number(esc.commissionPercent)
-        : (fbComm !== undefined && fbComm !== null ? Number(fbComm) : financeLedger.getPlatformCommissionRate());
+        : (fbComm !== undefined && fbComm !== null ? Number(fbComm) : liveCommRate);
 
       return {
         ...enriched,

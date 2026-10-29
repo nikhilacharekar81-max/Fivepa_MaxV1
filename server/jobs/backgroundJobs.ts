@@ -49,7 +49,7 @@ export async function runBackgroundJobs() {
       }
       isClearingJobRunning = false;
     }
-  }, 5 * 60 * 1000);
+  }, 5 * 60 * 1000).unref();
 
   // 2. Cancellation Timeouts Job (Every 60 seconds with session advisory lock on remote Postgres)
   setInterval(async () => {
@@ -78,7 +78,7 @@ export async function runBackgroundJobs() {
       }
       isCancelTimeoutJobRunning = false;
     }
-  }, 60 * 1000);
+  }, 60 * 1000).unref();
 
   // 3. Buyer Review Window & Auto-Accept Job (Every 60 seconds with session advisory lock on remote Postgres)
   setInterval(async () => {
@@ -107,5 +107,5 @@ export async function runBackgroundJobs() {
       }
       isAutoAcceptJobRunning = false;
     }
-  }, 60 * 1000);
+  }, 60 * 1000).unref();
 }

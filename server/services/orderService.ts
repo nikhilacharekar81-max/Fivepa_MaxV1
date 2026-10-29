@@ -5,6 +5,7 @@ import {
   messages,
   disputes,
   auditLogs,
+  saveOrdersToDisk,
   type Order,
   type Gig,
   type User,
@@ -12,6 +13,11 @@ import {
   type AuditLog,
   type Message
 } from '../store.js';
+import {
+  LATE_ORDER_PROTECTION_HOURS,
+  parseDeadlineInstant,
+  isOrderVeryLate
+} from '../../src/utils/deadlineUtils.js';
 import { postgresStore } from '../db/postgresStore.js';
 import {
   financialTransactionService,
@@ -96,7 +102,7 @@ export async function registerAuditLog(log: AuditLog, client?: any): Promise<voi
   }
 }
 
-export function saveOrdersToDisk() { return Promise.resolve(); }
+export { saveOrdersToDisk };
 export function saveUsersToPostgres() { return Promise.resolve(); }
 export function saveGigsToPostgres() { return Promise.resolve(); }
 
@@ -247,43 +253,7 @@ export function isAutoAcceptEnabled(): boolean {
   return getReviewWindowDays() > 0;
 }
 
-export const LATE_ORDER_PROTECTION_HOURS = 48;
-
-/**
- * Parses an order deadline into an authoritative UTC timestamp in milliseconds.
- * - Full ISO timestamps (e.g. 2026-10-30T14:30:00.000Z) are parsed directly.
- * - Legacy date-only records (e.g. 2026-10-30) are handled conservatively:
- *   If the order's creation timestamp has a valid time-of-day, that time-of-day is preserved.
- *   Otherwise, the date-only record is treated as end-of-day (23:59:59.999Z) so the deadline
- *   is never prematurely triggered earlier than intended.
- * - Invalid or unparseable inputs return null.
- */
-export function parseDeadlineInstant(dueDate: unknown, referenceCreatedAt?: unknown): number | null {
-  if (!dueDate || typeof dueDate !== 'string') return null;
-  const trimmed = dueDate.trim();
-  if (!trimmed) return null;
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    if (referenceCreatedAt && typeof referenceCreatedAt === 'string' && referenceCreatedAt.includes('T')) {
-      const createdDate = new Date(referenceCreatedAt);
-      if (!isNaN(createdDate.getTime())) {
-        const timePart = referenceCreatedAt.split('T')[1];
-        if (timePart) {
-          const candidate = new Date(`${trimmed}T${timePart}`);
-          if (!isNaN(candidate.getTime())) {
-            return candidate.getTime();
-          }
-        }
-      }
-    }
-    const endOfDay = new Date(`${trimmed}T23:59:59.999Z`);
-    return isNaN(endOfDay.getTime()) ? null : endOfDay.getTime();
-  }
-
-  const parsed = new Date(trimmed);
-  const time = parsed.getTime();
-  return isNaN(time) ? null : time;
-}
+export { LATE_ORDER_PROTECTION_HOURS, parseDeadlineInstant, isOrderVeryLate };
 
 /**
  * Calculates a new extended deadline instant from an existing deadline.

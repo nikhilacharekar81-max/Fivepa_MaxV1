@@ -116,7 +116,7 @@ test('Strict Auth Verification: Signup, Login Gating, and Verification Flow', as
     assert.ok(verifiedLoginData.token, 'Verified login must return session token');
   } finally {
     try { (server as any).closeAllConnections?.(); } catch {}
-    server.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     try {
       await postgresStore.getPool().end();
     } catch {}

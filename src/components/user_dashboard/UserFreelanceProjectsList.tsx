@@ -2,6 +2,7 @@ import React from 'react';
 import { MapPin } from 'lucide-react';
 import { Order } from '../../types';
 import { DEFAULT_AVATAR } from '../../constants';
+import { formatCompactAmount } from '../../utils/formatters';
 
 export interface FreelancerProjectActivityItem {
   id: string;
@@ -24,17 +25,6 @@ interface UserFreelanceProjectsListProps {
   orders?: Order[];
   freelanceSubFilter: string;
   onOpenWorkstream: (orderId: string, order?: Order, projectId?: string) => void;
-}
-
-function formatCompactAmount(amount: number): string {
-  if (!Number.isFinite(amount)) return '0';
-  if (amount >= 1000 && amount % 100 !== 0) {
-    return `${(amount / 1000).toFixed(1)}k`;
-  }
-  if (amount >= 10000) {
-    return `${(amount / 1000).toFixed(1).replace(/\.0$/, '')}k`;
-  }
-  return amount.toLocaleString();
 }
 
 export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps> = ({

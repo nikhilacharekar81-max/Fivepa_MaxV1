@@ -23,7 +23,8 @@ import {
   isStaffUser,
   canAccessOrderWorkstream,
   resolveAuthenticatedUserId,
-  formatApiError
+  formatApiError,
+  escapeHtml
 } from '../middleware/auth.js';
 import {
   tryAcquireOrderLock,
@@ -67,15 +68,6 @@ import {
   workstreamFilenameFromUrl,
   generateCollisionSafeOfferNumber
 } from '../services/workstreamService.js';
-
-function escapeHtml(text: string): string {
-  if (typeof text !== 'string') return '';
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
 
 async function saveOfferToDb(offer: WorkstreamOffer, client?: any): Promise<void> {
   await store.saveOffer(offer, client);

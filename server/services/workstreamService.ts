@@ -5,6 +5,7 @@ import { Request } from 'express';
 import {
   store,
   mapProposalRow,
+  WORKSTREAM_UPLOADS_DIR,
   type Order,
   type Proposal,
   type WorkstreamOffer,
@@ -12,7 +13,7 @@ import {
   type Message
 } from '../store.js';
 import { postgresStore } from '../db/postgresStore.js';
-import { calculateOrderFees } from '../domains/finance/fees.js';
+import { calculateOrderFees, quoteOrderWithLiveSettings } from '../domains/finance/fees.js';
 import { financialRepository } from './financialService.js';
 import { siteSettings } from '../../src/server/siteSettings.js';
 import { isStaffUser } from '../middleware/auth.js';
@@ -20,7 +21,7 @@ import { recordMessage } from './messagingService.js';
 import { broadcastMessage } from '../websocket.js';
 import { createNotification } from './notificationService.js';
 
-export const WORKSTREAM_UPLOADS_DIR = path.resolve(process.cwd(), 'data', 'uploads', 'workstream');
+export { WORKSTREAM_UPLOADS_DIR };
 if (!fs.existsSync(WORKSTREAM_UPLOADS_DIR)) {
   fs.mkdirSync(WORKSTREAM_UPLOADS_DIR, { recursive: true });
 }
@@ -112,14 +113,17 @@ export async function viewOffer(o: WorkstreamOffer) {
   let additionalAmount: number | undefined;
   let clientAdditionalTotal: number | undefined;
   try {
-    clientTotal = calculateOrderFees(o.amount)?.clientTotal;
+    const liveQuote = await quoteOrderWithLiveSettings(o.amount).catch(() => calculateOrderFees(o.amount));
+    clientTotal = liveQuote?.clientTotal;
     if (o.kind === 'invoice') {
       const ord = await store.getOrder(o.orderId);
       const escrow = ord ? await financialRepository.getEscrow(ord.id) : null;
       const curr = ord ? (o.status === 'pending' ? (escrow?.remaining ?? (ord.status === 'completed' || ord.status === 'cancelled' ? 0 : Number(ord.amount || 0))) : Number(ord.amount || 0)) : 0;
-      additionalAmount = Math.max(0, Math.round((o.amount - curr) * 100) / 100);
-      if (additionalAmount > 0) {
-        clientAdditionalTotal = calculateOrderFees(additionalAmount)?.clientTotal;
+      const addAmt = Math.max(0, Math.round((o.amount - curr) * 100) / 100);
+      additionalAmount = addAmt;
+      if (addAmt > 0) {
+        const addQuote = await quoteOrderWithLiveSettings(addAmt).catch(() => calculateOrderFees(addAmt));
+        clientAdditionalTotal = addQuote?.clientTotal;
       } else {
         clientAdditionalTotal = 0;
       }
