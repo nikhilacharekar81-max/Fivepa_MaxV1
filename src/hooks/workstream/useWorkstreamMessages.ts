@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, Dispatch, SetStateAction } from 'react';
+import { useState, useCallback, useRef, useEffect, Dispatch, SetStateAction } from 'react';
 import { Message } from '../../types';
 import { getAuthToken, clearAuthToken } from '../../utils/authToken';
 import { fetchWithRetry } from '../../utils/fetchRetry';
@@ -83,7 +83,13 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
     } catch (err) {
       console.error('Error fetching messages:', err);
     }
-  }, []);
+  }, [setMessages]);
+
+  useEffect(() => {
+    if (options.activeOrderId) {
+      fetchMessages(options.activeOrderId);
+    }
+  }, [options.activeOrderId, fetchMessages]);
 
   const sendMessage = useCallback(async (text: string, type: string = 'text', fileInfo?: any, targetOrderId?: string) => {
     const activeOrderId = targetOrderId || activeOrderIdRef.current || activeFetchOrderIdRef.current;

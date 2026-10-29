@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Star, Sparkles, Clock, RefreshCw, ShieldCheck, Lock, MessageSquare, AlertCircle } from 'lucide-react';
+import { Star, Sparkles, Clock, RefreshCw, ShieldCheck, Lock, MessageSquare, AlertCircle, CheckCircle2, Loader2, X } from 'lucide-react';
 import { Gig, Review, UserAccount, Order } from '../../types';
 import { RelatedGigsSection } from './RelatedGigsSection';
 import { Reviews } from '../gig_reviews';
@@ -30,6 +30,9 @@ interface GigDetailViewProps {
   navigate: (path: string, e?: React.MouseEvent) => void;
   handleContactSeller: (freelancerId: string, freelancerName: string, gigTitle: string, gigId?: string, projectId?: string) => void;
   handleCreateOrder: (orderTitle: string, priceUSD: number, sellerId: string, gigId?: string, extraIds?: string[]) => void;
+  isCreatingOrder?: boolean;
+  orderFeedback?: { type: 'success' | 'error'; message: string; orderId?: string } | null;
+  onDismissOrderFeedback?: () => void;
   slugify?: (text: string) => string;
 }
 
@@ -42,6 +45,9 @@ export const GigDetailView: React.FC<GigDetailViewProps> = ({
   navigate,
   handleContactSeller,
   handleCreateOrder,
+  isCreatingOrder = false,
+  orderFeedback = null,
+  onDismissOrderFeedback,
   slugify
 }) => {
   const [selectedExtras, setSelectedExtras] = useState<string[]>([]);
@@ -362,6 +368,46 @@ export const GigDetailView: React.FC<GigDetailViewProps> = ({
                     <span>100% Escrow Protection. Funds are safely held until work is delivered and approved.</span>
                   </div>
 
+                  {orderFeedback && (
+                    <div
+                      className={`p-3.5 rounded-2xl border text-xs flex items-start justify-between gap-2.5 ${
+                        orderFeedback.type === 'success'
+                          ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                          : 'bg-rose-50 border-rose-300 text-rose-900'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2">
+                        {orderFeedback.type === 'success' ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                        )}
+                        <div className="space-y-1">
+                          <span className="font-semibold block">{orderFeedback.message}</span>
+                          {orderFeedback.orderId && (
+                            <button
+                              type="button"
+                              onClick={(e) => navigate(`/messages/${orderFeedback.orderId}`, e)}
+                              className="underline font-bold text-emerald-700 hover:text-emerald-900 cursor-pointer"
+                            >
+                              Open Workstream #{orderFeedback.orderId} →
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {onDismissOrderFeedback && (
+                        <button
+                          type="button"
+                          onClick={onDismissOrderFeedback}
+                          className="text-slate-400 hover:text-slate-700 cursor-pointer shrink-0"
+                          aria-label="Dismiss message"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+
                   {currentGig.status === 'paused' ? (
                     <div className="p-4 bg-amber-50 border border-amber-300 rounded-2xl text-center space-y-1">
                       <div className="flex items-center justify-center gap-2 text-amber-900 font-bold text-xs">
@@ -372,6 +418,7 @@ export const GigDetailView: React.FC<GigDetailViewProps> = ({
                     </div>
                   ) : (
                     <button 
+                      disabled={isCreatingOrder}
                       onClick={() => handleCreateOrder(
                         `${currentGig.title}${selectedExtrasObjects.length > 0 ? ` (with ${selectedExtrasObjects.length} extra add-ons)` : ''}`, 
                         totalUSD, 
@@ -379,10 +426,23 @@ export const GigDetailView: React.FC<GigDetailViewProps> = ({
                         currentGig.id,
                         selectedExtras
                       )}
-                      className="w-full py-4 bg-emerald-500 text-slate-950 font-bold rounded-2xl hover:bg-emerald-400 transition-colors shadow-md text-xs flex items-center justify-center gap-2 cursor-pointer"
+                      className={`w-full py-4 font-bold rounded-2xl transition-colors shadow-md text-xs flex items-center justify-center gap-2 ${
+                        isCreatingOrder
+                          ? 'bg-emerald-300 text-slate-800 cursor-wait'
+                          : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400 cursor-pointer'
+                      }`}
                     >
-                      <Lock className="w-4 h-4" />
-                      <span>Fund in Escrow & Order Now</span>
+                      {isCreatingOrder ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Processing Escrow Order...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Lock className="w-4 h-4" />
+                          <span>Fund in Escrow & Order Now</span>
+                        </>
+                      )}
                     </button>
                   )}
                 </>

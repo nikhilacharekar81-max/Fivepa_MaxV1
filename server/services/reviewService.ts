@@ -49,6 +49,32 @@ export async function recalculateUserRating(userId: string): Promise<void> {
 
 export const recomputeTalentStats = recalculateUserRating;
 
+export async function recalculateGigRating(gigId: string): Promise<void> {
+  if (!gigId) return;
+  try {
+    const pool = postgresStore.getPool();
+    const res = await pool.query(
+      `SELECT COUNT(r.id) as count, COALESCE(AVG(r.rating), 5.0) as avg_rating
+       FROM reviews r
+       LEFT JOIN orders o ON r.order_id = o.id
+       WHERE (r.gig_id = $1 OR o.gig_id = $1)
+         AND o.status = 'completed'
+         AND r.is_cancelled_order = false
+         AND (r.moderation_status = 'approved' OR r.moderation_status IS NULL)
+         AND r.reviewer_id = o.buyer_id`,
+      [gigId]
+    );
+    const count = Number(res.rows[0]?.count || 0);
+    const avg = count > 0 ? Number(Number(res.rows[0]?.avg_rating).toFixed(1)) : 5.0;
+    await pool.query(
+      'UPDATE gigs SET reviews_count = $1, rating = $2 WHERE id = $3',
+      [count, avg, gigId]
+    );
+  } catch (err) {
+    console.error(`[reviewService] Error recalculating rating for gig ${gigId}:`, err);
+  }
+}
+
 export function sanitizePublicReview(r: Review): Review {
   const { moderationReason, moderationNotes, ...publicRev } = r as any;
   return publicRev;

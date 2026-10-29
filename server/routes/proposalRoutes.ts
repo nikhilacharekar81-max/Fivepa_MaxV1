@@ -210,7 +210,7 @@ export async function processProposalAccept(req: any, res: any) {
       const today = new Date().toISOString().split('T')[0];
       const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays;
       const deliveryDays = proposal.deliveryDays || 7;
-      const dueDate = new Date(Date.now() + deliveryDays * 86400000).toISOString().split('T')[0];
+      const dueDate = new Date(Date.now() + deliveryDays * 86400000).toISOString();
 
       const order: Order = {
         id: orderId,

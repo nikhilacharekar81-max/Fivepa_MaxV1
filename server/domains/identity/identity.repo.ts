@@ -84,7 +84,7 @@ export class IdentityRepo {
   }
 
   async listUsers(): Promise<User[]> {
-    const res = await this.ctx.getPool().query('SELECT * FROM users');
+    const res = await this.ctx.getPool().query("SELECT * FROM users WHERE id != 'system'");
     return res.rows.map(mapUserRow);
   }
 

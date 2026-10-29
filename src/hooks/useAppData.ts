@@ -69,9 +69,13 @@ export const useAppData = (initialData?: any) => {
           }
         }
         if (token) {
-          const [b64] = token.split('.');
-          if (b64 && typeof atob === 'function') {
-            const json = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
+          const parts = token.split('.');
+          if (parts[1] && typeof atob === 'function') {
+            let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            while (b64.length % 4 !== 0) {
+              b64 += '=';
+            }
+            const json = atob(b64);
             const payload = JSON.parse(json);
             if (payload?.role) {
               tokenUserRole = payload.role;

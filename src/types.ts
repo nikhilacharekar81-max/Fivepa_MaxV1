@@ -4,6 +4,7 @@ export interface GigExtra {
   id: string;
   title: string;
   price: number;
+  deliveryDays?: number;
 }
 
 export interface Review {
@@ -280,6 +281,7 @@ export interface Order {
     rejectionReason?: string;
   }>;
   cancellationType?: 'very_late' | 'mutual' | 'auto';
+  selectedExtras?: GigExtra[];
 }
 
 export interface UserAccount {

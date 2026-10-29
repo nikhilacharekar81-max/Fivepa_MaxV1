@@ -23,7 +23,7 @@ if (typeof window !== 'undefined') {
 }
 
 const initialData = typeof window !== 'undefined' ? window.__INITIAL_DATA__ : undefined;
-const initialPath = typeof window !== 'undefined' ? window.location.pathname : '/';
+const initialPath = typeof window !== 'undefined' ? (window.location.pathname + window.location.search) : '/';
 const rootElement = document.getElementById('root')!;
 
 if (rootElement.hasChildNodes() && initialData) {

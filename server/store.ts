@@ -83,20 +83,21 @@ export type {
 
 export interface StoreInterface {
   // Orders
-  getOrder(id: string): Promise<Order | undefined>;
-  saveOrder(order: Order): Promise<void>;
+  mapOrderRow?(r: any): Order;
+  getOrder(id: string, client?: any): Promise<Order | undefined>;
+  saveOrder(order: Order, client?: any): Promise<void>;
   listOrders(): Promise<Order[]>;
   listOrdersForUser(userId: string): Promise<Order[]>;
   listOrdersByProjectId(projectId: string): Promise<Order[]>;
-  updateOrderStatus(orderId: string, updates: Record<string, any>, allowedStatuses: string[]): Promise<boolean>;
+  updateOrderStatus(orderId: string, updates: Record<string, any>, allowedStatuses: string[], client?: any): Promise<boolean>;
 
   // Users
-  getUser(id: string): Promise<User | undefined>;
+  getUser(id: string, client?: any): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   getUserByMobile(mobile: string): Promise<User | undefined>;
   getUserByEmailOrMobile(identifier: string): Promise<User | undefined>;
-  saveUser(user: User): Promise<void>;
+  saveUser(user: User, client?: any): Promise<void>;
   listUsers(): Promise<User[]>;
   listPublicUsers(): Promise<User[]>;
 
@@ -105,6 +106,7 @@ export interface StoreInterface {
   listGigs(status?: string): Promise<Gig[]>;
   listGigsForFreelancer(freelancerId: string): Promise<Gig[]>;
   saveGig(gig: Gig): Promise<void>;
+  updateGig(id: string, updates: Record<string, any>, expectedFreelancerId?: string): Promise<Gig | null>;
   deleteGig(id: string): Promise<boolean>;
 
   // Projects
@@ -171,15 +173,15 @@ export interface StoreInterface {
   markUserEmailRead(id: string, userId?: string): Promise<void>;
 
   // Notifications
-  saveNotification(n: Notification): Promise<{ inserted: boolean; duplicate?: boolean }>;
+  saveNotification(n: Notification, client?: any): Promise<{ inserted: boolean; duplicate?: boolean }>;
   listNotificationsForUser(userId: string): Promise<Notification[]>;
   markNotificationRead(id: string, userId: string): Promise<void>;
   markAllNotificationsRead(userId: string): Promise<void>;
 
   // Messages, Reviews, Uploads
-  listMessages(orderId: string): Promise<Message[]>;
+  listMessages(orderId: string, client?: any): Promise<Message[]>;
   getMessageByClientMsgId(orderId: string, senderId: string, clientMsgId: string): Promise<Message | undefined>;
-  addMessage(message: Message): Promise<void>;
+  addMessage(message: Message, client?: any): Promise<void>;
   addReview(review: Review): Promise<void>;
   saveReview(review: Review): Promise<void>;
   upsertReview(review: Review): Promise<void>;
@@ -249,7 +251,8 @@ export function mapOrderRow(r: any): Order {
     cancellationHistory: typeof r.cancellation_history === 'string' ? JSON.parse(r.cancellation_history) : (r.cancellation_history || []),
     cancellationType: r.cancellation_type || undefined,
     reviewWindowRestartedAt: r.review_window_restarted_at || undefined,
-    responseDeadline: r.response_deadline || undefined
+    responseDeadline: r.response_deadline || undefined,
+    selectedExtras: typeof r.selected_extras === 'string' ? JSON.parse(r.selected_extras) : (r.selected_extras || undefined)
   } as unknown as Order;
 }
 
@@ -287,6 +290,16 @@ export function mapUserRow(r: any): User {
   };
 }
 
+function unescapeHtml(str: string): string {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
 export function mapGigRow(r: any): Gig {
   if (!r) return undefined as any;
   return {
@@ -296,11 +309,11 @@ export function mapGigRow(r: any): Gig {
     freelancerUsername: r.freelancer_username || r.freelancer_name?.toLowerCase().replace(/\s+/g, '_') || undefined,
     freelancerAvatar: r.freelancer_avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
     freelancerLevel: r.freelancer_level || 'Level 1 ★',
-    title: r.title,
+    title: unescapeHtml(r.title),
     slug: r.slug || r.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || undefined,
     category: r.category,
     subcategory: r.subcategory || 'General',
-    description: r.description || '',
+    description: unescapeHtml(r.description || ''),
     price: Number(r.price),
     deliveryDays: Number(r.delivery_days || 7),
     rating: Number(r.rating || 0),
@@ -310,20 +323,21 @@ export function mapGigRow(r: any): Gig {
     gallery: typeof r.gallery === 'string' ? JSON.parse(r.gallery) : (r.gallery || []),
     tags: typeof r.tags === 'string' ? JSON.parse(r.tags) : (r.tags || []),
     status: (() => {
-      const st = (r.status || 'active').toLowerCase().trim();
-      if (st === 'published') return 'active';
-      if (st === 'pending' || st === 'draft') return 'moderation';
-      if (st === 'deleted') return 'deleted';
+      if (!r.status) return 'moderation';
+      const st = String(r.status).toLowerCase().trim();
+      if (st === 'active' || st === 'published') return 'active';
       if (st === 'paused') return 'paused';
-      if (st === 'moderation') return 'moderation';
-      return 'active';
+      if (st === 'deleted') return 'deleted';
+      if (st === 'pending' || st === 'draft' || st === 'moderation') return 'moderation';
+      return 'moderation';
     })(),
-    featured: Boolean(r.featured),
+    featured: Boolean(r.featured || r.is_featured),
+    isFeatured: Boolean(r.is_featured || r.featured),
     featuredUntil: r.featured_until || undefined,
     extras: typeof r.extras === 'string' ? JSON.parse(r.extras) : (r.extras || []),
     moderationStatus: r.moderation_status || 'approved',
     moderationNotes: r.moderation_notes || undefined
-  };
+  } as any;
 }
 
 export function mapProjectRow(r: any): Project {
@@ -532,8 +546,13 @@ export function mapClearingEarningRow(r: any): ClearingEarning {
 }
 
 export class PostgresAsyncStore implements StoreInterface {
-  async getOrder(id: string): Promise<Order | undefined> {
-    const res = await postgresStore.getPool().query('SELECT * FROM orders WHERE id = $1', [id]);
+  mapOrderRow(r: any): Order {
+    return mapOrderRow(r);
+  }
+
+  async getOrder(id: string, client?: any): Promise<Order | undefined> {
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query('SELECT * FROM orders WHERE id = $1', [id]);
     if (res.rows.length > 0) return mapOrderRow(res.rows[0]);
     return undefined;
   }
@@ -559,8 +578,9 @@ export class PostgresAsyncStore implements StoreInterface {
     return res.rows.map(mapOrderRow);
   }
 
-  async getUser(id: string): Promise<User | undefined> {
-    const res = await postgresStore.getPool().query('SELECT * FROM users WHERE id = $1', [id]);
+  async getUser(id: string, client?: any): Promise<User | undefined> {
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query('SELECT * FROM users WHERE id = $1', [id]);
     if (res.rows.length > 0) return mapUserRow(res.rows[0]);
     return undefined;
   }
@@ -607,18 +627,18 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   async listUsers(): Promise<User[]> {
-    const res = await postgresStore.getPool().query('SELECT * FROM users ORDER BY created_at DESC');
+    const res = await postgresStore.getPool().query("SELECT * FROM users WHERE id != 'system' ORDER BY created_at DESC");
     return res.rows.map(mapUserRow);
   }
 
   async listPublicUsers(): Promise<User[]> {
-    const res = await postgresStore.getPool().query("SELECT * FROM users WHERE status = 'active' ORDER BY rating DESC, earned DESC");
+    const res = await postgresStore.getPool().query("SELECT * FROM users WHERE status = 'active' AND id != 'system' ORDER BY rating DESC, earned DESC");
     return res.rows.map(mapUserRow);
   }
 
   async getGig(idOrSlug: string): Promise<Gig | undefined> {
     const res = await postgresStore.getPool().query(
-      'SELECT * FROM gigs WHERE id = $1 OR slug = $1 LIMIT 1',
+      'SELECT * FROM gigs WHERE id = $1 OR slug = $1 ORDER BY (CASE WHEN id = $1 THEN 0 ELSE 1 END) ASC LIMIT 1',
       [idOrSlug]
     );
     if (res.rows.length > 0) return mapGigRow(res.rows[0]);
@@ -645,46 +665,218 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   async saveGig(g: Gig): Promise<void> {
-    const slug = g.slug || g.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || 'gig-' + g.id;
-    await postgresStore.getPool().query(
-      `INSERT INTO gigs (
-        id, freelancer_id, freelancer_name, freelancer_username, freelancer_avatar, freelancer_level,
-        title, slug, category, subcategory, description, price, delivery_days, rating, reviews_count,
-        image, cover_image, gallery, tags, status, featured, extras, moderation_status, moderation_notes
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
-      )
-      ON CONFLICT (id) DO UPDATE SET
-        freelancer_id = EXCLUDED.freelancer_id,
-        freelancer_name = EXCLUDED.freelancer_name,
-        freelancer_username = EXCLUDED.freelancer_username,
-        freelancer_avatar = EXCLUDED.freelancer_avatar,
-        freelancer_level = EXCLUDED.freelancer_level,
-        title = EXCLUDED.title,
-        slug = EXCLUDED.slug,
-        category = EXCLUDED.category,
-        subcategory = EXCLUDED.subcategory,
-        description = EXCLUDED.description,
-        price = EXCLUDED.price,
-        delivery_days = EXCLUDED.delivery_days,
-        rating = EXCLUDED.rating,
-        reviews_count = EXCLUDED.reviews_count,
-        image = EXCLUDED.image,
-        cover_image = EXCLUDED.cover_image,
-        gallery = EXCLUDED.gallery,
-        tags = EXCLUDED.tags,
-        status = EXCLUDED.status,
-        featured = EXCLUDED.featured,
-        extras = EXCLUDED.extras,
-        moderation_status = EXCLUDED.moderation_status,
-        moderation_notes = EXCLUDED.moderation_notes`,
-      [
-        g.id, g.freelancerId, g.freelancerName, g.freelancerUsername || null, g.freelancerAvatar || null, g.freelancerLevel || null,
-        g.title, slug, g.category, g.subcategory || null, g.description || '', g.price, g.deliveryDays, g.rating ?? 5.0, g.reviewsCount ?? 0,
-        g.image || null, g.coverImage || null, g.gallery || [], g.tags || [], g.status || 'active', Boolean(g.featured),
-        JSON.stringify(g.extras || []), g.moderationStatus || 'approved', g.moderationNotes || null
-      ]
-    );
+    let slug = g.slug || g.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || 'gig-' + g.id;
+    if (slug.length < 2) slug = 'gig-' + g.id;
+
+    try {
+      const collisionRes = await postgresStore.getPool().query(
+        'SELECT id FROM gigs WHERE slug = $1 AND id != $2 LIMIT 1',
+        [slug, g.id]
+      );
+      if (collisionRes.rows.length > 0) {
+        slug = `${slug}-${g.id}`;
+      }
+    } catch {}
+
+    const executeInsert = async (targetSlug: string) => {
+      await postgresStore.getPool().query(
+        `INSERT INTO gigs (
+          id, freelancer_id, freelancer_name, freelancer_username, freelancer_avatar, freelancer_level,
+          title, slug, category, subcategory, description, price, delivery_days, rating, reviews_count,
+          image, cover_image, gallery, tags, status, featured, is_featured, featured_until, extras, moderation_status, moderation_notes
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          freelancer_id = EXCLUDED.freelancer_id,
+          freelancer_name = EXCLUDED.freelancer_name,
+          freelancer_username = EXCLUDED.freelancer_username,
+          freelancer_avatar = EXCLUDED.freelancer_avatar,
+          freelancer_level = EXCLUDED.freelancer_level,
+          title = EXCLUDED.title,
+          slug = EXCLUDED.slug,
+          category = EXCLUDED.category,
+          subcategory = EXCLUDED.subcategory,
+          description = EXCLUDED.description,
+          price = EXCLUDED.price,
+          delivery_days = EXCLUDED.delivery_days,
+          rating = COALESCE(gigs.rating, EXCLUDED.rating),
+          reviews_count = COALESCE(gigs.reviews_count, EXCLUDED.reviews_count),
+          image = EXCLUDED.image,
+          cover_image = EXCLUDED.cover_image,
+          gallery = EXCLUDED.gallery,
+          tags = EXCLUDED.tags,
+          status = CASE 
+            WHEN gigs.status = 'deleted' THEN 'deleted' 
+            WHEN gigs.moderation_status IN ('rejected', 'flagged') AND EXCLUDED.status = 'active' THEN gigs.status 
+            ELSE EXCLUDED.status 
+          END,
+          featured = (
+            CASE 
+              WHEN (EXCLUDED.featured_until IS NOT NULL AND EXCLUDED.featured_until::timestamptz > NOW()) THEN TRUE
+              WHEN (gigs.featured_until IS NOT NULL AND gigs.featured_until::timestamptz > NOW()) THEN TRUE
+              ELSE FALSE
+            END
+          ),
+          is_featured = (
+            CASE 
+              WHEN (EXCLUDED.featured_until IS NOT NULL AND EXCLUDED.featured_until::timestamptz > NOW()) THEN TRUE
+              WHEN (gigs.featured_until IS NOT NULL AND gigs.featured_until::timestamptz > NOW()) THEN TRUE
+              ELSE FALSE
+            END
+          ),
+          featured_until = (
+            CASE
+              WHEN EXCLUDED.featured_until IS NOT NULL AND gigs.featured_until IS NOT NULL THEN
+                CASE WHEN EXCLUDED.featured_until::timestamptz > gigs.featured_until::timestamptz THEN EXCLUDED.featured_until ELSE gigs.featured_until END
+              WHEN EXCLUDED.featured_until IS NOT NULL THEN EXCLUDED.featured_until
+              ELSE gigs.featured_until
+            END
+          ),
+          extras = EXCLUDED.extras,
+          moderation_status = CASE 
+            WHEN gigs.moderation_status IN ('rejected', 'flagged') AND EXCLUDED.moderation_status NOT IN ('rejected', 'flagged') THEN gigs.moderation_status 
+            ELSE EXCLUDED.moderation_status 
+          END,
+          moderation_notes = COALESCE(EXCLUDED.moderation_notes, gigs.moderation_notes)`,
+        [
+          g.id, g.freelancerId, g.freelancerName, g.freelancerUsername || null, g.freelancerAvatar || null, g.freelancerLevel || null,
+          g.title, targetSlug, g.category, g.subcategory || null, g.description || '', g.price, g.deliveryDays, g.rating ?? 5.0, g.reviewsCount ?? 0,
+          g.image || null, g.coverImage || null, g.gallery || [], g.tags || [], g.status || 'active',
+          Boolean(g.featured), Boolean(g.featured || (g as any).isFeatured), (g as any).featuredUntil || null,
+          JSON.stringify(g.extras || []), g.moderationStatus || 'approved', g.moderationNotes || null
+        ]
+      );
+    };
+
+    const isSlugConflict = (err: any) =>
+      err?.code === '23505' &&
+      (err?.constraint === 'idx_gigs_unique_slug' || String(err?.message || '').includes('idx_gigs_unique_slug'));
+
+    try {
+      await executeInsert(slug);
+    } catch (err: any) {
+      if (isSlugConflict(err)) {
+        const fallbackSlug = `${slug}-${g.id}`;
+        try {
+          await executeInsert(fallbackSlug);
+        } catch (retryErr: any) {
+          if (isSlugConflict(retryErr)) {
+            await executeInsert(`${fallbackSlug}-${Date.now().toString(36)}`);
+          } else {
+            throw retryErr;
+          }
+        }
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  async updateGig(id: string, updates: Record<string, any>, expectedFreelancerId?: string): Promise<Gig | null> {
+    const fieldMap: Record<string, string> = {
+      title: 'title',
+      slug: 'slug',
+      category: 'category',
+      subcategory: 'subcategory',
+      description: 'description',
+      price: 'price',
+      deliveryDays: 'delivery_days',
+      image: 'image',
+      coverImage: 'cover_image',
+      gallery: 'gallery',
+      tags: 'tags',
+      extras: 'extras',
+      status: 'status',
+      moderationStatus: 'moderation_status',
+      moderationNotes: 'moderation_notes',
+      freelancerName: 'freelancer_name',
+      freelancerUsername: 'freelancer_username',
+      freelancerAvatar: 'freelancer_avatar',
+      freelancerLevel: 'freelancer_level'
+    };
+
+    const setClauses: string[] = [];
+    const values: any[] = [];
+    let idx = 1;
+
+    for (const [key, col] of Object.entries(fieldMap)) {
+      if (updates[key] !== undefined) {
+        let val = updates[key];
+        if (key === 'extras') {
+          val = JSON.stringify(val || []);
+        }
+        setClauses.push(`${col} = $${idx}`);
+        values.push(val);
+        idx++;
+      }
+    }
+
+    if (setClauses.length === 0) {
+      const existing = await this.getGig(id);
+      return existing || null;
+    }
+
+    setClauses.push('updated_at = NOW()');
+
+    let whereClause = `WHERE id = $${idx} AND status != 'deleted'`;
+    values.push(id);
+    idx++;
+
+    if (expectedFreelancerId) {
+      whereClause += ` AND freelancer_id = $${idx}`;
+      values.push(expectedFreelancerId);
+      idx++;
+    }
+
+    const runUpdate = async (overrideSlug?: string) => {
+      const localClauses = [...setClauses];
+      const localValues = [...values];
+      if (overrideSlug !== undefined) {
+        const slugIdx = localClauses.findIndex(c => c.startsWith('slug = '));
+        if (slugIdx >= 0) {
+          const match = localClauses[slugIdx].match(/\$(\d+)/);
+          if (match) {
+            const paramNum = parseInt(match[1], 10);
+            localValues[paramNum - 1] = overrideSlug;
+          }
+        }
+      }
+      const query = `
+        UPDATE gigs
+        SET ${localClauses.join(', ')}
+        ${whereClause}
+        RETURNING *
+      `;
+      return await postgresStore.getPool().query(query, localValues);
+    };
+
+    try {
+      const res = await runUpdate();
+      if (res.rows.length === 0) return null;
+      return mapGigRow(res.rows[0]);
+    } catch (err: any) {
+      const isSlugConflict = (e: any) =>
+        e?.code === '23505' &&
+        (e?.constraint === 'idx_gigs_unique_slug' || String(e?.message || '').includes('idx_gigs_unique_slug'));
+
+      if (isSlugConflict(err) && updates.slug) {
+        const fallbackSlug = `${updates.slug}-${id}`;
+        try {
+          const res = await runUpdate(fallbackSlug);
+          if (res.rows.length === 0) return null;
+          return mapGigRow(res.rows[0]);
+        } catch (retryErr: any) {
+          if (isSlugConflict(retryErr)) {
+            const res = await runUpdate(`${fallbackSlug}-${Date.now().toString(36)}`);
+            if (res.rows.length === 0) return null;
+            return mapGigRow(res.rows[0]);
+          }
+          throw retryErr;
+        }
+      }
+      throw err;
+    }
   }
 
   async deleteGig(id: string): Promise<boolean> {
@@ -838,9 +1030,10 @@ export class PostgresAsyncStore implements StoreInterface {
     );
   }
 
-  async saveOrder(order: Order): Promise<void> {
+  async saveOrder(order: Order, client?: any): Promise<void> {
+    const dbRunner = client || postgresStore.getPool();
     const resolvedOrderType = order.orderType || (order as any).type || (order.projectId ? 'project' : 'gig');
-    await postgresStore.getPool().query(
+    await dbRunner.query(
       `INSERT INTO orders (
         id, title, buyer_id, seller_id, amount, status, created_at, due_date, completed_at, 
         requirements, deliverables, deliverable_files, revisions, admin_notes, is_muted, 
@@ -894,7 +1087,7 @@ export class PostgresAsyncStore implements StoreInterface {
         delivery_notes = EXCLUDED.delivery_notes,
         delivery_reference = EXCLUDED.delivery_reference,
         accepted_version = CASE
-          WHEN orders.status IN ('completed', 'cancelled') THEN orders.accepted_version
+          WHEN orders.status IN ('completed', 'cancelled') THEN COALESCE(orders.accepted_version, EXCLUDED.accepted_version)
           ELSE COALESCE(EXCLUDED.accepted_version, orders.accepted_version)
         END,
         review_window_days = EXCLUDED.review_window_days,
@@ -945,7 +1138,8 @@ export class PostgresAsyncStore implements StoreInterface {
     );
   }
 
-  async updateOrderStatus(orderId: string, updates: Record<string, any>, allowedStatuses: string[]): Promise<boolean> {
+  async updateOrderStatus(orderId: string, updates: Record<string, any>, allowedStatuses: string[], client?: any): Promise<boolean> {
+    const dbRunner = client || postgresStore.getPool();
     const keys = Object.keys(updates);
     const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
     const values = keys.map(k => updates[k]);
@@ -955,17 +1149,18 @@ export class PostgresAsyncStore implements StoreInterface {
       SET ${setClause}
       WHERE id = $1 AND status = ANY($${keys.length + 2})
     `;
-    const res = await postgresStore.getPool().query(query, [orderId, ...values, allowedStatuses]);
+    const res = await dbRunner.query(query, [orderId, ...values, allowedStatuses]);
     return res.rowCount !== null && res.rowCount > 0;
   }
 
 
-  async listMessages(orderId: string): Promise<Message[]> {
-    const res = await postgresStore.getPool().query(
+  async listMessages(orderId: string, client?: any): Promise<Message[]> {
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query(
       'SELECT * FROM messages WHERE order_id = $1 ORDER BY timestamp ASC',
       [orderId]
     );
-    return res.rows.map(r => ({
+    return res.rows.map((r: any) => ({
       id: r.id,
       orderId: r.order_id,
       senderId: r.sender_id,
@@ -1002,8 +1197,17 @@ export class PostgresAsyncStore implements StoreInterface {
     return undefined;
   }
 
-  async addMessage(message: Message): Promise<void> {
-    await postgresStore.getPool().query(
+  async addMessage(message: Message, client?: any): Promise<void> {
+    const dbRunner = client || postgresStore.getPool();
+    if (message.senderId === 'system') {
+      await dbRunner.query(
+        `INSERT INTO users (id, name, username, email, role, status, verified, email_verified, mobile_verified, wallet_balance, created_at)
+         VALUES ('system', 'WorkSphere System', 'system', 'system@worksphere.internal', 'internal', 'active', TRUE, TRUE, TRUE, 0, $1)
+         ON CONFLICT (id) DO NOTHING`,
+        [message.timestamp || new Date().toISOString()]
+      );
+    }
+    await dbRunner.query(
       `INSERT INTO messages (id, order_id, sender_id, sender_name, text, timestamp, type, file_info, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (id) DO UPDATE SET
@@ -1074,11 +1278,12 @@ export class PostgresAsyncStore implements StoreInterface {
     return await postgresStore.listReviews();
   }
 
-  async saveUser(u: User): Promise<void> {
+  async saveUser(u: User, client?: any): Promise<void> {
+    const dbRunner = client || postgresStore.getPool();
     if (u.email) {
-      await postgresStore.getPool().query('DELETE FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2', [u.email, u.id]);
+      await dbRunner.query('DELETE FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2', [u.email, u.id]);
     }
-    await postgresStore.getPool().query(
+    await dbRunner.query(
       `INSERT INTO users (
         id, name, username, email, mobile, role, avatar, title, rating, reviews_count, 
         hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, 
@@ -1289,8 +1494,8 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   // Notifications
-  async saveNotification(n: Notification): Promise<{ inserted: boolean; duplicate?: boolean }> {
-    return await postgresStore.saveNotification(n);
+  async saveNotification(n: Notification, client?: any): Promise<{ inserted: boolean; duplicate?: boolean }> {
+    return await postgresStore.saveNotification(n, client);
   }
 
   async listNotificationsForUser(userId: string): Promise<Notification[]> {
@@ -1365,7 +1570,7 @@ export async function hydrateStoreFromPostgres() {
     }
 
     const pool = postgresStore.getPool();
-    const userCountRes = await pool.query('SELECT COUNT(*) as c FROM users');
+    const userCountRes = await pool.query("SELECT COUNT(*) as c FROM users WHERE id != 'system'");
     const userCount = Number(userCountRes.rows[0]?.c || 0);
 
     if (userCount === 0 && !(await postgresStore.isInitialized())) {
@@ -1578,7 +1783,7 @@ export async function hydrateStoreFromPostgres() {
 
     if (!isProduction && orderCount === 0 && seedCheckUsers.rows.length === 2) {
       const todayDate = new Date().toISOString().split('T')[0];
-      const dueDate = new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0];
+      const dueDate = new Date(Date.now() + 7 * 86400000).toISOString();
       const protectionEnd = new Date(Date.now() + 14 * 86400000).toISOString().split('T')[0];
       const nowIso = new Date().toISOString();
       const seedOrderId = 'ord_seed_1';

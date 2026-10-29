@@ -51,18 +51,19 @@ export class OrdersRepo {
               order_type, gig_order_id, project_order_id, proposal_id,
               extension_requests, free_extension_used, cancellation_request, cancellation_history,
               cancellation_type, review_window_restarted_at, response_deadline,
-              service_fee, small_order_fee
+              service_fee, small_order_fee, selected_extras
             ) VALUES (
               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
               $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
               $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
-              $49, $50
+              $49, $50, $51
             )
             ON CONFLICT (id) DO UPDATE SET
               title = EXCLUDED.title,
               amount = EXCLUDED.amount,
               service_fee = EXCLUDED.service_fee,
               small_order_fee = EXCLUDED.small_order_fee,
+              selected_extras = EXCLUDED.selected_extras,
               status = CASE
                 WHEN orders.status IN ('completed', 'cancelled', 'refunded') THEN orders.status
                 ELSE EXCLUDED.status
@@ -135,7 +136,7 @@ export class OrdersRepo {
               JSON.stringify(order.extensionRequests || []), Boolean(order.freeExtensionUsed),
               JSON.stringify(order.cancellationRequest || null), JSON.stringify(order.cancellationHistory || []),
               order.cancellationType || null, order.reviewWindowRestartedAt || null, order.responseDeadline || null,
-              serviceFee, smallOrderFee
+              serviceFee, smallOrderFee, JSON.stringify((order as any).selectedExtras || [])
             ]
           );
         }

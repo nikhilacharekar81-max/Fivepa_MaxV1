@@ -440,7 +440,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
   };
 
   return (
-    <div className="max-w-7xl mx-auto py-4 font-sans">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 font-sans">
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed top-6 right-6 z-50 bg-slate-900 text-white px-5 py-3 rounded-xl shadow-xl flex items-center gap-3 border border-slate-800 text-xs font-semibold">

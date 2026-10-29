@@ -8,7 +8,7 @@ import { PPH_CATEGORIES } from '../components/HeaderCategoriesNav';
 import { slugify } from '../utils/slugify';
 import type { Order, UserAccount } from '../types';
 import { clearAuthToken, getAuthToken } from '../utils/authToken';
-import { DEFAULT_AVATAR } from '../constants';
+import { DEFAULT_AVATAR, getUserInitialsAvatar } from '../constants';
 
 export interface HeaderProps {
   navigate: (to: string, e?: React.MouseEvent) => void;
@@ -54,9 +54,16 @@ export function Header({
   // Close dropdowns on outside click
   const [notifications, setNotifications] = useState<any[]>([]);
   const [isNotificationsDropdownOpen, setIsNotificationsDropdownOpen] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(() => 
-    typeof window !== 'undefined' ? localStorage.getItem('worksphere_notif_sound') !== 'false' : true
-  );
+  const [soundEnabled, setSoundEnabled] = useState(true);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('worksphere_notif_sound');
+      if (stored === 'false') {
+        setSoundEnabled(false);
+      }
+    }
+  }, []);
 
   const playNotificationSound = () => {
     try {
@@ -98,7 +105,7 @@ export function Header({
   };
 
   useEffect(() => {
-    if (!currentUser || typeof window === 'undefined') {
+    if (!currentUser?.id || typeof window === 'undefined') {
       setNotifications([]);
       return;
     }
@@ -121,9 +128,9 @@ export function Header({
       } catch {}
     };
     fetchNotifs();
-    const interval = setInterval(fetchNotifs, 10000);
+    const interval = setInterval(fetchNotifs, 30000);
     return () => clearInterval(interval);
-  }, [currentUser]);
+  }, [currentUser?.id]);
 
   const unreadCount = notifications.filter(n => !n.read).length;
 
@@ -456,7 +463,10 @@ export function Header({
                     const partnerAvatar = partner?.avatar;
                     const previewText = (ord as any).lastMessage || ord.title;
                     const rawDate = (ord as any).lastMessageTime || ord.createdAt;
-                    const formattedDate = rawDate ? new Date(rawDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+                    const parsedDate = rawDate ? new Date(rawDate) : null;
+                    const formattedDate = parsedDate && !isNaN(parsedDate.getTime())
+                      ? parsedDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+                      : (typeof rawDate === 'string' ? rawDate : '');
                     return (
                       <div 
                         key={ord.id}
@@ -581,7 +591,13 @@ export function Header({
                         <p className="text-xs font-bold text-fiverr-dark truncate">{n.title}</p>
                         <p className="text-[11.5px] text-slate-600 mt-0.5 line-clamp-2">{n.message}</p>
                         <span className="text-[10px] text-slate-400 mt-1 block">
-                          {new Date(n.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • {new Date(n.createdAt).toLocaleDateString()}
+                          {(() => {
+                            const d = n.createdAt ? new Date(n.createdAt) : null;
+                            if (d && !isNaN(d.getTime())) {
+                              return `${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • ${d.toLocaleDateString()}`;
+                            }
+                            return n.createdAt || '';
+                          })()}
                         </span>
                       </div>
                     </div>
@@ -645,11 +661,15 @@ export function Header({
             >
               <div className="relative">
                 <img 
-                  src={currentUser.avatar || DEFAULT_AVATAR} 
+                  src={currentUser.avatar || getUserInitialsAvatar(currentUser.name)} 
                   alt={currentUser.name} 
                   className="w-8 h-8 rounded-full object-cover border border-slate-200" 
                   onError={(e) => {
-                    (e.target as HTMLImageElement).src = DEFAULT_AVATAR;
+                    const img = e.currentTarget;
+                    const fallback = getUserInitialsAvatar(currentUser.name);
+                    if (img.src !== fallback) {
+                      img.src = fallback;
+                    }
                   }}
                 />
                 {currentUser.isAvailableNow && (

@@ -13,7 +13,8 @@ import {
 import { calculateOrderFees } from '../domains/finance/fees.js';
 import { checkOrRecordIdempotency, recordIdempotencyResult } from '../domains/finance/index.js';
 import { postgresStore } from '../db/postgresStore.js';
-import { financialRepository } from '../services/financialService.js';
+import { financialRepository, financialTransactionService } from '../domains/finance/financial.service.js';
+import { recordOutboxEvent } from '../services/outboxService.js';
 import {
   requireAuth,
   requireActiveStatus,
@@ -41,7 +42,9 @@ import {
   ensureWallet,
   registerAuditLog,
   getActiveEscrowRemaining,
-  LATE_ORDER_PROTECTION_HOURS
+  LATE_ORDER_PROTECTION_HOURS,
+  parseDeadlineInstant,
+  calculateExtendedDeadline
 } from '../services/orderService.js';
 import { broadcastMessage } from '../websocket.js';
 import {
@@ -231,9 +234,19 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
       : 'ord_' + randomUUID().slice(0, 12);
     const today = new Date().toISOString().split('T')[0];
 
+    const normalizedExtraIds = Array.isArray(req.body?.extraIds)
+      ? Array.from(new Set(req.body.extraIds.map(String).filter(Boolean))).sort()
+      : [];
+
+    let resolvedGigRow: any = null;
+    let selectedExtrasDetails: any[] = [];
+    let totalDeliveryDaysFromGig: number | null = null;
     if (req.body?.gigId) {
       if (!isInquiry) {
-        const { gig: gigRow, gigPrice } = await resolveGigOrderPrice(req.body.gigId, req.body?.extraIds);
+        const { gig: gigRow, gigPrice, selectedExtrasDetails: resolvedExtras, totalDeliveryDays } = await resolveGigOrderPrice(req.body.gigId, normalizedExtraIds);
+        resolvedGigRow = gigRow;
+        selectedExtrasDetails = resolvedExtras || [];
+        totalDeliveryDaysFromGig = totalDeliveryDays;
         if (gigRow.freelancer_id !== sellerId) {
           return res.status(400).json({ error: 'This gig does not belong to the selected seller.' });
         }
@@ -288,7 +301,7 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
       gigId: req.body?.gigId || null,
       projectId: req.body?.projectId || null,
       proposalId: req.body?.proposalId || null,
-      extraIds: Array.isArray(req.body?.extraIds) ? [...req.body.extraIds].map(String).sort() : null,
+      extraIds: normalizedExtraIds,
       amount: isInquiry ? 0 : rawAmount,
       isInquiry
     };
@@ -297,9 +310,13 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
 
     let deliveryDays = 10;
     if (req.body?.gigId) {
-      const gig = await store.getGig(req.body.gigId);
-      if (gig && Number(gig.deliveryDays) > 0) {
-        deliveryDays = Math.max(1, Math.min(365, Number(gig.deliveryDays)));
+      if (totalDeliveryDaysFromGig !== null) {
+        deliveryDays = Math.max(1, Math.min(365, totalDeliveryDaysFromGig));
+      } else {
+        const gig = await store.getGig(req.body.gigId);
+        if (gig && Number(gig.deliveryDays) > 0) {
+          deliveryDays = Math.max(1, Math.min(365, Number(gig.deliveryDays)));
+        }
       }
     } else if (req.body?.projectId) {
       const proj = await store.getProject(req.body.projectId);
@@ -307,83 +324,13 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
         deliveryDays = Math.max(1, Math.min(365, Number(proj.deadlineDays)));
       }
     }
-    const serverDerivedDueDate = new Date(Date.now() + deliveryDays * 86400000).toISOString().split('T')[0];
+    const serverDerivedDueDate = new Date(Date.now() + deliveryDays * 86400000).toISOString();
 
     const isGig = Boolean(req.body?.gigId);
     const isProject = Boolean(req.body?.projectId);
     const orderType: 'gig' | 'project' | undefined = isGig ? 'gig' : (isProject ? 'project' : undefined);
     const gigOrderId = isGig ? id : undefined;
     const projectOrderId = isProject ? id : undefined;
-
-    let workspaceId: string;
-    if (isGig) {
-      const ws = await workspaceService.createWorkspaceAsync({
-        buyerId,
-        sellerId,
-        originType: 'gig',
-        originId: req.body?.gigId || id,
-        activeOrderId: id
-      });
-      workspaceId = ws.workspaceId;
-    } else if (req.body?.workspaceId) {
-      const ws = await workspaceService.getWorkspaceAsync(req.body.workspaceId);
-      if (!ws) return res.status(404).json({ error: 'Workspace not found.' });
-      if (ws.buyerId !== buyerId || ws.sellerId !== sellerId) {
-        return res.status(400).json({ error: 'The provided workspace does not match the buyer and seller of this order.' });
-      }
-      workspaceId = ws.workspaceId;
-    } else {
-      const ws = await workspaceService.createWorkspaceAsync({
-        buyerId,
-        sellerId,
-        originType: isProject ? 'project' : 'gig',
-        originId: req.body?.projectId || id,
-        activeOrderId: id
-      });
-      workspaceId = ws.workspaceId;
-    }
-
-    let newOrd: Order;
-    if (isInquiry) {
-      newOrd = {
-        id,
-        workspaceId,
-        ...(orderType ? { orderType } : {}),
-        ...(gigOrderId ? { gigOrderId } : {}),
-        ...(projectOrderId ? { projectOrderId } : {}),
-        title,
-        buyerId,
-        sellerId,
-        amount: 0,
-        status: 'in_progress',
-        createdAt: today,
-        dueDate: new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
-        gigId: req.body.gigId,
-        projectId: req.body.projectId,
-        ...(requirements ? { requirements } : {})
-      };
-    } else {
-      newOrd = {
-        id,
-        workspaceId,
-        ...(orderType ? { orderType } : {}),
-        ...(gigOrderId ? { gigOrderId } : {}),
-        ...(projectOrderId ? { projectOrderId } : {}),
-        title,
-        buyerId,
-        sellerId,
-        amount: rawAmount,
-        status: 'payment_pending',
-        createdAt: today,
-        dueDate: serverDerivedDueDate,
-        escrowProtectionStartDate: today,
-        escrowProtectionEndDate: new Date(Date.now() + DEFAULT_SITE_SETTINGS.commission.escrowProtectionDays * 86400000).toISOString().split('T')[0],
-        gigId: req.body.gigId,
-        projectId: req.body.projectId,
-        feeBreakdown: calculateOrderFees(rawAmount),
-        ...(requirements ? { requirements } : {})
-      };
-    }
 
     const txResult = await postgresStore.executeInTransaction(async (client) => {
       if (scopedIdempKey) {
@@ -393,14 +340,133 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
         }
       }
 
-      await workspaceService.ensureWorkspaceForOrderAsync(newOrd);
+      let workspaceId: string;
+      if (isGig) {
+        workspaceId = 'ws_' + randomUUID().slice(0, 12);
+        await client.query(
+          `INSERT INTO workspaces (workspace_id, buyer_id, seller_id, order_ids, title, created_at, updated_at, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (workspace_id) DO UPDATE SET
+             order_ids = (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM (SELECT jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) AS elem UNION SELECT jsonb_array_elements_text(EXCLUDED.order_ids) AS elem) s)`,
+          [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: 'gig', originId: req.body?.gigId || id, status: 'active', activeOrderId: id })]
+        );
+      } else if (req.body?.workspaceId) {
+        const wsRes = await client.query('SELECT * FROM workspaces WHERE workspace_id = $1 FOR UPDATE', [req.body.workspaceId]);
+        if (wsRes.rows.length === 0) throw new Error('Workspace not found.');
+        const ws = wsRes.rows[0];
+        if (ws.buyer_id !== buyerId || ws.seller_id !== sellerId) {
+          throw new Error('The provided workspace does not match the buyer and seller of this order.');
+        }
+        workspaceId = ws.workspace_id;
+      } else {
+        workspaceId = 'ws_' + randomUUID().slice(0, 12);
+        await client.query(
+          `INSERT INTO workspaces (workspace_id, buyer_id, seller_id, order_ids, title, created_at, updated_at, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (workspace_id) DO UPDATE SET
+             order_ids = (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM (SELECT jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) AS elem UNION SELECT jsonb_array_elements_text(EXCLUDED.order_ids) AS elem) s)`,
+          [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: isProject ? 'project' : 'gig', originId: req.body?.projectId || id, status: 'active', activeOrderId: id })]
+        );
+      }
+
+      let newOrd: any;
+      if (isInquiry) {
+        newOrd = {
+          id,
+          workspaceId,
+          ...(orderType ? { orderType } : {}),
+          ...(gigOrderId ? { gigOrderId } : {}),
+          ...(projectOrderId ? { projectOrderId } : {}),
+          title,
+          buyerId,
+          sellerId,
+          amount: 0,
+          status: 'in_progress',
+          createdAt: today,
+          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
+          gigId: req.body.gigId,
+          projectId: req.body.projectId,
+          ...(requirements ? { requirements } : {}),
+          selectedExtras: selectedExtrasDetails
+        };
+      } else {
+        newOrd = {
+          id,
+          workspaceId,
+          ...(orderType ? { orderType } : {}),
+          ...(gigOrderId ? { gigOrderId } : {}),
+          ...(projectOrderId ? { projectOrderId } : {}),
+          title,
+          buyerId,
+          sellerId,
+          amount: rawAmount,
+          status: 'payment_pending',
+          createdAt: today,
+          dueDate: serverDerivedDueDate,
+          escrowProtectionStartDate: today,
+          escrowProtectionEndDate: new Date(Date.now() + DEFAULT_SITE_SETTINGS.commission.escrowProtectionDays * 86400000).toISOString().split('T')[0],
+          gigId: req.body.gigId,
+          projectId: req.body.projectId,
+          feeBreakdown: calculateOrderFees(rawAmount),
+          ...(requirements ? { requirements } : {}),
+          selectedExtras: selectedExtrasDetails
+        };
+      }
+
+      const serviceFee = newOrd.serviceFee ?? (newOrd.feeBreakdown as any)?.buyerFee ?? 0;
+      const smallOrderFee = newOrd.smallOrderFee ?? (newOrd.feeBreakdown as any)?.smallOrderFee ?? 0;
+
+      await client.query(
+        `INSERT INTO orders (
+          id, title, buyer_id, seller_id, amount, status, created_at, due_date, completed_at, 
+          requirements, deliverables, deliverable_files, revisions, admin_notes, is_muted, 
+          escrow_protection_start_date, escrow_protection_end_date, gig_id, project_id, 
+          service_url, gig_slug, seller_username, buyer_username, service_title, service_thumbnail, 
+          is_timer_paused, fee_breakdown, delivery_history, delivery_notes, delivery_reference, 
+          accepted_version, review_window_days, review_window_expires_at, review,
+          workspace_id, seller_review, previous_status,
+          order_type, gig_order_id, project_order_id, proposal_id,
+          extension_requests, free_extension_used, cancellation_request, cancellation_history,
+          cancellation_type, review_window_restarted_at, response_deadline,
+          service_fee, small_order_fee, selected_extras
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+          $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
+          $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
+          $49, $50, $51
+        ) ON CONFLICT (id) DO UPDATE SET
+          title = EXCLUDED.title,
+          amount = EXCLUDED.amount,
+          service_fee = EXCLUDED.service_fee,
+          small_order_fee = EXCLUDED.small_order_fee,
+          selected_extras = EXCLUDED.selected_extras,
+          status = CASE WHEN orders.status IN ('completed', 'cancelled', 'refunded') THEN orders.status ELSE EXCLUDED.status END`,
+        [
+          newOrd.id, newOrd.title, newOrd.buyerId, newOrd.sellerId, newOrd.amount, newOrd.status,
+          newOrd.createdAt, newOrd.dueDate, newOrd.completedAt || null, newOrd.requirements || null,
+          newOrd.deliverables || null, JSON.stringify(newOrd.deliverableFiles || []),
+          JSON.stringify(newOrd.revisions || []), newOrd.adminNotes || null, newOrd.isMuted || false,
+          newOrd.escrowProtectionStartDate || null, newOrd.escrowProtectionEndDate || null,
+          newOrd.gigId || null, newOrd.projectId || null, newOrd.serviceUrl || null,
+          newOrd.gigSlug || null, newOrd.sellerUsername || null, newOrd.buyerUsername || null,
+          newOrd.serviceTitle || null, newOrd.serviceThumbnail || null, newOrd.isTimerPaused || false,
+          JSON.stringify(newOrd.feeBreakdown || null), JSON.stringify(newOrd.deliveryHistory || []),
+          newOrd.deliveryNotes || null, newOrd.deliveryReference || null, newOrd.acceptedVersion ?? null,
+          newOrd.reviewWindowDays ?? null, newOrd.reviewWindowExpiresAt || null, JSON.stringify(newOrd.review || null),
+          workspaceId, JSON.stringify((newOrd as any).sellerReview || null), (newOrd as any).previousStatus || null,
+          orderType || 'gig', newOrd.gigOrderId || null, newOrd.projectOrderId || null, newOrd.proposalId || null,
+          JSON.stringify(newOrd.extensionRequests || []), Boolean(newOrd.freeExtensionUsed),
+          JSON.stringify(newOrd.cancellationRequest || null), JSON.stringify(newOrd.cancellationHistory || []),
+          newOrd.cancellationType || null, newOrd.reviewWindowRestartedAt || null, newOrd.responseDeadline || null,
+          serviceFee, smallOrderFee, JSON.stringify(selectedExtrasDetails)
+        ]
+      );
+
       const enriched = enrichOrderWithServiceInfo(newOrd);
-      await recordOrder(enriched);
-      await store.saveOrder(enriched);
 
       if (!isInquiry) {
         try {
-          await fundOrderEscrowWithEvent({
+          await financialTransactionService.fundEscrow({
             orderId: id,
             orderTitle: title,
             amount: rawAmount,
@@ -408,11 +474,17 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
             sellerId,
             actor: `user:${buyerId}`,
             idempotencyKey: scopedIdempKey ? `${scopedIdempKey}:fund` : undefined
-          });
+          }, client);
 
           enriched.status = 'funded_in_escrow';
-          await store.saveOrder(enriched);
-          await syncUserBalances();
+          await client.query('UPDATE orders SET status = $1 WHERE id = $2', ['funded_in_escrow', id]);
+          await syncUserBalances([buyerId, sellerId].filter(Boolean), client);
+          await recordOutboxEvent(client, 'ORDER_ESCROW_FUNDED', 'order', id, {
+            title,
+            amount: rawAmount,
+            buyerId,
+            sellerId
+          });
         } catch (fundingErr: any) {
           throw new Error(fundingErr.message || 'Failed to fund escrow.');
         }
@@ -431,10 +503,18 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
 
     const enriched = txResult.result;
 
+    if (!isInquiry) {
+      try {
+        await syncUserBalances([buyerId, sellerId].filter(Boolean));
+      } catch (syncErr) {
+        console.error('[OrderCreate] Non-fatal syncUserBalances error after commit:', syncErr);
+      }
+    }
+
     if (isInquiry) {
-      await emitSystemEvent(newOrd.id, 'order_created', `Inquiry thread opened: ${title}.`);
+      await emitSystemEvent(enriched.id, 'order_created', `Inquiry thread opened: ${title}.`);
     } else {
-      await emitSystemEvent(newOrd.id, 'order_created', `Order placed: ${title}. Payment is held in escrow until the work is approved.`);
+      await emitSystemEvent(enriched.id, 'order_created', `Order placed: ${title}. Payment is held in escrow until the work is approved.`);
       if (requirements) {
         const reqMsg: Message = {
           id: 'msg_' + Date.now() + '_req_' + Math.random().toString(36).slice(2, 6),
@@ -472,14 +552,50 @@ const handleOrderExtendTime = async (req: Request, res: Response) => {
 
     const { days, newDueDate, reason } = req.body;
     const oldDate = order.dueDate;
-    let targetDate = newDueDate;
+    let targetDate: string;
 
-    if (days && Number(days) > 0) {
-      const current = new Date(order.dueDate || Date.now());
-      current.setDate(current.getDate() + Number(days));
-      targetDate = current.toISOString().split('T')[0];
-    } else if (!targetDate) {
-      targetDate = new Date(Date.now() + 2 * 86400000).toISOString().split('T')[0];
+    if (days !== undefined && Number(days) > 0) {
+      const numDays = Number(days);
+      const extended = calculateExtendedDeadline(order.dueDate, numDays, order.createdAt);
+      if (extended) {
+        targetDate = extended;
+      } else {
+        // Safe explicit fallback consistent with admin workflow if existing deadline was missing/invalid
+        targetDate = new Date(Date.now() + numDays * 86400000).toISOString();
+      }
+    } else if (newDueDate !== undefined) {
+      if (typeof newDueDate !== 'string' || !newDueDate.trim()) {
+        return res.status(400).json({ error: 'A valid newDueDate string must be provided.' });
+      }
+      const trimmed = newDueDate.trim();
+      let candidateIso: string;
+
+      if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        // Administrator supplied a date-only replacement: preserve existing time-of-day if available, or end of day
+        let timePart: string | null = null;
+        if (order.dueDate && typeof order.dueDate === 'string' && order.dueDate.includes('T')) {
+          timePart = order.dueDate.split('T')[1] || null;
+        } else if (order.createdAt && typeof order.createdAt === 'string' && order.createdAt.includes('T')) {
+          timePart = order.createdAt.split('T')[1] || null;
+        }
+
+        if (timePart) {
+          candidateIso = `${trimmed}T${timePart}`;
+        } else {
+          candidateIso = `${trimmed}T23:59:59.999Z`;
+        }
+      } else {
+        candidateIso = trimmed;
+      }
+
+      const parsed = new Date(candidateIso);
+      if (isNaN(parsed.getTime())) {
+        return res.status(400).json({ error: `Invalid deadline date format: "${newDueDate}".` });
+      }
+      targetDate = parsed.toISOString();
+    } else {
+      // Default fallback extension if neither days nor newDueDate provided
+      targetDate = new Date(Date.now() + 2 * 86400000).toISOString();
     }
 
     order.dueDate = targetDate;
@@ -547,13 +663,18 @@ router.post('/orders/:id/extension-request', requireAuth, requireActiveStatus, r
     if (!Number.isInteger(numDays) || numDays < 1 || numDays > 14) return res.status(400).json({ error: 'Days must be 1-14.' });
     if (!reason || !reason.trim()) return res.status(400).json({ error: 'Reason required.' });
 
+    const requestedDueDate = calculateExtendedDeadline(order.dueDate, numDays, order.createdAt);
+    if (!requestedDueDate) {
+      return res.status(400).json({ error: 'Order does not have a valid deadline to extend.' });
+    }
+
     const newRequest: ExtensionRequest = {
       id: 'ext_' + randomUUID().slice(0, 12),
       requestedBy: 'seller',
       days: numDays,
       reason: reason.trim(),
       originalDueDate: order.dueDate,
-      requestedDueDate: new Date(new Date(order.dueDate).getTime() + numDays * 86400000).toISOString().split('T')[0],
+      requestedDueDate,
       requestedAt: new Date().toISOString(),
       responseDeadline: new Date(Date.now() + 48 * 3600 * 1000).toISOString(),
       status: 'pending'
@@ -721,25 +842,8 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
   if (!tryAcquireOrderLock(orderId, res)) return;
 
   try {
-    const order = await store.getOrder(orderId);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
     const authUserId = (req as any).authenticatedUserId;
     const caller = await store.getUser(authUserId);
-    const isAdmin = caller?.role === 'admin' || caller?.role === 'super_admin';
-    if (!isAdmin && order.sellerId !== authUserId) {
-      return res.status(403).json({ error: 'Forbidden: Only the seller or an administrator can submit deliverables.' });
-    }
-
-    const allowedStatuses = ['funded_in_escrow', 'in_progress', 'revision', 'draft_review', 'delivered', 'work_in_progress', 'late'];
-    if (!allowedStatuses.includes(order.status)) {
-      return res.status(409).json({ error: `Cannot submit a deliverable for an order in "${order.status}" status.` });
-    }
-    if (order.status === 'completed') {
-      return res.status(400).json({ error: 'Cannot submit a deliverable for a completed order.' });
-    }
-
-    if (!order.deliverableFiles) order.deliverableFiles = [];
-    if (!order.deliveryHistory) order.deliveryHistory = [];
 
     const rawFiles = Array.isArray(req.body.files) && req.body.files.length > 0 
       ? req.body.files 
@@ -757,52 +861,147 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
       return res.status(400).json({ error: 'Add a file, a URL/reference, or a written completion message to submit a delivery.' });
     }
 
-    let validatedFiles: Array<{ name: string; size: string; url: string }> = [];
     if (rawFiles.length > 0) {
-      const validation = await validateStoredWorkstreamFiles(rawFiles, caller, order.id);
+      const validation = await validateStoredWorkstreamFiles(rawFiles, caller, orderId);
       if (!validation.ok) {
         return res.status((validation as any).status || 400).json({ error: (validation as any).error });
       }
-      validatedFiles = validation.files;
     }
 
-    const isDraft = Boolean(req.body.isDraft);
-    const uploadedFiles = validatedFiles.map((f: any, idx: number) => ({
-      id: 'deliv_' + Date.now() + '_' + idx,
-      name: f.name,
-      size: f.size,
-      url: f.url,
-      uploadedAt: new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }),
-      type: isDraft ? 'draft' : 'deliverable'
-    }));
+    const txResult = await postgresStore.executeInTransaction(async (client) => {
+      const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+      if (orderRes.rows.length === 0) {
+        const err: any = new Error('Order not found');
+        err.status = 404;
+        throw err;
+      }
 
-    const version = order.deliveryHistory.length + 1;
-    const deliveredAt = new Date().toISOString();
-    const projectResponseDeadline = order.orderType === 'project'
-      ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-      : undefined;
+      const orderRow = orderRes.rows[0];
+      const order = (store as any).mapOrderRow ? (store as any).mapOrderRow(orderRow) : await store.getOrder(orderId, client);
+      if (!order) {
+        const err: any = new Error('Order not found');
+        err.status = 404;
+        throw err;
+      }
 
-    order.deliveryHistory.push({
-      version,
-      notes: trimmedNotes,
-      reference: trimmedReference || undefined,
-      files: uploadedFiles,
-      deliveredAt,
-      ...(projectResponseDeadline ? { responseDeadline: projectResponseDeadline } : {})
-    });
-    if (projectResponseDeadline) {
-      order.responseDeadline = projectResponseDeadline;
-    }
+      const isAdmin = caller?.role === 'admin' || caller?.role === 'super_admin';
+      if (!isAdmin && order.sellerId !== authUserId) {
+        const err: any = new Error('Forbidden: Only the seller or an administrator can submit deliverables.');
+        err.status = 403;
+        throw err;
+      }
 
-    let resolvedRevisionCount = 0;
-    if (order.revisions && order.revisions.length > 0) {
-      for (const rev of order.revisions) {
-        if (rev.status === 'requested') {
-          rev.status = 'resolved';
-          resolvedRevisionCount++;
+      const allowedStatuses = ['funded_in_escrow', 'in_progress', 'revision', 'draft_review', 'delivered', 'work_in_progress', 'late'];
+      if (!allowedStatuses.includes(order.status)) {
+        const err: any = new Error(`Cannot submit a deliverable for an order in "${order.status}" status.`);
+        err.status = 409;
+        throw err;
+      }
+      if (order.status === 'completed') {
+        const err: any = new Error('Cannot submit a deliverable for a completed order.');
+        err.status = 400;
+        throw err;
+      }
+
+      if (!order.deliverableFiles) order.deliverableFiles = [];
+      if (!order.deliveryHistory) order.deliveryHistory = [];
+
+      let validatedFiles: Array<{ name: string; size: string; url: string }> = [];
+      if (rawFiles.length > 0) {
+        const validation = await validateStoredWorkstreamFiles(rawFiles, caller, order.id);
+        if (!validation.ok) {
+          const err: any = new Error((validation as any).error);
+          err.status = (validation as any).status || 400;
+          throw err;
+        }
+        validatedFiles = validation.files;
+      }
+
+      const isDraft = Boolean(req.body.isDraft);
+      const uploadedFiles = validatedFiles.map((f: any, idx: number) => ({
+        id: 'deliv_' + Date.now() + '_' + idx,
+        name: f.name,
+        size: f.size,
+        url: f.url,
+        uploadedAt: new Date().toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }),
+        type: isDraft ? 'draft' : 'deliverable'
+      }));
+
+      if (!isDraft) {
+        order.deliverableFiles = [...(order.deliverableFiles || []), ...uploadedFiles];
+      }
+
+      const version = order.deliveryHistory.length + 1;
+      const deliveredAt = new Date().toISOString();
+      const projectResponseDeadline = order.orderType === 'project'
+        ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+        : undefined;
+
+      order.deliveryHistory.push({
+        version,
+        notes: trimmedNotes,
+        reference: trimmedReference || undefined,
+        files: uploadedFiles,
+        deliveredAt,
+        ...(projectResponseDeadline ? { responseDeadline: projectResponseDeadline } : {})
+      });
+      if (projectResponseDeadline) {
+        order.responseDeadline = projectResponseDeadline;
+      }
+
+      let resolvedRevisionCount = 0;
+      if (order.revisions && order.revisions.length > 0) {
+        for (const rev of order.revisions) {
+          if (rev.status === 'requested') {
+            rev.status = 'resolved';
+            resolvedRevisionCount++;
+          }
         }
       }
-    }
+
+      const updateRes = await client.query(
+        `UPDATE orders 
+         SET status = $1, 
+             deliverable_files = $2, 
+             delivery_history = $3, 
+             delivery_notes = $4, 
+             delivery_reference = $5, 
+             revisions = $6, 
+             response_deadline = $7 
+         WHERE id = $8 AND status = ANY($9)`,
+        [
+          isDraft ? 'draft_review' : 'delivered',
+          JSON.stringify(order.deliverableFiles),
+          JSON.stringify(order.deliveryHistory),
+          trimmedNotes,
+          trimmedReference,
+          JSON.stringify(order.revisions),
+          order.responseDeadline || null,
+          orderId,
+          allowedStatuses
+        ]
+      );
+
+      if (updateRes.rowCount === 0) {
+        const err: any = new Error('Order state changed concurrently. Please retry.');
+        err.status = 409;
+        throw err;
+      }
+
+      order.status = isDraft ? 'draft_review' : 'delivered';
+
+      return {
+        order,
+        version,
+        isDraft,
+        uploadedFiles,
+        trimmedNotes,
+        trimmedReference,
+        resolvedRevisionCount
+      };
+    });
+
+    const { order, version, isDraft, uploadedFiles, resolvedRevisionCount } = txResult;
 
     if (resolvedRevisionCount > 0) {
       await emitSystemEvent(order.id, 'revision_resolved', `📝 Revision resolved via Delivery #v${version}.`, {
@@ -904,21 +1103,10 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
       }
     }
 
-    const success = await store.updateOrderStatus(orderId, {
-      status: isDraft ? 'draft_review' : 'delivered',
-      deliverable_files: JSON.stringify(order.deliverableFiles),
-      delivery_history: JSON.stringify(order.deliveryHistory),
-      delivery_notes: trimmedNotes,
-      delivery_reference: trimmedReference,
-      revisions: JSON.stringify(order.revisions),
-      response_deadline: order.responseDeadline || null
-    }, allowedStatuses);
-
-    if (!success) return res.status(409).json({ error: 'Order state changed concurrently. Please retry.' });
-
     res.json({ success: true, files: uploadedFiles, file: uploadedFiles[0], offer: createdInvoiceOffer, order: enrichOrderWithServiceInfo(order) });
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    const status = err?.status || 400;
+    res.status(status).json({ error: err.message || 'Failed to submit deliverable' });
   } finally {
     releaseOrderLock(orderId);
   }
@@ -1039,11 +1227,81 @@ const handleOpenDispute = async (req: Request, res: Response) => {
     };
 
     const allowedDisputeStatuses = ['funded_in_escrow', 'in_progress', 'delivered', 'revision', 'draft_review', 'work_in_progress'];
-    const dispUpdated = await store.updateOrderStatus(order.id, { status: 'disputed' }, allowedDisputeStatuses);
-    if (!dispUpdated) {
-      return res.status(409).json({ error: 'Cannot open a dispute: order status changed concurrently.' });
-    }
-    await store.saveDispute(newDispute);
+
+    // ATOMIC TRANSACTION: Both order status update and dispute insertion commit together or rollback together
+    await postgresStore.executeInTransaction(async (client) => {
+      // Re-verify order status under FOR UPDATE lock
+      const orderRes = await client.query('SELECT status FROM orders WHERE id = $1 FOR UPDATE', [order.id]);
+      if (orderRes.rows.length === 0) {
+        const err: any = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const currentStatus = orderRes.rows[0].status;
+      if (currentStatus === 'completed' || currentStatus === 'cancelled') {
+        const err: any = new Error(`Cannot open a dispute: this order is already ${currentStatus}.`);
+        err.statusCode = 409;
+        throw err;
+      }
+      if (currentStatus === 'disputed') {
+        const err: any = new Error('This order is already under dispute.');
+        err.statusCode = 409;
+        throw err;
+      }
+      if (!allowedDisputeStatuses.includes(currentStatus)) {
+        const err: any = new Error(`Cannot open a dispute for order in status "${currentStatus}".`);
+        err.statusCode = 409;
+        throw err;
+      }
+
+      // Re-verify active held escrow under FOR UPDATE lock
+      const escRes = await client.query('SELECT status, remaining FROM escrows WHERE order_id = $1 FOR UPDATE', [order.id]);
+      if (escRes.rows.length === 0 || escRes.rows[0].status !== 'held' || Number(escRes.rows[0].remaining) <= 0) {
+        const err: any = new Error('Cannot open a dispute: there is no active escrow held for this order.');
+        err.statusCode = 409;
+        throw err;
+      }
+
+      // Re-verify existing active dispute under FOR UPDATE lock
+      const dispCheck = await client.query(
+        "SELECT id FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_investigation') FOR UPDATE",
+        [order.id]
+      );
+      if (dispCheck.rows.length > 0) {
+        const err: any = new Error('An active dispute already exists for this order.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // Atomically update order status
+      const updateRes = await client.query(
+        `UPDATE orders SET status = 'disputed' WHERE id = $1 AND status NOT IN ('completed', 'cancelled', 'disputed')`,
+        [order.id]
+      );
+      if (updateRes.rowCount === 0) {
+        const err: any = new Error('Cannot open a dispute: order status changed concurrently.');
+        err.statusCode = 409;
+        throw err;
+      }
+
+      // Atomically insert dispute record
+      await client.query(
+        `INSERT INTO disputes (id, order_id, buyer_id, seller_id, raised_by, reason, evidence, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          newDispute.id,
+          newDispute.orderId,
+          newDispute.buyerId || null,
+          newDispute.sellerId || null,
+          newDispute.raisedBy,
+          newDispute.reason,
+          newDispute.evidence || null,
+          newDispute.status,
+          newDispute.createdAt
+        ]
+      );
+    });
+
     order.status = 'disputed';
 
     const sysMsg: Message = {
@@ -1066,7 +1324,8 @@ const handleOpenDispute = async (req: Request, res: Response) => {
 
     res.json({ success: true, dispute: newDispute, order: enrichOrderWithServiceInfo(order) });
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    const statusCode = err?.statusCode || 400;
+    res.status(statusCode).json({ error: err.message });
   } finally {
     releaseOrderLock(orderId);
   }
@@ -1159,7 +1418,7 @@ const handleOrderForceComplete = async (req: Request, res: Response) => {
     }
 
     const reason = String(req.body.reason || 'Admin administrative force-release in seller favor.');
-    const result = await releaseOrderFunds(order, adminActor(req), reason, false, req.body.requestKey);
+    const result = await releaseOrderFunds(order, adminActor(req), reason, false, req.body.requestKey, true);
     await closeActiveDispute(order.id, 'resolved_release', reason);
 
     res.json({ success: true, order: enrichOrderWithServiceInfo(order), result });
@@ -1198,7 +1457,7 @@ const handleOrderForceCancel = async (req: Request, res: Response) => {
       await closeActiveDispute(order.id, 'resolved_partial', reason);
       await pushSystemMessage(order.id, `⚖️ Order resolved by Administration. $${refundAmount} refunded to buyer; the remainder was released to the freelancer. Reason: ${reason}`, 'dispute_resolved');
     } else {
-      result = await refundOrderFunds(order, undefined, adminActor(req), reason, req.body.requestKey);
+      result = await refundOrderFunds(order, undefined, adminActor(req), reason, req.body.requestKey, undefined, true);
       refundAmount = result.refunded;
       await closeActiveDispute(order.id, 'resolved_refund', reason);
     }
@@ -1317,20 +1576,6 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
   try {
     const userId = (req as any).authenticatedUserId;
     const caller = await store.getUser(userId);
-    const order = await store.getOrder(orderId);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (!order.cancellationRequest || order.cancellationRequest.status !== 'pending') {
-      return res.status(400).json({ error: 'No pending cancellation request found for this order.' });
-    }
-
-    const isBuyer = userId === order.buyerId;
-    const isSeller = userId === order.sellerId;
-    if (!isBuyer && !isSeller) {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    if (userId === order.cancellationRequest.requesterId) {
-      return res.status(403).json({ error: 'You cannot respond to your own cancellation request.' });
-    }
 
     const { action, reason } = req.body;
     if (!['accept', 'reject'].includes(action)) {
@@ -1340,73 +1585,175 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
       return res.status(400).json({ error: 'Rejection reason is required when rejecting a cancellation request.' });
     }
 
-    const isExpired = Boolean(
-      order.cancellationRequest.respondBy &&
-      new Date() > new Date(order.cancellationRequest.respondBy)
-    );
-    if (isExpired && action === 'reject') {
-      return res.status(400).json({
-        error: 'The 48-hour response window for this cancellation request has expired and it can no longer be rejected.'
-      });
-    }
+    const txResult = await postgresStore.executeInTransaction(async (client) => {
+      const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+      if (orderRes.rows.length === 0) {
+        const err: any = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const orderRow = orderRes.rows[0];
+      const order = (store as any).mapOrderRow ? (store as any).mapOrderRow(orderRow) : await store.getOrder(orderId, client);
+      if (!order) {
+        const err: any = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
 
-    const now = new Date().toISOString();
-    order.cancellationRequest.respondedBy = userId;
-    order.cancellationRequest.respondedAt = now;
+      let cancelReq = order.cancellationRequest;
+      if (typeof cancelReq === 'string') {
+        try { cancelReq = JSON.parse(cancelReq); } catch {}
+      }
+      if (!cancelReq || cancelReq.status !== 'pending') {
+        const err: any = new Error('No pending cancellation request found for this order.');
+        err.statusCode = 400;
+        throw err;
+      }
 
-    if (action === 'accept') {
-      const actorName = caller?.name || (isBuyer ? 'Buyer' : 'Seller');
-      const requestKey = `cancel_accept_${order.id}_${order.cancellationRequest.requestedAt}`;
-      const refundRes = await refundOrderFunds(order, undefined, actorName, `Mutual cancellation accepted: ${order.cancellationRequest.reason}`, requestKey);
-      order.cancellationRequest.status = 'accepted';
+      if (order.status === 'disputed') {
+        const err: any = new Error('Cannot process cancellation: This order is currently under active dispute.');
+        err.statusCode = 409;
+        throw err;
+      }
 
-      await postgresStore.getPool().query(
-        'UPDATE orders SET cancellation_request = $1, cancellation_history = $2 WHERE id = $3',
-        [JSON.stringify(order.cancellationRequest), JSON.stringify(order.cancellationHistory || []), order.id]
+      const activeDisputeRes = await client.query(
+        "SELECT id FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_investigation', 'under_review') LIMIT 1",
+        [order.id]
       );
+      if (activeDisputeRes.rows.length > 0) {
+        const err: any = new Error('Cannot process cancellation: This order has an active unresolved dispute.');
+        err.statusCode = 409;
+        throw err;
+      }
 
+      const isBuyer = userId === order.buyerId;
+      const isSeller = userId === order.sellerId;
+      if (!isBuyer && !isSeller) {
+        const err: any = new Error('Forbidden');
+        err.statusCode = 403;
+        throw err;
+      }
+      if (userId === cancelReq.requesterId) {
+        const err: any = new Error('You cannot respond to your own cancellation request.');
+        err.statusCode = 403;
+        throw err;
+      }
+
+      const isExpired = Boolean(
+        cancelReq.respondBy &&
+        new Date() > new Date(cancelReq.respondBy)
+      );
+      if (isExpired && action === 'reject') {
+        const err: any = new Error('The 48-hour response window for this cancellation request has expired and it can no longer be rejected.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const now = new Date().toISOString();
+      cancelReq.respondedBy = userId;
+      cancelReq.respondedAt = now;
+
+      if (action === 'accept') {
+        const actorName = caller?.name || (isBuyer ? 'Buyer' : 'Seller');
+        cancelReq.status = 'accepted';
+        if (Array.isArray(order.cancellationHistory)) {
+          for (const ch of order.cancellationHistory) {
+            if (ch.requestedAt === cancelReq.requestedAt) {
+              ch.status = 'accepted';
+              ch.respondedBy = userId;
+              ch.respondedAt = now;
+            }
+          }
+        }
+
+        let refundedAmt = 0;
+        if (order.amount === 0 || /^inquiry:/i.test(order.title)) {
+          order.status = 'cancelled';
+          await client.query(
+            "UPDATE orders SET status = 'cancelled', cancellation_type = 'inquiry_cancelled', cancellation_request = $1, cancellation_history = $2 WHERE id = $3",
+            [JSON.stringify(cancelReq), JSON.stringify(order.cancellationHistory || []), order.id]
+          );
+        } else {
+          const requestKey = `cancel_accept_${order.id}_${cancelReq.requestedAt}`;
+          const refundRes = await refundOrderFunds(
+            order, 
+            undefined, 
+            actorName, 
+            `Mutual cancellation accepted: ${cancelReq.reason}`, 
+            requestKey,
+            { cancellationRequest: cancelReq, cancellationHistory: order.cancellationHistory },
+            false,
+            client
+          );
+          refundedAmt = refundRes.refunded;
+        }
+
+        return { order, action: 'accept', refundedAmt, cancelReq, isBuyer, isSeller, caller };
+      } else {
+        const rejectedReq = { ...cancelReq, status: 'rejected' as const, rejectionReason: String(reason).trim() };
+        if (Array.isArray(order.cancellationHistory)) {
+          for (const ch of order.cancellationHistory) {
+            if (ch.requestedAt === cancelReq.requestedAt) {
+              ch.status = 'rejected';
+              ch.rejectionReason = String(reason).trim();
+              ch.respondedBy = userId;
+              ch.respondedAt = now;
+            }
+          }
+        }
+        if (order.status === 'delivered') {
+          order.reviewWindowRestartedAt = now;
+        }
+
+        const updateRes = await client.query(
+          `UPDATE orders 
+           SET cancellation_request = NULL, 
+               cancellation_history = $1, 
+               review_window_restarted_at = COALESCE($2, review_window_restarted_at) 
+           WHERE id = $3 AND cancellation_request IS NOT NULL`,
+          [
+            JSON.stringify(order.cancellationHistory || []),
+            order.reviewWindowRestartedAt || null,
+            order.id
+          ]
+        );
+        if (updateRes.rowCount === 0) {
+          const err: any = new Error('Order status changed concurrently; cannot reject cancellation request.');
+          err.statusCode = 409;
+          throw err;
+        }
+
+        order.cancellationRequest = undefined as any;
+        return { order, action: 'reject', rejectedReq, isBuyer, isSeller, caller };
+      }
+    });
+
+    if (txResult.action === 'accept') {
+      const { order, cancelReq } = txResult;
+      const refundedAmt = txResult.refundedAmt || 0;
       createNotification({
-        userId: order.cancellationRequest.requesterId,
+        userId: cancelReq.requesterId,
         title: 'Cancellation Accepted',
-        message: `Your cancellation request for order #${order.id} was accepted. Full refund issued ($${refundRes.refunded}).`,
+        message: `Your cancellation request for order #${order.id} was accepted.${refundedAmt > 0 ? ` Full refund issued ($${refundedAmt}).` : ' Order closed.'}`,
         type: 'order',
         link: `/messages/${order.id}`
       });
 
       registerAuditLog({
         id: 'log_' + Date.now(),
-        actor: actorName,
-        role: caller?.role || 'user',
+        actor: txResult.caller?.name || (txResult.isBuyer ? 'Buyer' : 'Seller'),
+        role: txResult.caller?.role || 'user',
         action: 'GIG_CANCELLATION_ACCEPTED',
         target: `Order #${order.id}`,
-        details: `Cancellation accepted. Full refund of $${refundRes.refunded} issued.`,
+        details: `Cancellation accepted. ${refundedAmt > 0 ? `Full refund of $${refundedAmt} issued.` : 'Inquiry closed.'}`,
         timestamp: new Date().toLocaleString()
       });
 
-      return res.json({ success: true, order: enrichOrderWithServiceInfo(order), refunded: refundRes.refunded });
+      return res.json({ success: true, order: enrichOrderWithServiceInfo(order), refunded: refundedAmt });
     } else {
-      order.cancellationRequest.status = 'rejected';
-      order.cancellationRequest.rejectionReason = String(reason).trim();
-      if (order.status === 'delivered') {
-        order.reviewWindowRestartedAt = now;
-      }
-
-      const rejectUpdated = await store.updateOrderStatus(
-        order.id,
-        {
-          cancellation_request: JSON.stringify(order.cancellationRequest),
-          cancellation_history: JSON.stringify(order.cancellationHistory || []),
-          review_window_restarted_at: order.reviewWindowRestartedAt || null
-        },
-        ['payment_pending', 'funded_in_escrow', 'in_progress', 'delivered', 'revision', 'draft_review', 'work_in_progress']
-      );
-      if (!rejectUpdated) {
-        return res.status(409).json({ error: 'Order status changed concurrently; cannot reject cancellation request.' });
-      }
-
-      const actorName = caller?.name || (isBuyer ? 'Buyer' : 'Seller');
+      const { order, rejectedReq } = txResult;
       createNotification({
-        userId: order.cancellationRequest.requesterId,
+        userId: rejectedReq.requesterId,
         title: 'Cancellation Rejected',
         message: `Your cancellation request for order #${order.id} was rejected. Reason: ${reason}. Order continues normally.`,
         type: 'order',
@@ -1415,8 +1762,8 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
 
       registerAuditLog({
         id: 'log_' + randomUUID(),
-        actor: actorName,
-        role: caller?.role || 'user',
+        actor: txResult.caller?.name || (txResult.isBuyer ? 'Buyer' : 'Seller'),
+        role: txResult.caller?.role || 'user',
         action: 'GIG_CANCELLATION_REJECTED',
         target: `Order #${order.id}`,
         details: `Cancellation rejected. Reason: ${reason}`,
@@ -1426,7 +1773,8 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
       return res.json({ success: true, order: enrichOrderWithServiceInfo(order) });
     }
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    const statusCode = err?.statusCode || 400;
+    res.status(statusCode).json({ error: err.message });
   } finally {
     releaseOrderLock(orderId);
   }
@@ -1437,86 +1785,113 @@ const handleOrderCancel = async (req: Request, res: Response) => {
   if (!tryAcquireOrderLock(orderId, res)) return;
 
   try {
-    const order = await store.getOrder(orderId);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
     const authUserId = (req as any).authenticatedUserId;
     const caller = (req as any).authenticatedUser || (authUserId ? await store.getUser(authUserId) : null);
-
-    const isStaff = isStaffUser(caller);
-    const isBuyer = authUserId === order.buyerId;
-    const isSeller = authUserId === order.sellerId;
-
-    if (!isStaff && !isBuyer && !isSeller) {
-      return res.status(403).json({ error: 'Forbidden: You are not a participant of this order.' });
-    }
-
-    if (order.status === 'completed' || order.status === 'cancelled' || (order.status as string) === 'refunded') {
-      return res.status(400).json({ error: `Cannot cancel order with status "${order.status}". Cancellation is not allowed for completed, cancelled, or refunded orders.` });
-    }
-
-    const pool = postgresStore.getPool();
-    const dispRes = await pool.query(
-      "SELECT 1 FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_review') LIMIT 1",
-      [order.id]
-    );
-    if (!isStaff && dispRes.rows.length > 0) {
-      return res.status(400).json({ error: 'Direct cancellation is blocked because an active dispute is open. Please resolve the dispute or contact support.' });
-    }
-
-    const hasFundedEscrow = await orderHasEscrow(order.id);
-    const isGigOrder = order.orderType === 'gig' || Boolean(order.gigOrderId) || Boolean(order.gigId);
-
-    if (!isStaff && order.status !== 'payment_pending') {
-      if (isSeller) {
-        if (isGigOrder && (hasFundedEscrow || ['funded_in_escrow', 'in_progress', 'delivered', 'revision', 'revision_requested'].includes(order.status))) {
-          return res.status(400).json({
-            error: 'Direct cancellation is not allowed for funded gig orders. Please submit a cancellation request (POST /api/orders/:id/cancel-request).'
-          });
-        }
-        if (!isGigOrder && !['funded_in_escrow', 'in_progress'].includes(order.status)) {
-          return res.status(400).json({
-            error: `Seller cannot directly cancel a project order in "${order.status}" status.`
-          });
-        }
-      } else if (isBuyer) {
-        if (['delivered', 'revision', 'revision_requested', 'draft_review', 'disputed'].includes(order.status)) {
-          return res.status(403).json({
-            error: 'Cannot directly cancel an active or delivered order. Please request a revision, submit a cancellation request, or open a dispute.'
-          });
-        }
-        if (['funded_in_escrow', 'in_progress'].includes(order.status) || hasFundedEscrow) {
-          const hasZeroDeliveries = (!order.deliveryHistory || order.deliveryHistory.length === 0) && (!order.deliverableFiles || order.deliverableFiles.length === 0);
-          const isVeryLateGig = isGigOrder && Boolean(order.dueDate) && (Date.now() > new Date(order.dueDate).getTime() + LATE_ORDER_PROTECTION_HOURS * 3600 * 1000) && hasZeroDeliveries;
-          if (!isVeryLateGig) {
-            return res.status(403).json({
-              error: 'Cannot directly cancel an active or delivered order. Please submit a cancellation request (POST /api/orders/:id/cancel-request) or open a dispute (POST /api/orders/:id/dispute).'
-            });
-          }
-          order.cancellationType = 'very_late';
-        }
-      }
-    }
-
-    const actor = caller?.name || `user:${authUserId}`;
     const reason = (req.body?.reason || 'Order cancelled').trim();
-    if (hasFundedEscrow) {
-      await refundOrderFunds(order, undefined, actor, reason);
-    } else {
-      const cancelUpdated = await store.updateOrderStatus(
-        order.id,
-        { status: 'cancelled', cancellation_type: order.cancellationType || null },
-        ['payment_pending', 'funded_in_escrow', 'in_progress']
-      );
-      if (!cancelUpdated) {
-        return res.status(409).json({ error: 'Order status changed concurrently; cannot cancel order.' });
+
+    const txResult = await postgresStore.executeInTransaction(async (client) => {
+      const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+      if (orderRes.rows.length === 0) {
+        const err: any = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
       }
-      order.status = 'cancelled';
-    }
+
+      const orderRow = orderRes.rows[0];
+      const order = (store as any).mapOrderRow ? (store as any).mapOrderRow(orderRow) : await store.getOrder(orderId, client);
+      if (!order) {
+        const err: any = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      const isStaff = isStaffUser(caller);
+      const isBuyer = authUserId === order.buyerId;
+      const isSeller = authUserId === order.sellerId;
+
+      if (!isStaff && !isBuyer && !isSeller) {
+        const err: any = new Error('Forbidden: You are not a participant of this order.');
+        err.statusCode = 403;
+        throw err;
+      }
+
+      if (order.status === 'completed' || order.status === 'cancelled' || (order.status as string) === 'refunded') {
+        const err: any = new Error(`Cannot cancel order with status "${order.status}". Cancellation is not allowed for completed, cancelled, or refunded orders.`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const dispRes = await client.query(
+        "SELECT 1 FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_review') LIMIT 1",
+        [order.id]
+      );
+      if (!isStaff && dispRes.rows.length > 0) {
+        const err: any = new Error('Direct cancellation is blocked because an active dispute is open. Please resolve the dispute or contact support.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const hasFundedEscrow = await orderHasEscrow(order.id, client);
+      const isGigOrder = order.orderType === 'gig' || Boolean(order.gigOrderId) || Boolean(order.gigId);
+
+      if (!isStaff && order.status !== 'payment_pending') {
+        if (isSeller) {
+          if (isGigOrder && (hasFundedEscrow || ['funded_in_escrow', 'in_progress', 'delivered', 'revision', 'revision_requested'].includes(order.status))) {
+            const err: any = new Error('Direct cancellation is not allowed for funded gig orders. Please submit a cancellation request (POST /api/orders/:id/cancel-request).');
+            err.statusCode = 400;
+            throw err;
+          }
+          if (!isGigOrder && !['funded_in_escrow', 'in_progress'].includes(order.status)) {
+            const err: any = new Error(`Seller cannot directly cancel a project order in "${order.status}" status.`);
+            err.statusCode = 400;
+            throw err;
+          }
+        } else if (isBuyer) {
+          if (['delivered', 'revision', 'revision_requested', 'draft_review', 'disputed'].includes(order.status)) {
+            const err: any = new Error('Cannot directly cancel an active or delivered order. Please request a revision, submit a cancellation request, or open a dispute.');
+            err.statusCode = 403;
+            throw err;
+          }
+          if (['funded_in_escrow', 'in_progress'].includes(order.status) || hasFundedEscrow) {
+            const hasZeroDeliveries = (!order.deliveryHistory || order.deliveryHistory.length === 0) && (!order.deliverableFiles || order.deliverableFiles.length === 0);
+            const deadlineMs = parseDeadlineInstant(order.dueDate, order.createdAt);
+            const isVeryLateGig = isGigOrder && deadlineMs !== null && (Date.now() > deadlineMs + LATE_ORDER_PROTECTION_HOURS * 3600 * 1000) && hasZeroDeliveries;
+            if (!isVeryLateGig) {
+              const err: any = new Error('Cannot directly cancel an active or delivered order. Please submit a cancellation request (POST /api/orders/:id/cancel-request) or open a dispute (POST /api/orders/:id/dispute).');
+              err.statusCode = 403;
+              throw err;
+            }
+            order.cancellationType = 'very_late';
+          }
+        }
+      }
+
+      const actor = caller?.name || `user:${authUserId}`;
+      if (hasFundedEscrow) {
+        await refundOrderFunds(order, undefined, actor, reason, undefined, undefined, false, client);
+      } else {
+        const updateRes = await client.query(
+          `UPDATE orders SET status = 'cancelled', cancellation_type = $1 WHERE id = $2 AND status NOT IN ('completed', 'cancelled')`,
+          [order.cancellationType || null, order.id]
+        );
+        if (updateRes.rowCount === 0) {
+          const err: any = new Error('Order status changed concurrently; cannot cancel order.');
+          err.statusCode = 409;
+          throw err;
+        }
+        order.status = 'cancelled';
+      }
+
+      return { order };
+    });
+
+    const { order } = txResult;
     await cancelPendingOffersForOrder(order.id, caller?.id);
     await emitSystemEvent(order.id, 'order_cancelled', `Order was cancelled. Reason: ${reason}`);
     res.json({ success: true, order: enrichOrderWithServiceInfo(order) });
   } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Failed to cancel order' });
+    const statusCode = err?.statusCode || 400;
+    res.status(statusCode).json({ error: err.message || 'Failed to cancel order' });
   } finally {
     releaseOrderLock(orderId);
   }

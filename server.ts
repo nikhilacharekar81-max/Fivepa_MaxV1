@@ -98,8 +98,14 @@ if (IS_PROD) {
   (process.env as any).NODE_ENV = 'production';
 }
 
+let isShuttingDown = false;
+
 // Global Security Middleware
 app.use((req, res, next) => {
+  if (isShuttingDown) {
+    res.setHeader('Connection', 'close');
+    return res.status(503).json({ error: 'Server is shutting down. Please retry shortly.' });
+  }
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   if (IS_PRODUCTION) res.setHeader('Strict-Transport-Security', 'max-age=15552000');
@@ -129,6 +135,17 @@ app.use((req, res, next) => {
   return express.json({ limit: '10mb' })(req, res, next);
 });
 
+let resolveStartupReady!: () => void;
+const startupReadyPromise = new Promise<void>((resolve) => {
+  resolveStartupReady = resolve;
+});
+
+// Gate requests until hydration and SSR middleware are registered
+app.use(async (_req, _res, next) => {
+  await startupReadyPromise;
+  next();
+});
+
 // Mount Central API Router
 app.use('/api', apiRouter);
 
@@ -151,6 +168,27 @@ export const server = createServer(app);
 // Initialize WebSocket Engine
 initWebSocketServer(server);
 
+const portArgIndex = process.argv.findIndex(arg => arg === '--port' || arg === '-p');
+const cliPort = portArgIndex !== -1 && process.argv[portArgIndex + 1] ? Number(process.argv[portArgIndex + 1]) : null;
+const PORT = cliPort || (process.env.PORT && process.env.PORT !== '8080' ? Number(process.env.PORT) : 3000);
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[UnhandledRejection]', reason);
+});
+
+if (process.env.NODE_ENV !== 'test' && !server.listening) {
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`Port ${PORT} in use, selecting dynamic fallback port`);
+      server.listen(0, '0.0.0.0');
+    }
+  });
+  server.listen(Number(PORT), '0.0.0.0', () => {
+    const actualPort = (server.address() as any)?.port || PORT;
+    console.log(`WorkPerHour server running on http://0.0.0.0:${actualPort}`);
+  });
+}
+
 // Application Startup & Hydration
 (async () => {
   try {
@@ -165,7 +203,7 @@ initWebSocketServer(server);
     try {
       const pool = postgresStore.getPool();
       const [gigsRes, usersRes, projectsRes] = await Promise.all([
-        pool.query("SELECT * FROM gigs WHERE status = 'published' LIMIT 50"),
+        pool.query("SELECT * FROM gigs WHERE status IN ('active', 'published') LIMIT 50"),
         pool.query("SELECT * FROM users WHERE status = 'active' LIMIT 50"),
         pool.query("SELECT * FROM projects WHERE status = 'open' LIMIT 50")
       ]);
@@ -190,7 +228,8 @@ initWebSocketServer(server);
           coverImage: r.cover_image || '',
           gallery: r.gallery || [],
           tags: r.tags || [],
-          status: r.status,
+          status: r.status === 'published' ? 'active' : (r.status || 'active'),
+          moderationStatus: r.moderation_status || 'approved',
           createdAt: r.created_at,
           extras: r.extras || []
         }));
@@ -254,33 +293,27 @@ initWebSocketServer(server);
     }
   });
 
-  const portArgIndex = process.argv.findIndex(arg => arg === '--port' || arg === '-p');
-  const cliPort = portArgIndex !== -1 && process.argv[portArgIndex + 1] ? Number(process.argv[portArgIndex + 1]) : null;
-  const PORT = cliPort || (process.env.PORT && process.env.PORT !== '8080' ? Number(process.env.PORT) : 3000);
-
-  process.on('unhandledRejection', (reason) => {
-    console.error('[UnhandledRejection]', reason);
-  });
-
-  if (!server.listening) {
-    server.on('error', (err: any) => {
-      if (err.code === 'EADDRINUSE') {
-        console.warn(`Port ${PORT} in use, selecting dynamic fallback port`);
-        server.listen(0, '0.0.0.0');
-      }
-    });
-    server.listen(Number(PORT), '0.0.0.0', () => {
-      const actualPort = (server.address() as any)?.port || PORT;
-      console.log(`WorkPerHour server running on http://0.0.0.0:${actualPort}`);
-    });
-  }
+  resolveStartupReady();
 })();
 
 // Graceful shutdown
+import { stopOutboxProcessor } from './server/services/outboxService.js';
+import { clients } from './server/websocket.js';
+
+let shutdownInitiated = false;
 async function gracefulShutdown(signal: string) {
+  if (shutdownInitiated) return;
+  shutdownInitiated = true;
+  isShuttingDown = true;
   console.log(`Received ${signal}. Initiating graceful shutdown...`);
   
-  // 1. Stop accepting new requests
+  stopOutboxProcessor();
+
+  for (const client of clients) {
+    try { client.close(1001, 'Server shutting down'); } catch {}
+  }
+
+  // 1. Stop accepting new HTTP requests
   server.close(async () => {
     console.log('HTTP server closed.');
     

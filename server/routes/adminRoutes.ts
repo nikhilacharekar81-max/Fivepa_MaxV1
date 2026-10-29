@@ -963,7 +963,7 @@ router.patch('/admin/disputes/:id/resolve', requireAdmin, async (req: Request, r
       } catch (err: any) {
         return res.status(409).json({ error: err.message });
       }
-      if (status === 'resolved_release') await releaseOrderFunds(order, adminActor(req), reason, false);
+      if (status === 'resolved_release') await releaseOrderFunds(order, adminActor(req), reason, false, undefined, true);
       else if (status === 'resolved_refund') await refundOrderFunds(order, undefined, adminActor(req), reason);
       else await splitOrderFunds(order, Number(req.body.refundAmount), adminActor(req), reason);
     }
@@ -1092,19 +1092,70 @@ router.patch('/admin/gigs/:id', requireAdmin, async (req: Request, res: Response
     const { status, moderationStatus, moderationNotes } = req.body;
     const gig = await store.getGig(req.params.id);
     if (!gig) return res.status(404).json({ error: 'Gig not found' });
-    if (status !== undefined) gig.status = status;
-    if (moderationStatus !== undefined) (gig as any).moderationStatus = moderationStatus;
-    if (moderationNotes !== undefined) (gig as any).moderationNotes = moderationNotes;
-    await store.saveGig(gig);
+
+    const previousStatus = gig.status;
+
+    const VALID_STATUSES = ['active', 'paused', 'moderation', 'deleted'];
+    const VALID_MODERATION_STATUSES = ['approved', 'pending', 'rejected', 'flagged'];
+
+    if (status !== undefined) {
+      const cleanStatus = String(status).trim().toLowerCase();
+      if (!VALID_STATUSES.includes(cleanStatus)) {
+        return res.status(400).json({ error: `Invalid gig status "${status}". Allowed: ${VALID_STATUSES.join(', ')}` });
+      }
+      gig.status = cleanStatus as any;
+    }
+
+    if (moderationStatus !== undefined) {
+      const cleanMod = String(moderationStatus).trim().toLowerCase();
+      if (!VALID_MODERATION_STATUSES.includes(cleanMod)) {
+        return res.status(400).json({ error: `Invalid moderation status "${moderationStatus}". Allowed: ${VALID_MODERATION_STATUSES.join(', ')}` });
+      }
+      (gig as any).moderationStatus = cleanMod;
+
+      if (cleanMod === 'approved' && status === undefined && gig.status === 'moderation') {
+        gig.status = 'active';
+      } else if ((cleanMod === 'rejected' || cleanMod === 'flagged') && gig.status === 'active') {
+        gig.status = 'moderation';
+      }
+    }
+
+    if (moderationNotes !== undefined) {
+      (gig as any).moderationNotes = String(moderationNotes).slice(0, 1000);
+    }
+
+    const adminUpdates: any = {
+      status: gig.status,
+      moderationStatus: (gig as any).moderationStatus
+    };
+    if (moderationNotes !== undefined) {
+      adminUpdates.moderationNotes = (gig as any).moderationNotes;
+    }
+
+    const updatedGig = await store.updateGig(gig.id, adminUpdates);
+    if (!updatedGig) return res.status(404).json({ error: 'Gig not found' });
+
+    if (previousStatus !== 'deleted' && updatedGig.status === 'deleted') {
+      await registerAuditLog({
+        id: 'log_' + Date.now(),
+        actor: adminActor(req),
+        role: (req as any).authenticatedUser?.role || 'admin',
+        action: 'GIG_DELETED',
+        target: `Gig #${updatedGig.id} (${updatedGig.title})`,
+        details: `Administrative deletion of gig "${updatedGig.title}" (ID: ${updatedGig.id})`,
+        timestamp: new Date().toLocaleString()
+      });
+    }
+
     res.json({
       success: true,
       gig: {
-        id: gig.id,
-        freelancerId: gig.freelancerId,
-        title: gig.title,
-        status: gig.status,
-        moderationStatus: (gig as any).moderationStatus,
-        moderationNotes: (gig as any).moderationNotes
+        id: updatedGig.id,
+        freelancerId: updatedGig.freelancerId,
+        title: updatedGig.title,
+        status: updatedGig.status,
+        moderationStatus: (updatedGig as any).moderationStatus,
+        moderationNotes: (updatedGig as any).moderationNotes
       }
     });
   } catch (err: any) {

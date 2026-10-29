@@ -1,16 +1,18 @@
 import { financialTransactionService } from '../services/financialService.js';
 import { processCancellationTimeouts, processAutoAcceptOrders } from '../services/orderService.js';
-import { postgresStore, isPostgresEnabled } from '../db/postgresStore.js';
+import { postgresStore, isPostgresEnabled, isRemotePostgresConfigured } from '../db/postgresStore.js';
+import { startOutboxProcessor } from '../services/outboxService.js';
 
 export async function runBackgroundJobs() {
   console.log('[BackgroundJobs] Starting financial and marketplace background jobs...');
+  startOutboxProcessor(3000);
 
-  // 1. Earnings Clearing Job (Every 5 minutes with session advisory lock)
+  // 1. Earnings Clearing Job (Every 5 minutes with session advisory lock on remote Postgres)
   setInterval(async () => {
     let client: any = null;
     let hasLock = false;
     try {
-      if (isPostgresEnabled()) {
+      if (isPostgresEnabled() && isRemotePostgresConfigured()) {
         client = await postgresStore.getPool().connect();
         const lockRes = await client.query('SELECT pg_try_advisory_lock(74218932) AS locked');
         if (!lockRes.rows[0]?.locked) {
@@ -42,12 +44,12 @@ export async function runBackgroundJobs() {
     }
   }, 5 * 60 * 1000);
 
-  // 2. Cancellation Timeouts Job (Every 60 seconds with session advisory lock)
+  // 2. Cancellation Timeouts Job (Every 60 seconds with session advisory lock on remote Postgres)
   setInterval(async () => {
     let client: any = null;
     let hasLock = false;
     try {
-      if (isPostgresEnabled()) {
+      if (isPostgresEnabled() && isRemotePostgresConfigured()) {
         client = await postgresStore.getPool().connect();
         const lockRes = await client.query('SELECT pg_try_advisory_lock(74218933) AS locked');
         if (!lockRes.rows[0]?.locked) {
@@ -68,12 +70,12 @@ export async function runBackgroundJobs() {
     }
   }, 60 * 1000);
 
-  // 3. Buyer Review Window & Auto-Accept Job (Every 60 seconds with session advisory lock)
+  // 3. Buyer Review Window & Auto-Accept Job (Every 60 seconds with session advisory lock on remote Postgres)
   setInterval(async () => {
     let client: any = null;
     let hasLock = false;
     try {
-      if (isPostgresEnabled()) {
+      if (isPostgresEnabled() && isRemotePostgresConfigured()) {
         client = await postgresStore.getPool().connect();
         const lockRes = await client.query('SELECT pg_try_advisory_lock(74218934) AS locked');
         if (!lockRes.rows[0]?.locked) {

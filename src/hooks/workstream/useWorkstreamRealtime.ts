@@ -120,10 +120,10 @@ export function useWorkstreamRealtime({
       };
 
       socket.onclose = (ev) => {
-        if (ev.code === 4401) return; // rejected as unauthenticated: do not retry with the same credentials
+        if (ev.code === 4401 || ev.code === 1008) return; // rejected as unauthenticated: do not retry with the same credentials
         console.log('Workstream WebSocket disconnected, scheduling reconnect...');
         if (!isUnmounted) {
-          reconnectTimeout = setTimeout(connect, 3000);
+          reconnectTimeout = setTimeout(connect, 5000);
         }
       };
     };
@@ -137,7 +137,7 @@ export function useWorkstreamRealtime({
         wsRef.current.close();
       }
     };
-  }, [currentUser, impersonatedUser, setMessages, setOrders]);
+  }, [currentUser?.id, impersonatedUser?.id, setMessages, setOrders]);
 
   return {
     wsRef

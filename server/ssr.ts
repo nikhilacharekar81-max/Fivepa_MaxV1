@@ -41,22 +41,21 @@ export async function setupSSR(
     const { createServer } = await import('vite');
     vite = await createServer({
       root,
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        watch: null
+      },
       appType: 'custom'
     });
     app.use(vite.middlewares);
     templateHtml = fs.readFileSync(path.resolve(root, 'index.html'), 'utf-8');
 
-    // Pre-warm SSR module and critical client assets in background
-    Promise.all([
-      vite.ssrLoadModule('/src/entry-server.tsx').then((mod: any) => {
-        ssrRender = mod.render;
-      }),
-      vite.transformRequest('/src/index.css').catch(() => {}),
-      vite.transformRequest('/src/entry-client.tsx').catch(() => {}),
-      vite.transformRequest('/src/App.tsx').catch(() => {})
-    ]).catch((err) => {
-      console.warn('Vite pre-warm warning:', err);
+    // Load SSR entry module in background
+    vite.ssrLoadModule('/src/entry-server.tsx').then((mod: any) => {
+      ssrRender = mod.render;
+    }).catch((err: any) => {
+      console.warn('Vite SSR module load warning:', err);
     });
   } else {
     app.use(express.static(clientDist, { index: false }));

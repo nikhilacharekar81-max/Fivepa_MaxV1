@@ -59,19 +59,28 @@ export function sanitizePublicUser(user: any) {
 export function isGigPublic(g: Gig): boolean {
   if (!g) return false;
   const status = (g.status || '').toLowerCase();
-  if (status !== 'active' && status !== 'paused') return false;
-  return !g.moderationStatus || g.moderationStatus === 'approved';
+  if (status !== 'active') return false;
+  const modStatus = (g.moderationStatus || '').toLowerCase();
+  if (modStatus && modStatus !== 'approved') return false;
+  return true;
 }
 
 export function sanitizePublicGig(g: Gig) {
   const { moderationStatus, moderationNotes, ...publicGig } = g;
-  
-  // Auto-expire featured status if past featuredUntil timestamp
-  if (publicGig.featured && publicGig.featuredUntil && new Date(publicGig.featuredUntil) < new Date()) {
-      publicGig.featured = false;
-  }
-  
-  return publicGig;
+  const featuredUntil = (publicGig as any).featuredUntil || (publicGig as any).featured_until;
+  const isFeaturedActive = Boolean(
+    (publicGig.featured || (publicGig as any).isFeatured) &&
+    featuredUntil &&
+    new Date(featuredUntil).getTime() > Date.now()
+  );
+
+  return {
+    ...publicGig,
+    featured: isFeaturedActive,
+    isFeatured: isFeaturedActive,
+    featuredUntil: isFeaturedActive ? featuredUntil : null,
+    featured_until: isFeaturedActive ? featuredUntil : null
+  };
 }
 
 const PUBLIC_PROJECT_STATUSES = new Set(['open', 'published', 'in_progress']);

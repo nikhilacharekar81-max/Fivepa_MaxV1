@@ -66,8 +66,8 @@ export async function cancelPendingOffersForOrder(orderId: string, actorId?: str
   }
 }
 
-export async function orderHasEscrow(orderId: string): Promise<boolean> {
-  const esc = await financialRepository.getEscrow(orderId);
+export async function orderHasEscrow(orderId: string, client?: any): Promise<boolean> {
+  const esc = await financialRepository.getEscrow(orderId, client);
   return Boolean(esc && esc.status === 'held' && esc.remaining > 0);
 }
 

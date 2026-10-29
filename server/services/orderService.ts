@@ -45,8 +45,8 @@ export async function getUnclearedEarningsFromDb(userId: string): Promise<number
   return getUnclearedEarnings(userId);
 }
 
-export async function getActiveEscrowRemaining(order: Order): Promise<number> {
-  const esc = await financialRepository.getEscrow(order.id);
+export async function getActiveEscrowRemaining(order: Order, client?: any): Promise<number> {
+  const esc = await financialRepository.getEscrow(order.id, client);
   if (esc) return esc.remaining;
   return (order.status === 'completed' || order.status === 'cancelled') ? 0 : Number(order.amount || 0);
 }
@@ -99,23 +99,23 @@ export function saveOrdersToDisk() { return Promise.resolve(); }
 export function saveUsersToPostgres() { return Promise.resolve(); }
 export function saveGigsToPostgres() { return Promise.resolve(); }
 
-export async function syncUserBalances(userIds?: string[]) {
+export async function syncUserBalances(userIds?: string[], externalClient?: any) {
   try {
-    const pool = postgresStore.getPool();
+    const dbRunner = externalClient || postgresStore.getPool();
     const hasSpecificUsers = Array.isArray(userIds) && userIds.length > 0;
 
     if (hasSpecificUsers) {
       const distinctIds = Array.from(new Set(userIds.filter(Boolean)));
       if (distinctIds.length === 0) return;
 
-      await pool.query(`
+      await dbRunner.query(`
         UPDATE users u
         SET wallet_balance = w.available_balance
         FROM wallets w
         WHERE u.id = w.user_id AND u.id = ANY($1)
       `, [distinctIds]);
 
-      const walletRows = await pool.query(
+      const walletRows = await dbRunner.query(
         'SELECT user_id, available_balance FROM wallets WHERE user_id = ANY($1)',
         [distinctIds]
       );
@@ -129,14 +129,14 @@ export async function syncUserBalances(userIds?: string[]) {
         u.walletBalance = balanceMap.get(u.id)!;
       }
     } else {
-      await pool.query(`
+      await dbRunner.query(`
         UPDATE users u
         SET wallet_balance = w.available_balance
         FROM wallets w
         WHERE u.id = w.user_id
       `);
 
-      const walletRows = await pool.query('SELECT user_id, available_balance FROM wallets');
+      const walletRows = await dbRunner.query('SELECT user_id, available_balance FROM wallets');
       const balanceMap = new Map<string, number>();
       for (const r of walletRows.rows) {
         balanceMap.set(r.user_id, Number(r.available_balance));
@@ -164,7 +164,7 @@ export function syncIndexes() {
   // Clearing records are managed directly in PostgreSQL earnings_clearing
 }
 
-export async function resolveGigOrderPrice(gigId: string, extraIds: unknown): Promise<{ gig: any; gigPrice: number; extrasTitles: string[] }> {
+export async function resolveGigOrderPrice(gigId: string, extraIds: unknown): Promise<{ gig: any; gigPrice: number; extrasTitles: string[]; selectedExtrasDetails: any[]; totalDeliveryDays: number }> {
   const res = await postgresStore.getPool().query('SELECT * FROM gigs WHERE id = $1', [gigId]);
   if (res.rows.length === 0) {
     const err: any = new Error('Gig not found.');
@@ -178,17 +178,38 @@ export async function resolveGigOrderPrice(gigId: string, extraIds: unknown): Pr
     throw err;
   }
   const basePrice = Number(r.price || 0);
+  const baseDeliveryDays = Math.max(1, Math.round(Number(r.delivery_days || r.deliveryDays || 7)));
   const extras = Array.isArray(r.extras) ? r.extras : [];
-  const requestedIds = Array.isArray(extraIds) ? extraIds.map(String) : [];
+  const requestedIds = Array.isArray(extraIds) 
+    ? Array.from(new Set(extraIds.map(String).filter(Boolean)))
+    : [];
   let extrasTotal = 0;
+  let extrasDaysTotal = 0;
   const extrasTitles: string[] = [];
-  for (const ex of extras) {
-    if (ex && requestedIds.includes(String(ex.id))) {
-      extrasTotal += Number(ex.price || 0);
-      if (ex.title) extrasTitles.push(String(ex.title));
+  const selectedExtrasDetails: any[] = [];
+
+  for (const reqId of requestedIds) {
+    const matched = extras.find((ex: any) => String(ex?.id) === String(reqId));
+    if (!matched) {
+      const err: any = new Error(`Invalid extra selected: ID "${reqId}" is not available for this Gig.`);
+      err.status = 400;
+      throw err;
     }
+    const price = Math.round(Number(matched.price || 0) * 100) / 100;
+    const deliveryDays = Math.max(0, Math.round(Number(matched.deliveryDays ?? matched.delivery_days)) || 0);
+    extrasTotal += price;
+    extrasDaysTotal += deliveryDays;
+    extrasTitles.push(String(matched.title || 'Extra'));
+    selectedExtrasDetails.push({
+      id: String(matched.id),
+      title: String(matched.title || 'Extra'),
+      price,
+      deliveryDays
+    });
   }
+
   const gigPrice = Math.round((basePrice + extrasTotal) * 100) / 100;
+  const totalDeliveryDays = baseDeliveryDays + extrasDaysTotal;
   return {
     gig: {
       id: r.id,
@@ -196,11 +217,13 @@ export async function resolveGigOrderPrice(gigId: string, extraIds: unknown): Pr
       price: basePrice,
       freelancerId: r.freelancer_id,
       freelancer_id: r.freelancer_id,
-      deliveryDays: Number(r.delivery_days || 7),
+      deliveryDays: baseDeliveryDays,
       extras
     },
     gigPrice,
-    extrasTitles
+    extrasTitles,
+    selectedExtrasDetails,
+    totalDeliveryDays
   };
 }
 
@@ -235,33 +258,97 @@ export function isAutoAcceptEnabled(): boolean {
 
 export const LATE_ORDER_PROTECTION_HOURS = 48;
 
+/**
+ * Parses an order deadline into an authoritative UTC timestamp in milliseconds.
+ * - Full ISO timestamps (e.g. 2026-10-30T14:30:00.000Z) are parsed directly.
+ * - Legacy date-only records (e.g. 2026-10-30) are handled conservatively:
+ *   If the order's creation timestamp has a valid time-of-day, that time-of-day is preserved.
+ *   Otherwise, the date-only record is treated as end-of-day (23:59:59.999Z) so the deadline
+ *   is never prematurely triggered earlier than intended.
+ * - Invalid or unparseable inputs return null.
+ */
+export function parseDeadlineInstant(dueDate: unknown, referenceCreatedAt?: unknown): number | null {
+  if (!dueDate || typeof dueDate !== 'string') return null;
+  const trimmed = dueDate.trim();
+  if (!trimmed) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    if (referenceCreatedAt && typeof referenceCreatedAt === 'string' && referenceCreatedAt.includes('T')) {
+      const createdDate = new Date(referenceCreatedAt);
+      if (!isNaN(createdDate.getTime())) {
+        const timePart = referenceCreatedAt.split('T')[1];
+        if (timePart) {
+          const candidate = new Date(`${trimmed}T${timePart}`);
+          if (!isNaN(candidate.getTime())) {
+            return candidate.getTime();
+          }
+        }
+      }
+    }
+    const endOfDay = new Date(`${trimmed}T23:59:59.999Z`);
+    return isNaN(endOfDay.getTime()) ? null : endOfDay.getTime();
+  }
+
+  const parsed = new Date(trimmed);
+  const time = parsed.getTime();
+  return isNaN(time) ? null : time;
+}
+
+/**
+ * Calculates a new extended deadline instant from an existing deadline.
+ * Preserves the exact time-of-day and UTC offset, returning a full ISO 8601 string.
+ * Returns null if the existing deadline is invalid or missing.
+ */
+export function calculateExtendedDeadline(
+  existingDueDate: unknown,
+  daysToAdd: number,
+  referenceCreatedAt?: unknown
+): string | null {
+  if (!Number.isFinite(daysToAdd) || daysToAdd <= 0) return null;
+  const baseInstant = parseDeadlineInstant(existingDueDate, referenceCreatedAt);
+  if (baseInstant === null) return null;
+  const newDate = new Date(baseInstant + daysToAdd * 86400000);
+  return newDate.toISOString();
+}
+
 export function assertOrderOpen(order: Order) {
   if (order.status === 'completed') throw new Error('Order is already completed; funds were already released.');
   if (order.status === 'cancelled') throw new Error('Order is already cancelled; funds were already handled.');
 }
 
-export async function fundOrderEscrowWithEvent(params: { orderId: string; orderTitle: string; amount: number; buyerId: string; sellerId: string; actor: string; skipMinimum?: boolean; idempotencyKey?: string }) {
-  return await financialTransactionService.fundEscrow(params);
+export async function fundOrderEscrowWithEvent(params: { orderId: string; orderTitle: string; amount: number; buyerId: string; sellerId: string; actor: string; skipMinimum?: boolean; idempotencyKey?: string }, externalClient?: any) {
+  return await financialTransactionService.fundEscrow(params, externalClient);
 }
 
-export async function topUpOrderEscrowWithEvent(params: { orderId: string; orderTitle: string; amount: number; buyerId: string; sellerId: string; actor: string; skipMinimum?: boolean; idempotencyKey?: string }) {
-  const res = await financialTransactionService.topUpEscrow(params);
-  await emitSystemEvent(params.orderId, 'escrow_funded', `🔒 Additional $${params.amount.toLocaleString()} funded into escrow for "${params.orderTitle}".`, { amount: params.amount, isTopUp: true });
+export async function topUpOrderEscrowWithEvent(params: { orderId: string; orderTitle: string; amount: number; buyerId: string; sellerId: string; actor: string; skipMinimum?: boolean; idempotencyKey?: string }, externalClient?: any) {
+  const res = await financialTransactionService.topUpEscrow(params, externalClient);
+  await emitSystemEvent(params.orderId, 'escrow_funded', `🔒 Additional $${params.amount.toLocaleString()} funded into escrow for "${params.orderTitle}".`, { amount: params.amount, isTopUp: true }, externalClient);
   return res;
 }
 
-export async function releaseOrderFunds(order: Order, actor: string, reason: string, approvedByBuyer: boolean, requestKey?: string) {
+export async function releaseOrderFunds(
+  order: Order, 
+  actor: string, 
+  reason: string, 
+  approvedByBuyer: boolean, 
+  requestKey?: string,
+  allowDisputeResolution?: boolean,
+  externalClient?: any
+) {
   if (order.status === 'completed' && !requestKey) {
     throw new Error('Order is already completed; funds were already released.');
   }
-  assertOrderOpen(order);
-  
+  if (!allowDisputeResolution && order.cancellationRequest && order.cancellationRequest.status === 'pending') {
+    throw new Error('Cannot release payment while a cancellation request is pending. The cancellation request must be resolved or rejected first.');
+  }
+
   const result = await financialTransactionService.releaseOrderFunds({
     orderId: order.id,
     actor,
     reason,
-    idempotencyKey: requestKey
-  });
+    idempotencyKey: requestKey,
+    allowDisputeResolution
+  }, externalClient);
 
   order.status = 'completed';
   if (!order.completedAt) {
@@ -271,17 +358,19 @@ export async function releaseOrderFunds(order: Order, actor: string, reason: str
     order.acceptedVersion = order.deliveryHistory[order.deliveryHistory.length - 1].version;
   }
 
-  await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean));
-  await postgresStore.getPool().query(
-    'UPDATE orders SET status = $1, completed_at = COALESCE(completed_at, $2), accepted_version = COALESCE($3, accepted_version) WHERE id = $4 AND status NOT IN (\'completed\', \'cancelled\')',
-    ['completed', order.completedAt, order.acceptedVersion ?? null, order.id]
+  const dbRunner = externalClient || postgresStore.getPool();
+  await dbRunner.query(
+    'UPDATE orders SET completed_at = COALESCE(completed_at, $1), accepted_version = COALESCE($2, accepted_version) WHERE id = $3',
+    [order.completedAt, order.acceptedVersion ?? null, order.id]
   );
+
+  await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean), externalClient);
 
   if (approvedByBuyer) {
     await emitSystemEvent(order.id, 'deliverable_approved', `✅ Deliverables approved by buyer.`, {
       freelancerNet: result.freelancerNet,
       acceptedVersion: order.acceptedVersion
-    });
+    }, externalClient);
   }
 
   await emitSystemEvent(order.id, 'escrow_released', `🎉 Escrow funds ($${order.amount.toLocaleString()}) released to seller! Workstream marked as completed.`, {
@@ -289,49 +378,79 @@ export async function releaseOrderFunds(order: Order, actor: string, reason: str
     freelancerNet: result.freelancerNet,
     platformFee: result.platformFee,
     orderCompleted: true
-  });
+  }, externalClient);
 
-  await emitSystemEvent(order.id, 'order_completed', `✅ Order completed.`);
+  await emitSystemEvent(order.id, 'order_completed', `✅ Order completed.`, {}, externalClient);
   return result;
 }
 
-export async function refundOrderFunds(order: Order, amount: number | undefined, actor: string, reason: string, requestKey?: string) {
+export async function refundOrderFunds(
+  order: Order, 
+  amount: number | undefined, 
+  actor: string, 
+  reason: string, 
+  requestKey?: string,
+  cancellationData?: { cancellationRequest?: any; cancellationHistory?: any },
+  allowDisputeResolution?: boolean,
+  externalClient?: any
+) {
   const result = await financialTransactionService.refundOrderFunds({
     orderId: order.id,
     amount,
     reason,
     actor,
-    idempotencyKey: requestKey
-  });
+    idempotencyKey: requestKey,
+    allowDisputeResolution
+  }, externalClient);
 
   if (result.remaining === 0) {
     order.status = 'cancelled';
   }
 
-  await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean));
-  await postgresStore.getPool().query(
-    'UPDATE orders SET status = $1, cancellation_type = COALESCE($2, cancellation_type) WHERE id = $3 AND status NOT IN (\'completed\', \'cancelled\')',
-    [order.status, order.cancellationType || null, order.id]
+  await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean), externalClient);
+  const dbRunner = externalClient || postgresStore.getPool();
+  const cancelReqJson = cancellationData?.cancellationRequest !== undefined
+    ? JSON.stringify(cancellationData.cancellationRequest)
+    : (order.cancellationRequest ? JSON.stringify(order.cancellationRequest) : null);
+  const cancelHistJson = cancellationData?.cancellationHistory !== undefined
+    ? JSON.stringify(cancellationData.cancellationHistory)
+    : (order.cancellationHistory ? JSON.stringify(order.cancellationHistory) : null);
+
+  await dbRunner.query(
+    `UPDATE orders 
+     SET status = $1, 
+         cancellation_type = COALESCE($2, cancellation_type),
+         cancellation_request = COALESCE($3, cancellation_request),
+         cancellation_history = COALESCE($4, cancellation_history)
+     WHERE id = $5 AND status != 'completed'`,
+    [
+      order.status,
+      order.cancellationType || null,
+      cancelReqJson,
+      cancelHistJson,
+      order.id
+    ]
   );
 
   await emitSystemEvent(order.id, 'escrow_refunded', `💸 Escrow refunded ($${result.refunded.toLocaleString()}) to buyer wallet. Reason: ${reason}`, {
     refunded: result.refunded,
     orderCancelled: order.status === 'cancelled'
-  });
+  }, externalClient);
 
   return result;
 }
 
-export async function splitOrderFunds(order: Order, refundAmount: number, actor: string, reason: string, requestKey?: string) {
+export async function splitOrderFunds(order: Order, refundAmount: number, actor: string, reason: string, requestKey?: string, externalClient?: any) {
   assertOrderOpen(order);
-  const result = await financialTransactionService.resolveEscrowSplit({ orderId: order.id, refundAmount, reason, actor });
+  const result = await financialTransactionService.resolveEscrowSplit({ orderId: order.id, refundAmount, reason, actor, idempotencyKey: requestKey }, externalClient);
   order.status = 'completed';
   if (!order.completedAt) {
     order.completedAt = new Date().toISOString();
   }
 
-  await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean));
-  await postgresStore.getPool().query(
+  await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean), externalClient);
+  const dbRunner = externalClient || postgresStore.getPool();
+  await dbRunner.query(
     'UPDATE orders SET status = $1, completed_at = COALESCE(completed_at, $2) WHERE id = $3 AND status NOT IN (\'completed\', \'cancelled\')',
     ['completed', order.completedAt, order.id]
   );
@@ -339,14 +458,14 @@ export async function splitOrderFunds(order: Order, refundAmount: number, actor:
   await emitSystemEvent(order.id, 'escrow_refunded', `💸 Partial refund of $${refundAmount.toLocaleString()} returned to buyer wallet. Reason: ${reason}`, {
     refunded: refundAmount,
     splitResolution: true
-  });
+  }, externalClient);
   await emitSystemEvent(order.id, 'escrow_released', `🎉 Remaining escrow funds ($${result.release.freelancerNet.toLocaleString()}) released to seller. Workstream marked as completed.`, {
     freelancerNet: result.release.freelancerNet,
     platformFee: result.release.platformFee,
     orderCompleted: true,
     splitResolution: true
-  });
-  await emitSystemEvent(order.id, 'order_completed', `✅ Order completed via dispute resolution.`);
+  }, externalClient);
+  await emitSystemEvent(order.id, 'order_completed', `✅ Order completed via dispute resolution.`, {}, externalClient);
 
   return result;
 }
@@ -359,6 +478,10 @@ export function validateOrderReleasePreconditions(order: Order, isAdmin = false,
   if (order.status === 'cancelled') {
     diagnosticService.log('security', 'orderService', 'validateOrderReleasePreconditions', 'server/services/orderService.ts', 'release_preconditions', 'INTERCEPTED', { orderId: order.id, status: order.status }, 'Order is cancelled; funds already refunded');
     return { status: 400, error: 'Order is cancelled; funds have been returned to the buyer.' };
+  }
+  if (order.cancellationRequest && order.cancellationRequest.status === 'pending') {
+    diagnosticService.log('security', 'orderService', 'validateOrderReleasePreconditions', 'server/services/orderService.ts', 'release_preconditions', 'INTERCEPTED', { orderId: order.id, cancellationRequest: order.cancellationRequest }, 'Cannot release payment while cancellation request is pending');
+    return { status: 400, error: 'Cannot release payment while a cancellation request is pending. The cancellation request must be resolved or rejected first.' };
   }
   if (!isAdmin && (order.status as string) === 'disputed') {
     diagnosticService.log('security', 'orderService', 'validateOrderReleasePreconditions', 'server/services/orderService.ts', 'release_preconditions', 'INTERCEPTED', { orderId: order.id, status: order.status }, 'Cannot release payment while dispute is open');
@@ -411,11 +534,11 @@ export async function processCancellationTimeouts() {
   const pool = postgresStore.getPool();
   try {
     const res = await pool.query(
-      "SELECT id FROM orders WHERE status NOT IN ('completed', 'cancelled') AND cancellation_request IS NOT NULL"
+      "SELECT id FROM orders WHERE status NOT IN ('completed', 'cancelled', 'disputed') AND cancellation_request IS NOT NULL"
     );
     for (const r of res.rows) {
       const order = await store.getOrder(r.id);
-      if (!order || !order.cancellationRequest || order.cancellationRequest.status !== 'pending') continue;
+      if (!order || order.status === 'completed' || order.status === 'cancelled' || order.status === 'disputed' || !order.cancellationRequest || order.cancellationRequest.status !== 'pending') continue;
       const respondByTime = new Date(order.cancellationRequest.respondBy).getTime();
 
       if (now > respondByTime) {
@@ -426,31 +549,127 @@ export async function processCancellationTimeouts() {
           continue;
         }
         try {
-          const freshOrder = await store.getOrder(order.id);
-          if (!freshOrder || freshOrder.status === 'completed' || freshOrder.status === 'cancelled' || !freshOrder.cancellationRequest || freshOrder.cancellationRequest.status !== 'pending') {
-            continue;
-          }
-          const requestKey = `cancel_timeout_${freshOrder.id}_${freshOrder.cancellationRequest.requestedAt}`;
-          const refundRes = await refundOrderFunds(freshOrder, undefined, 'System Auto-Cancel', 'Cancellation request auto-cancelled after 48h timeout', requestKey);
-          freshOrder.cancellationRequest.status = 'auto_cancelled';
-          await store.saveOrder(freshOrder);
+          const pendingNotifications = await postgresStore.executeInTransaction(async (client) => {
+            const lockRes = await client.query(
+              "SELECT * FROM orders WHERE id = $1 FOR UPDATE",
+              [order.id]
+            );
+            if (lockRes.rows.length === 0) return null;
+            const freshRow = lockRes.rows[0];
 
-          const requesterId = freshOrder.cancellationRequest.requesterId;
-          const otherId = requesterId === freshOrder.buyerId ? freshOrder.sellerId : freshOrder.buyerId;
-          createNotification({
-            userId: requesterId,
-            title: 'Cancellation Auto-Cancelled',
-            message: `Order #${freshOrder.id} cancellation request timed out after 48h. Order cancelled & full refund issued ($${refundRes.refunded}).`,
-            type: 'order',
-            link: `/messages/${freshOrder.id}`
+            if (freshRow.status === 'completed' || freshRow.status === 'cancelled' || freshRow.status === 'disputed') {
+              return null;
+            }
+
+            let cancelReq = freshRow.cancellation_request;
+            if (typeof cancelReq === 'string') {
+              try { cancelReq = JSON.parse(cancelReq); } catch {}
+            }
+            if (!cancelReq || cancelReq.status !== 'pending') {
+              return null;
+            }
+
+            const respondByTimeMs = new Date(cancelReq.respondBy).getTime();
+            if (now <= respondByTimeMs) {
+              return null;
+            }
+
+            const activeDisputeRes = await client.query(
+              "SELECT 1 FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_investigation', 'under_review') LIMIT 1",
+              [order.id]
+            );
+            if (activeDisputeRes.rows.length > 0) {
+              return null;
+            }
+
+            const freshOrder = (store as any).mapOrderRow ? (store as any).mapOrderRow(freshRow) : await store.getOrder(order.id, client);
+            if (!freshOrder) return null;
+
+            const requesterId = cancelReq.requesterId;
+            const otherId = requesterId === freshOrder.buyerId ? freshOrder.sellerId : freshOrder.buyerId;
+
+            if (freshOrder.amount === 0 || /^inquiry:/i.test(freshOrder.title)) {
+              freshOrder.status = 'cancelled';
+              cancelReq.status = 'auto_cancelled';
+              freshOrder.cancellationRequest = cancelReq;
+              if (Array.isArray(freshOrder.cancellationHistory)) {
+                for (const ch of freshOrder.cancellationHistory) {
+                  if (ch.requestedAt === cancelReq.requestedAt) {
+                    ch.status = 'auto_cancelled';
+                  }
+                }
+              }
+              await client.query(
+                "UPDATE orders SET status = 'cancelled', cancellation_type = 'inquiry_cancelled', cancellation_request = $1, cancellation_history = $2 WHERE id = $3",
+                [JSON.stringify(cancelReq), JSON.stringify(freshOrder.cancellationHistory || []), freshOrder.id]
+              );
+              return [
+                {
+                  userId: requesterId,
+                  title: 'Inquiry Cancelled',
+                  message: `Inquiry thread #${freshOrder.id} request timed out and was closed.`,
+                  type: 'order',
+                  link: `/messages/${freshOrder.id}`
+                },
+                {
+                  userId: otherId,
+                  title: 'Inquiry Cancelled',
+                  message: `Inquiry thread #${freshOrder.id} request timed out and was closed.`,
+                  type: 'order',
+                  link: `/messages/${freshOrder.id}`
+                }
+              ];
+            }
+
+            const requestKey = `cancel_timeout_${freshOrder.id}_${cancelReq.requestedAt}`;
+            freshOrder.cancellationRequest = cancelReq;
+            const refundRes = await refundOrderFunds(
+              freshOrder, 
+              undefined, 
+              'System Auto-Cancel', 
+              'Cancellation request auto-cancelled after 48h timeout', 
+              requestKey,
+              undefined,
+              false,
+              client
+            );
+
+            cancelReq.status = 'auto_cancelled';
+            if (Array.isArray(freshOrder.cancellationHistory)) {
+              for (const ch of freshOrder.cancellationHistory) {
+                if (ch.requestedAt === cancelReq.requestedAt) {
+                  ch.status = 'auto_cancelled';
+                }
+              }
+            }
+            await client.query(
+              "UPDATE orders SET cancellation_request = $1, cancellation_history = $2 WHERE id = $3",
+              [JSON.stringify(cancelReq), JSON.stringify(freshOrder.cancellationHistory || []), freshOrder.id]
+            );
+
+            return [
+              {
+                userId: requesterId,
+                title: 'Cancellation Auto-Cancelled',
+                message: `Order #${freshOrder.id} cancellation request timed out after 48h. Order cancelled & full refund issued ($${refundRes.refunded}).`,
+                type: 'order',
+                link: `/messages/${freshOrder.id}`
+              },
+              {
+                userId: otherId,
+                title: 'Cancellation Auto-Cancelled',
+                message: `Order #${freshOrder.id} cancellation request timed out after 48h. Order cancelled & full refund issued ($${refundRes.refunded}).`,
+                type: 'order',
+                link: `/messages/${freshOrder.id}`
+              }
+            ];
           });
-          createNotification({
-            userId: otherId,
-            title: 'Cancellation Auto-Cancelled',
-            message: `Order #${freshOrder.id} cancellation request timed out after 48h. Order cancelled & full refund issued ($${refundRes.refunded}).`,
-            type: 'order',
-            link: `/messages/${freshOrder.id}`
-          });
+
+          if (pendingNotifications) {
+            for (const notif of pendingNotifications) {
+              await createNotification(notif);
+            }
+          }
         } catch (err) {
           console.error(`[CancellationTimeout] Failed to auto-cancel order ${order.id}:`, err);
         } finally {
@@ -502,6 +721,8 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
         if (hasActiveRequestedRevision) continue;
       }
 
+      if (order.cancellationRequest && order.cancellationRequest.status === 'pending') continue;
+
       const dispute = await store.getDisputeByOrderId(order.id);
       const inMemoryDispute = (disputes || []).find(d => d.orderId === order.id && (d.status === 'open' || d.status === 'under_investigation'));
       if ((dispute && (dispute.status === 'open' || dispute.status === 'under_investigation')) || inMemoryDispute) continue;
@@ -521,17 +742,52 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
 
       const requestKey = `auto_accept_${order.id}_v${latestDelivery.version}`;
       try {
-        const freshOrder = await store.getOrder(order.id);
-        if (!freshOrder || freshOrder.status !== 'delivered') {
-          continue;
-        }
-        if (Array.isArray(freshOrder.revisions) && freshOrder.revisions.some(rev => rev.status === 'requested')) {
-          continue;
-        }
+        const autoResult = await postgresStore.executeInTransaction(async (client) => {
+          const lockRes = await client.query(
+            "SELECT * FROM orders WHERE id = $1 AND status = 'delivered' FOR UPDATE",
+            [order.id]
+          );
+          if (lockRes.rows.length === 0) return null;
+          const freshRow = lockRes.rows[0];
 
-        const result = await releaseOrderFunds(freshOrder, 'System Auto-Accept', `Auto-accept after buyer review window (${days} days) elapsed`, false, requestKey);
-        freshOrder.acceptedVersion = latestDelivery.version;
-        await store.saveOrder(freshOrder);
+          let cancelReq = freshRow.cancellation_request;
+          if (typeof cancelReq === 'string') {
+            try { cancelReq = JSON.parse(cancelReq); } catch {}
+          }
+          if (cancelReq && cancelReq.status === 'pending') return null;
+
+          let revs = freshRow.revisions;
+          if (typeof revs === 'string') {
+            try { revs = JSON.parse(revs); } catch {}
+          }
+          if (Array.isArray(revs) && revs.some((rev: any) => rev.status === 'requested')) return null;
+
+          const activeDisputeRes = await client.query(
+            "SELECT id FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_investigation', 'under_review') LIMIT 1",
+            [order.id]
+          );
+          if (activeDisputeRes.rows.length > 0) return null;
+
+          const freshOrder = (store as any).mapOrderRow ? (store as any).mapOrderRow(freshRow) : await store.getOrder(order.id, client);
+          if (!freshOrder || freshOrder.status !== 'delivered') return null;
+
+          const relResult = await releaseOrderFunds(
+            freshOrder, 
+            'System Auto-Accept', 
+            `Auto-accept after buyer review window (${days} days) elapsed`, 
+            false, 
+            requestKey, 
+            false, 
+            client
+          );
+          freshOrder.acceptedVersion = latestDelivery.version;
+          await store.saveOrder(freshOrder, client);
+
+          return { freshOrder, relResult };
+        });
+
+        if (!autoResult) continue;
+        const { freshOrder, relResult } = autoResult;
 
         const sysMsg: Message = {
           id: `msg_${randomUUID()}`,
@@ -564,7 +820,7 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
           orderId: freshOrder.id,
           acceptedVersion: latestDelivery.version,
           amount: freshOrder.amount,
-          freelancerNet: result.freelancerNet
+          freelancerNet: relResult.freelancerNet
         });
       } catch (err: any) {
         console.error(`[ReviewWindow] Failed to auto-accept order ${order.id}:`, err);
@@ -579,8 +835,8 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
   return processed;
 }
 
-export async function atomicUpdateOrder(orderId: string, updates: Record<string, any>, allowedStatuses: string[]): Promise<boolean> {
-  const pool = postgresStore.getPool();
+export async function atomicUpdateOrder(orderId: string, updates: Record<string, any>, allowedStatuses: string[], client?: any): Promise<boolean> {
+  const dbRunner = client || postgresStore.getPool();
   const keys = Object.keys(updates);
   const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
   const values = keys.map(k => updates[k]);
@@ -590,6 +846,6 @@ export async function atomicUpdateOrder(orderId: string, updates: Record<string,
     SET ${setClause}
     WHERE id = $1 AND status = ANY($${keys.length + 2})
   `;
-  const res = await pool.query(query, [orderId, ...values, allowedStatuses]);
+  const res = await dbRunner.query(query, [orderId, ...values, allowedStatuses]);
   return res.rowCount !== null && res.rowCount > 0;
 }

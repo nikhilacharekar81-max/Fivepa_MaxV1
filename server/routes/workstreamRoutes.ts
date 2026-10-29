@@ -1006,7 +1006,7 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
         order.escrowProtectionStartDate = today;
         order.escrowProtectionEndDate = protectionEnd;
         if (offer.kind === 'proposal' && offer.deliveryDays) {
-          order.dueDate = new Date(Date.now() + offer.deliveryDays * 86400000).toISOString().split('T')[0];
+          order.dueDate = new Date(Date.now() + offer.deliveryDays * 86400000).toISOString();
         }
         offer.orderId = order.id;
         offer.status = 'accepted';
@@ -1055,8 +1055,8 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
         status: 'payment_pending',
         createdAt: today,
         dueDate: offer.kind === 'proposal' && offer.deliveryDays
-          ? new Date(Date.now() + offer.deliveryDays * 86400000).toISOString().split('T')[0]
-          : new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+          ? new Date(Date.now() + offer.deliveryDays * 86400000).toISOString()
+          : new Date(Date.now() + 7 * 86400000).toISOString(),
         escrowProtectionStartDate: today,
         escrowProtectionEndDate: protectionEnd,
         feeBreakdown: calculateOrderFees(offer.amount),
@@ -1132,7 +1132,7 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
       });
       order.amount = Math.round((Number(order.amount || 0) + offer.amount) * 100) / 100;
       if (offer.kind === 'proposal' && offer.deliveryDays) {
-        order.dueDate = new Date(Date.now() + offer.deliveryDays * 86400000).toISOString().split('T')[0];
+        order.dueDate = new Date(Date.now() + offer.deliveryDays * 86400000).toISOString();
       }
       offer.orderId = order.id;
       offer.status = 'accepted';
@@ -1239,7 +1239,7 @@ router.post(
           amount: offerAmount,
           status: 'payment_pending',
           createdAt: today,
-          dueDate: new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
           escrowProtectionStartDate: today,
           escrowProtectionEndDate: new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0],
           feeBreakdown: calculateOrderFees(offerAmount)

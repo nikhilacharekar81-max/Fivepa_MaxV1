@@ -123,6 +123,14 @@ export class WorkspaceRepo {
         for (const m of messages) {
           if (!m?.id || seen.has(m.id)) continue;
           seen.add(m.id);
+          if (m.senderId === 'system') {
+            await client.query(
+              `INSERT INTO users (id, name, username, email, role, status, verified, email_verified, mobile_verified, wallet_balance, created_at)
+               VALUES ('system', 'WorkSphere System', 'system', 'system@worksphere.internal', 'internal', 'active', TRUE, TRUE, TRUE, 0, $1)
+               ON CONFLICT (id) DO NOTHING`,
+              [m.timestamp || new Date().toISOString()]
+            );
+          }
           await client.query(
             `INSERT INTO messages (id, order_id, sender_id, sender_name, text, timestamp, type, file_info, metadata)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)

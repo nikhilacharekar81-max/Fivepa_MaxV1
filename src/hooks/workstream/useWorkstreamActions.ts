@@ -30,7 +30,7 @@ export function useWorkstreamActions({
     turnaroundDays: number;
     requirements: string;
   }) => {
-    const dueDate = new Date(Date.now() + (data.turnaroundDays || 7) * 86400000).toISOString().split('T')[0];
+    const dueDate = new Date(Date.now() + (data.turnaroundDays || 7) * 86400000).toISOString();
 
     try {
       const res = await fetchWithRetry('/api/orders', {

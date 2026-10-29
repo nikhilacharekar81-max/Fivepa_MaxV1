@@ -64,12 +64,7 @@ PPH_CATEGORIES.forEach(cat => {
 
 export default function App({ initialPath = '/', initialData }: AppProps) {
   // Navigation / Route state
-  const [currentPath, setCurrentPath] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return window.location.pathname + window.location.search;
-    }
-    return initialPath;
-  });
+  const [currentPath, setCurrentPath] = useState<string>(initialPath);
 
   const navigate = useCallback((to: string, e?: React.MouseEvent) => {
     if (e && (e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey)) {
@@ -135,26 +130,14 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     refresh
   } = appData;
 
-  // Active / Impersonated User state
+  // Active / Impersonated User state (initialized identically on server and client to prevent hydration mismatch)
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const stored = localStorage.getItem('current_user');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (parsed && parsed.id) return parsed;
-        }
-      } catch {}
-    }
     if (initialData?.users && initialData.users.length > 0) {
-      const marcus = initialData.users.find((u: any) => u.id === 'u2' || u.name?.includes('Marcus Vance'));
-      if (marcus) {
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('current_user', JSON.stringify(marcus));
-        }
-        return marcus;
+      const elena = initialData.users.find((u: any) => u.id === 'u3' || u.name?.includes('Elena Rostova'));
+      const defaultUser = elena || initialData.users[0];
+      if (defaultUser) {
+        return defaultUser;
       }
-      return initialData.users[0];
     }
     return null;
   });
@@ -193,6 +176,22 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   );
 
   const loadUserSession = useCallback(async (): Promise<boolean> => {
+    const existingToken = getAuthToken();
+    if (existingToken) {
+      try {
+        const res = await fetch('/api/auth/me', {
+          headers: { 'Authorization': `Bearer ${existingToken}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.user) {
+            updateCurrentUser(data.user);
+            return true;
+          }
+        }
+      } catch {}
+    }
+
     let storedUser: any = null;
     try {
       const storedRaw = typeof window !== 'undefined'
@@ -201,7 +200,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       storedUser = storedRaw ? JSON.parse(storedRaw) : null;
     } catch {}
 
-    const targetUserId = storedUser?.id || 'u2';
+    const targetUserId = storedUser?.id || 'u3';
 
     try {
       const demoSession = await requestDemoSession(targetUserId);
@@ -216,21 +215,25 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
 
   // Initial client hydration fetch
   useEffect(() => {
-    loadUserSession().finally(() => {
-      refresh();
+    refresh();
+    loadUserSession().then((loaded) => {
+      if (loaded) {
+        refresh();
+      }
     });
   }, [loadUserSession, refresh]);
 
   // Liked Gigs state
-  const [likedGigIds, setLikedGigIds] = useState<string[]>(() => {
-    if (typeof window === 'undefined') return [];
-    try {
-      const stored = localStorage.getItem('worksphere_liked_gigs');
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
+  const [likedGigIds, setLikedGigIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = localStorage.getItem('worksphere_liked_gigs');
+        if (stored) setLikedGigIds(JSON.parse(stored));
+      } catch {}
     }
-  });
+  }, []);
 
   const handleToggleLike = useCallback((gigId: string, e?: React.MouseEvent) => {
     if (e) {
@@ -303,6 +306,15 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [starredOrderIds, setStarredOrderIds] = useState<string[]>([]);
   const [workstreamSearch, setWorkstreamSearch] = useState('');
+  const [orderFeedback, setOrderFeedback] = useState<{ type: 'success' | 'error'; message: string; orderId?: string } | null>(null);
+
+  useEffect(() => {
+    if (!orderFeedback) return;
+    const timer = setTimeout(() => {
+      setOrderFeedback(null);
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, [orderFeedback]);
 
   const toggleStarOrder = useCallback((orderId: string) => {
     setStarredOrderIds(prev =>
@@ -313,6 +325,8 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   const workstream = useWorkstream({
     orders,
     setOrders,
+    usersList: users,
+    gigs,
     messages,
     setMessages,
     reviews,
@@ -579,8 +593,23 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       if (isCreatingOrderRef.current || isCreatingOrder) return;
       isCreatingOrderRef.current = true;
       setIsCreatingOrder(true);
+      setOrderFeedback(null);
 
-      const clientRequestId = 'req_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
+      const normalizedExtraIds = Array.isArray(extraIds)
+        ? Array.from(new Set(extraIds.map(String).filter(Boolean))).sort()
+        : [];
+      const payloadKey = `fivepa_patt_${activeUser.id}_${sellerId}_${gigId || 'custom'}_${encodeURIComponent(orderTitle)}_${priceUSD}_${normalizedExtraIds.join(',')}`;
+      let clientRequestId = '';
+      try {
+        clientRequestId = sessionStorage.getItem(payloadKey) || '';
+      } catch {}
+      if (!clientRequestId) {
+        clientRequestId = 'req_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now();
+        try {
+          sessionStorage.setItem(payloadKey, clientRequestId);
+        } catch {}
+      }
+
       try {
         let token = getAuthToken();
         const isPrivileged = ['admin', 'super_admin', 'support'].includes(activeUser.role || '');
@@ -611,7 +640,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
               buyerId: activeUser.id,
               sellerId,
               gigId,
-              extraIds
+              extraIds: normalizedExtraIds
             })
           });
 
@@ -626,19 +655,40 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         }
         if (res.ok) {
           const newOrder = await res.json();
+          try { sessionStorage.removeItem(payloadKey); } catch {}
           setOrders(prev => [newOrder, ...prev.filter(o => o.id !== newOrder.id)]);
-          await refresh(activeUser.id);
           setSelectedOrder(newOrder);
+          workstream.fetchMessages(newOrder.id);
+          setOrderFeedback({
+            type: 'success',
+            message: `Order #${newOrder.id} placed successfully! Funds are secured in escrow.`,
+            orderId: newOrder.id
+          });
           navigate(`/messages/${newOrder.id}`);
+          void refresh(activeUser.id);
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          const errMsg = errData.error || errData.message || `Failed to place order (HTTP ${res.status})`;
+          if (res.status === 400 || res.status === 403 || res.status === 409 || res.status === 422) {
+            try { sessionStorage.removeItem(payloadKey); } catch {}
+          }
+          setOrderFeedback({
+            type: 'error',
+            message: errMsg
+          });
         }
-      } catch (e) {
+      } catch (e: any) {
         console.error('Order creation failed:', e);
+        setOrderFeedback({
+          type: 'error',
+          message: e?.message || 'Network error while placing order. Please check your connection and retry.'
+        });
       } finally {
         isCreatingOrderRef.current = false;
         setIsCreatingOrder(false);
       }
     },
-    [activeUser, isCreatingOrder, navigate, refresh, setOrders]
+    [activeUser, isCreatingOrder, navigate, refresh, setOrders, workstream]
   );
 
   const handleContactSeller = useCallback(
@@ -668,8 +718,20 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     if (cleanPath === '/forgot-password') setIsForgotPasswordModalOpen(true);
   }, [cleanPath]);
 
+  useEffect(() => {
+    if ((cleanPath.startsWith('/messages/') || cleanPath.startsWith('/orders/')) && pathParts.length >= 2) {
+      const targetOrderId = pathParts[1];
+      if (targetOrderId && selectedOrder?.id !== targetOrderId) {
+        const matched = orders.find(o => o.id === targetOrderId);
+        if (matched) {
+          setSelectedOrder(matched);
+        }
+      }
+    }
+  }, [cleanPath, pathParts, orders, selectedOrder?.id]);
+
   // Route flags
-  const isGigsList = cleanPath === '/' || cleanPath === '/gigs' || cleanPath.startsWith('/categories');
+  const isGigsList = cleanPath === '/gigs' || cleanPath.startsWith('/categories');
   const isProjectsList = ['/projects', '/search-projects', '/project-search', '/freelance-jobs'].includes(cleanPath);
   const isFreelancersList = ['/freelancers', '/search-freelancers', '/freelancer-search'].includes(cleanPath);
   const isCategoryRoute = cleanPath.startsWith('/categories');
@@ -700,6 +762,13 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
           return false;
         }
       }
+      if (serviceOptionFilter && serviceOptionFilter !== 'All') {
+        const catSlug = CATEGORY_SLUGS[g.category] || slugify(g.category);
+        const optSlug = CATEGORY_SLUGS[serviceOptionFilter] || slugify(serviceOptionFilter);
+        if (catSlug !== optSlug && g.category.toLowerCase() !== serviceOptionFilter.toLowerCase()) {
+          return false;
+        }
+      }
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchTitle = g.title.toLowerCase().includes(q);
@@ -717,15 +786,18 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       if (deliveryTimeFilter) {
         if (g.deliveryDays > deliveryTimeFilter) return false;
       }
-      if (sellerLevelFilter && sellerLevelFilter !== 'All' && g.freelancerLevel && g.freelancerLevel !== sellerLevelFilter) {
+      if (sellerLevelFilter && sellerLevelFilter !== 'All' && g.freelancerLevel && !g.freelancerLevel.toLowerCase().includes(sellerLevelFilter.toLowerCase())) {
         return false;
       }
       return true;
     });
-  }, [gigs, currentCategory, searchQuery, budgetFilter, deliveryTimeFilter, sellerLevelFilter]);
+  }, [gigs, currentCategory, serviceOptionFilter, searchQuery, budgetFilter, deliveryTimeFilter, sellerLevelFilter]);
 
   // Determine current active view
   let mainContent: React.ReactNode = null;
+  const currentSearchQuery = currentPath.includes('?')
+    ? currentPath.slice(currentPath.indexOf('?'))
+    : (initialData?.query ? `?${initialData.query}` : '');
 
   if (cleanPath.startsWith('/admin')) {
     mainContent = (
@@ -835,18 +907,27 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     cleanPath.startsWith('/orders/')
   ) {
     const routeOrderId = pathParts.length >= 2 ? pathParts[1] : null;
-    const activeWorkstreamOrder = routeOrderId
-      ? orders.find(o => o.id === routeOrderId) || selectedOrder
-      : selectedOrder;
+    const rawActiveOrder = routeOrderId
+      ? workstream.hydratedWorkstreamItems.find(o => o.id === routeOrderId) ||
+        orders.find(o => o.id === routeOrderId) ||
+        (selectedOrder?.id === routeOrderId ? selectedOrder : null)
+      : workstream.selectedOrder || selectedOrder;
 
-    if (activeWorkstreamOrder) {
+    if (rawActiveOrder) {
+      const hydratedActiveOrder = {
+        ...rawActiveOrder,
+        seller: (rawActiveOrder as any).seller || users.find(u => u.id === rawActiveOrder.sellerId),
+        buyer: (rawActiveOrder as any).buyer || users.find(u => u.id === rawActiveOrder.buyerId),
+        gig: (rawActiveOrder as any).gig || gigs.find(g => g.id === rawActiveOrder.gigId)
+      };
       const workstreamPartner = users.find(
-        u => u.id === (activeUser?.id === activeWorkstreamOrder.buyerId ? activeWorkstreamOrder.sellerId : activeWorkstreamOrder.buyerId)
+        u => u.id === (activeUser?.id === hydratedActiveOrder.buyerId ? hydratedActiveOrder.sellerId : hydratedActiveOrder.buyerId)
       );
+      const orderSpecificMessages = workstream.messages.filter(m => m.orderId === hydratedActiveOrder.id);
       mainContent = (
         <WorkstreamWorkspace
-          order={activeWorkstreamOrder as any}
-          messages={workstream.messages}
+          order={hydratedActiveOrder as any}
+          messages={orderSpecificMessages as any}
           files={workstream.activeSharedFiles}
           currentUser={activeUser}
           usersList={users}
@@ -858,6 +939,9 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
           onSendMessage={workstream.sendMessage}
           onAttachFile={(file) => workstream.sendMessage(`Attached file: ${file.name}`, 'file', file)}
           sendEvent={workstream.sendEvent}
+          onOrderChanged={() => {
+            if (activeUser?.id) void refresh(activeUser.id);
+          }}
           onReleaseEscrow={workstream.handleReleaseEscrow}
           onDeliverWork={workstream.handleDeliverWork}
           onRequestRevision={workstream.handleRequestRevision}
@@ -892,7 +976,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         projects={projects}
         navigate={navigate}
         currentUser={activeUser}
-        query={typeof window !== 'undefined' ? window.location.search : ''}
+        query={currentSearchQuery}
       />
     );
   } else if (isFreelancersList) {
@@ -904,7 +988,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         currentUser={activeUser}
         setIsSignupModalOpen={setIsSignupModalOpen}
         slugify={slugify}
-        query={typeof window !== 'undefined' ? window.location.search : ''}
+        query={currentSearchQuery}
       />
     );
   } else if (isProjectDetail) {
@@ -941,28 +1025,45 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     }
     if (gig) {
       mainContent = (
-        <GigDetailView
-          currentGig={gig}
-          gigs={gigs}
-          reviews={reviews}
-          orders={orders}
-          currentUser={activeUser}
-          navigate={navigate}
-          handleContactSeller={handleContactSeller}
-          handleCreateOrder={handleCreateOrder}
-          slugify={slugify}
-        />
+        <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+          <GigDetailView
+            currentGig={gig}
+            gigs={gigs}
+            reviews={reviews}
+            orders={orders}
+            currentUser={activeUser}
+            navigate={navigate}
+            handleContactSeller={handleContactSeller}
+            handleCreateOrder={handleCreateOrder}
+            isCreatingOrder={isCreatingOrder}
+            orderFeedback={orderFeedback}
+            onDismissOrderFeedback={() => setOrderFeedback(null)}
+            slugify={slugify}
+          />
+        </div>
       );
     }
   } else if (cleanPath === '/payments' || cleanPath.startsWith('/payments')) {
     mainContent = (
-      <div className="max-w-7xl mx-auto py-8 px-4">
+      <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
         <PaymentsModule
           currentUser={activeUser}
           orders={orders}
+          offers={offers}
           gigs={gigs}
           projects={projects}
           proposals={proposals}
+          users={users}
+          platformFee={platformFee}
+          clientServiceFee={clientServiceFee}
+          smallOrderFeeThreshold={smallOrderFeeThreshold}
+          smallOrderFeeAmount={smallOrderFeeAmount}
+          escrowProtectionDays={escrowProtectionDays}
+          navigate={navigate}
+          onOpenWorkstream={(ord) => {
+            setSelectedOrder(ord);
+            navigate(`/messages/${ord.id}`);
+          }}
           onBalanceUpdate={refresh}
         />
       </div>
@@ -977,13 +1078,15 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     );
     if (matchedUser) {
       mainContent = (
-        <FreelancerProfileView
-          profileUser={matchedUser}
-          currentUser={activeUser}
-          gigs={gigs}
-          reviews={reviews}
-          onNavigate={navigate}
-        />
+        <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+          <FreelancerProfileView
+            profileUser={matchedUser}
+            currentUser={activeUser}
+            gigs={gigs}
+            reviews={reviews}
+            onNavigate={navigate}
+          />
+        </div>
       );
     }
   }
@@ -1019,6 +1122,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         setIsSignupModalOpen={setIsSignupModalOpen}
         slugify={slugify}
         CATEGORY_SLUGS={CATEGORY_SLUGS}
+        isHomePage={cleanPath === '/'}
       />
     );
   }
@@ -1056,6 +1160,45 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         onOpenSignup={() => setIsSignupModalOpen(true)}
         onOpenSwitchUser={() => setIsUserSwitchModalOpen(true)}
       />
+
+      {/* Order Purchase Status Banner */}
+      {orderFeedback && (
+        <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 pt-4">
+          <div
+            role="status"
+            className={`rounded-2xl border px-4 py-3 shadow-sm flex items-center justify-between gap-4 text-xs font-medium ${
+              orderFeedback.type === 'success'
+                ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+                : 'bg-rose-50 border-rose-300 text-rose-950'
+            }`}
+          >
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <span
+                className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+                  orderFeedback.type === 'success' ? 'bg-emerald-600' : 'bg-rose-600'
+                }`}
+              />
+              <span className="font-bold">{orderFeedback.message}</span>
+              {orderFeedback.orderId && cleanPath !== `/messages/${orderFeedback.orderId}` && (
+                <button
+                  type="button"
+                  onClick={(e) => navigate(`/messages/${orderFeedback.orderId}`, e)}
+                  className="underline font-bold text-emerald-700 hover:text-emerald-900 cursor-pointer ml-1"
+                >
+                  View Workstream #{orderFeedback.orderId}
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setOrderFeedback(null)}
+              className="text-slate-500 hover:text-slate-900 font-bold px-2 py-0.5 rounded-lg cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Page Content Body */}
       <main className="flex-1">

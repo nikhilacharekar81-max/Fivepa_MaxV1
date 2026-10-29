@@ -68,6 +68,41 @@ export function assertValidMoneyAmount(amount: unknown, fieldName = 'amount', al
   return amount;
 }
 
+export function sortKeysDeep(val: any): any {
+  if (val === null || typeof val !== 'object') {
+    return val;
+  }
+  if (Array.isArray(val)) {
+    return val.map(sortKeysDeep);
+  }
+  const sortedKeys = Object.keys(val).sort();
+  const res: Record<string, any> = {};
+  for (const k of sortedKeys) {
+    if (val[k] !== undefined) {
+      res[k] = sortKeysDeep(val[k]);
+    }
+  }
+  return res;
+}
+
+export function canonicalizeFingerprint(val: any): string {
+  if (val === null || val === undefined) return '';
+  let obj = val;
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!trimmed) return '';
+    try {
+      obj = JSON.parse(trimmed);
+    } catch {
+      return trimmed;
+    }
+  }
+  if (typeof obj !== 'object' || obj === null) {
+    return String(obj);
+  }
+  return JSON.stringify(sortKeysDeep(obj));
+}
+
 /**
  * Checks or records idempotency with request fingerprinting.
  * Prevents key collision or parameter tampering across financial operations.
@@ -78,20 +113,13 @@ export async function checkOrRecordIdempotency(
   operation: string,
   payloadFingerprintObj: Record<string, any>
 ): Promise<{ replayed: boolean; result?: any }> {
-  const sortedKeys = Object.keys(payloadFingerprintObj).sort();
-  const sortedObj: Record<string, any> = {};
-  for (const k of sortedKeys) {
-    if (payloadFingerprintObj[k] !== undefined) {
-      sortedObj[k] = payloadFingerprintObj[k];
-    }
-  }
-  const fingerprint = JSON.stringify(sortedObj);
+  const incomingFingerprint = canonicalizeFingerprint(payloadFingerprintObj);
 
   await client.query(
     `INSERT INTO financial_idempotency (key, operation, status, request_fingerprint, result, created_at, updated_at)
      VALUES ($1, $2, 'in_progress', $3, '{}'::jsonb, NOW(), NOW())
      ON CONFLICT (key) DO NOTHING`,
-    [key, operation, fingerprint]
+    [key, operation, incomingFingerprint]
   );
 
   const existing = await client.query(
@@ -101,9 +129,17 @@ export async function checkOrRecordIdempotency(
 
   if (existing.rows.length > 0) {
     const row = existing.rows[0];
-    if (row.operation !== operation || (row.request_fingerprint && row.request_fingerprint !== fingerprint)) {
-      throw new Error(`Idempotency key conflict: key "${key}" was already used with different request parameters.`);
+    if (row.operation !== operation) {
+      throw new Error(`Idempotency key conflict: key "${key}" was already used for operation "${row.operation}".`);
     }
+
+    if (row.request_fingerprint !== null && row.request_fingerprint !== undefined) {
+      const storedFingerprint = canonicalizeFingerprint(row.request_fingerprint);
+      if (storedFingerprint && incomingFingerprint && storedFingerprint !== incomingFingerprint) {
+        throw new Error(`Idempotency key conflict: key "${key}" was already used with different request parameters.`);
+      }
+    }
+
     if (row.status === 'completed') {
       const resVal = typeof row.result === 'string' ? JSON.parse(row.result) : row.result;
       return { replayed: true, result: resVal };
@@ -120,14 +156,7 @@ export async function recordIdempotencyResult(
   result: any,
   payloadFingerprintObj: Record<string, any>
 ): Promise<void> {
-  const sortedKeys = Object.keys(payloadFingerprintObj).sort();
-  const sortedObj: Record<string, any> = {};
-  for (const k of sortedKeys) {
-    if (payloadFingerprintObj[k] !== undefined) {
-      sortedObj[k] = payloadFingerprintObj[k];
-    }
-  }
-  const fingerprint = JSON.stringify(sortedObj);
+  const fingerprint = canonicalizeFingerprint(payloadFingerprintObj);
 
   await client.query(
     `UPDATE financial_idempotency
@@ -220,9 +249,10 @@ export class FinancialRepository {
     // No-op: Direct live database queries used exclusively.
   }
 
-  async hasWallet(userId: string): Promise<boolean> {
+  async hasWallet(userId: string, client?: any): Promise<boolean> {
     assertPostgresAvailable();
-    const res = await postgresStore.getPool().query('SELECT 1 FROM wallets WHERE user_id = $1 LIMIT 1', [userId]);
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query('SELECT 1 FROM wallets WHERE user_id = $1 LIMIT 1', [userId]);
     return res.rows.length > 0;
   }
 
@@ -231,24 +261,27 @@ export class FinancialRepository {
     return postgresStore.listAuditLogs();
   }
 
-  async getWallet(userId: string): Promise<UserWallet | null> {
+  async getWallet(userId: string, client?: any): Promise<UserWallet | null> {
     assertPostgresAvailable();
-    const res = await postgresStore.getPool().query('SELECT * FROM wallets WHERE user_id = $1', [userId]);
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query('SELECT * FROM wallets WHERE user_id = $1', [userId]);
     if (res.rows.length === 0) return null;
     return this.formatWalletRow(res.rows[0]);
   }
 
-  async getWalletById(userId: string): Promise<{ wallet: UserWallet; movements: any[] } | null> {
+  async getWalletById(userId: string, client?: any): Promise<{ wallet: UserWallet; movements: any[] } | null> {
     assertPostgresAvailable();
-    const wallet = await this.getWallet(userId);
+    const dbRunner = client || postgresStore.getPool();
+    const wallet = await this.getWallet(userId, dbRunner);
     if (!wallet) return null;
-    const res = await postgresStore.getPool().query('SELECT * FROM wallet_movements WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+    const res = await dbRunner.query('SELECT * FROM wallet_movements WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
     return { wallet, movements: res.rows };
   }
 
-  async getWalletBalance(userId: string): Promise<number> {
+  async getWalletBalance(userId: string, client?: any): Promise<number> {
     assertPostgresAvailable();
-    const res = await postgresStore.getPool().query('SELECT available_balance FROM wallets WHERE user_id = $1', [userId]);
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query('SELECT available_balance FROM wallets WHERE user_id = $1', [userId]);
     if (res.rows.length === 0) return 0;
     return Number(res.rows[0].available_balance);
   }
@@ -259,9 +292,10 @@ export class FinancialRepository {
     return res.rows.map(r => this.formatWalletRow(r));
   }
 
-  async getEscrow(orderId: string): Promise<EscrowRecord | null> {
+  async getEscrow(orderId: string, client?: any): Promise<EscrowRecord | null> {
     assertPostgresAvailable();
-    const res = await postgresStore.getPool().query('SELECT * FROM escrows WHERE order_id = $1', [orderId]);
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query('SELECT * FROM escrows WHERE order_id = $1', [orderId]);
     if (res.rows.length === 0) {
       return null;
     }
@@ -1145,7 +1179,7 @@ export class FinancialTransactionService {
     return postgresStore.executeInTransaction(run);
   }
 
-  async refundOrderFunds(params: { orderId: string; amount?: number; reason: string; actor: string; idempotencyKey?: string; }, externalClient?: any) {
+  async refundOrderFunds(params: { orderId: string; amount?: number; reason: string; actor: string; idempotencyKey?: string; allowDisputeResolution?: boolean; }, externalClient?: any) {
     if (params.amount !== undefined) {
       assertValidMoneyAmount(params.amount, 'amount');
     }
@@ -1180,6 +1214,19 @@ export class FinancialTransactionService {
       const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [params.orderId]);
       if (orderRes.rows.length > 0 && (orderRes.rows[0].status === 'completed' || orderRes.rows[0].status === 'cancelled')) {
         throw new Error(`Cannot refund escrow: Order is already ${orderRes.rows[0].status}.`);
+      }
+
+      if (!params.allowDisputeResolution) {
+        if (orderRes.rows.length > 0 && orderRes.rows[0].status === 'disputed') {
+          throw new Error('Cannot refund escrow: Order is currently under dispute. The dispute must be resolved through dispute resolution.');
+        }
+        const activeDisputeRes = await client.query(
+          "SELECT id FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_investigation', 'under_review') LIMIT 1",
+          [params.orderId]
+        );
+        if (activeDisputeRes.rows.length > 0) {
+          throw new Error('Cannot refund escrow: Order has an active unresolved dispute.');
+        }
       }
 
       await this.ensureWallet({ userId: escrow.buyer_id, role: 'buyer' }, client);
@@ -1709,8 +1756,8 @@ export class FinancialTransactionService {
       );
 
       await client.query(
-        'UPDATE gigs SET is_featured = TRUE, featured_until = $1, badges = array_append(array_remove(badges, $2), $2) WHERE id = $3',
-        [params.featuredUntil, 'Featured', params.gigId]
+        'UPDATE gigs SET featured = TRUE, is_featured = TRUE, featured_until = $1 WHERE id = $2',
+        [params.featuredUntil, params.gigId]
       );
 
       const journalId = 'jnl_' + randomUUID().slice(0, 12);
@@ -2704,8 +2751,22 @@ export class FinancialTransactionService {
       const exceptions = exRes.rows.map((r: any) => financialRepository.formatReconciliationExceptionRow(r));
       const openExceptions = exceptions.filter((e: ReconciliationException) => e.status !== 'resolved');
 
+      const isReconciled = discrepancies.length === 0 && openExceptions.length === 0;
+      if (!isReconciled) {
+        diagnosticService.log(
+          'critical',
+          'finance',
+          'runFinancialReconciliation',
+          'financial.service.ts',
+          'reconciliation_check',
+          'FAILED',
+          { discrepancies, openExceptionsCount: openExceptions.length },
+          'Financial reconciliation detected discrepancies or unresolved exceptions. Immediate review required.'
+        );
+      }
+
       return {
-        reconciled: discrepancies.length === 0 && openExceptions.length === 0,
+        reconciled: isReconciled,
         timestamp: new Date().toISOString(),
         summary: {
           wallets: { totalAvailable: walletTotalAvail, totalHold: walletTotalHold, totalPendingWithdrawals: walletTotalPending },

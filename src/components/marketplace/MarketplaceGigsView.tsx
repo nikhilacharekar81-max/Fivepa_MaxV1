@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   ShieldCheck, 
   Search, 
   ChevronRight, 
+  ChevronLeft,
   Grid, 
   List, 
   Briefcase, 
@@ -12,7 +13,11 @@ import {
   Send,
   Flame,
   Sparkles,
-  DollarSign
+  DollarSign,
+  Check,
+  SlidersHorizontal,
+  ArrowUpDown,
+  Zap
 } from 'lucide-react';
 import { Gig, Project } from '../../types';
 import { DEFAULT_AVATAR, DEFAULT_GIG_IMAGE } from '../../constants';
@@ -46,6 +51,24 @@ interface MarketplaceGigsViewProps {
   setIsSignupModalOpen: (b: boolean) => void;
   slugify: (name: string) => string;
   CATEGORY_SLUGS: Record<string, string>;
+  isHomePage?: boolean;
+}
+
+type SortOption = 'recommended' | 'bestselling' | 'rating' | 'price_asc' | 'price_desc' | 'newest';
+
+function formatFiverrTitle(title: string): string {
+  const trimmed = title.trim();
+  if (trimmed.toLowerCase().startsWith('i will')) {
+    return 'I will ' + trimmed.slice(6).trim();
+  }
+  return `I will ${trimmed.charAt(0).toLowerCase()}${trimmed.slice(1)}`;
+}
+
+function formatFiverrReviewCount(count: number): string {
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1)}k`;
+  }
+  return String(count);
 }
 
 export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
@@ -75,183 +98,200 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
   currentUser,
   setIsSignupModalOpen,
   slugify,
-  CATEGORY_SLUGS
+  CATEGORY_SLUGS,
+  isHomePage = false
 }) => {
+  // Sort State
+  const [sortBy, setSortBy] = useState<SortOption>('recommended');
+  const [showSortDropdown, setShowSortDropdown] = useState(false);
+
+  // Pro Services Toggle (Fiverr Pro style)
+  const [proServicesOnly, setProServicesOnly] = useState(false);
+
+  // Custom budget inputs
+  const [customMin, setCustomMin] = useState('');
+  const [customMax, setCustomMax] = useState('');
+
+  // Per-gig carousel index state
+  const [carouselIndices, setCarouselIndices] = useState<Record<string, number>>({});
+
+  const handleNextSlide = (gigId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCarouselIndices(prev => ({
+      ...prev,
+      [gigId]: ((prev[gigId] || 0) + 1) % 3
+    }));
+  };
+
+  const handlePrevSlide = (gigId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setCarouselIndices(prev => ({
+      ...prev,
+      [gigId]: ((prev[gigId] || 0) - 1 + 3) % 3
+    }));
+  };
+
+  // Filter & Sort Logic
+  const sortedAndFilteredGigs = useMemo(() => {
+    let list = [...filteredGigs];
+
+    // Pro filter
+    if (proServicesOnly) {
+      list = list.filter(g => g.featured || (g.freelancerLevel && g.freelancerLevel.toLowerCase().includes('top')));
+    }
+
+    // Custom budget range if set
+    if (budgetFilter.startsWith('custom:')) {
+      const parts = budgetFilter.replace('custom:', '').split('-');
+      const min = parseFloat(parts[0]) || 0;
+      const max = parseFloat(parts[1]) || Infinity;
+      list = list.filter(g => g.price >= min && g.price <= max);
+    }
+
+    // Sort order
+    switch (sortBy) {
+      case 'bestselling':
+        list.sort((a, b) => (b.reviewsCount || 0) - (a.reviewsCount || 0));
+        break;
+      case 'rating':
+        list.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+        break;
+      case 'price_asc':
+        list.sort((a, b) => a.price - b.price);
+        break;
+      case 'price_desc':
+        list.sort((a, b) => b.price - a.price);
+        break;
+      case 'newest':
+        list.sort((a, b) => String(b.id).localeCompare(String(a.id)));
+        break;
+      case 'recommended':
+      default:
+        list.sort((a, b) => {
+          if (a.featured && !b.featured) return -1;
+          if (!a.featured && b.featured) return 1;
+          return (b.rating * (b.reviewsCount || 1)) - (a.rating * (a.reviewsCount || 1));
+        });
+        break;
+    }
+
+    return list;
+  }, [filteredGigs, proServicesOnly, budgetFilter, sortBy]);
+
+  const sortLabels: Record<SortOption, string> = {
+    recommended: 'Recommended',
+    bestselling: 'Best Selling',
+    rating: 'Top Rated',
+    price_asc: 'Price: Low to High',
+    price_desc: 'Price: High to Low',
+    newest: 'Newest Arrivals'
+  };
+
+  const handleApplyCustomBudget = () => {
+    const min = parseFloat(customMin) || 0;
+    const max = parseFloat(customMax) || 0;
+    if (max > 0 && max >= min) {
+      setBudgetFilter(`custom:${min}-${max}`);
+    } else if (min > 0) {
+      setBudgetFilter(`custom:${min}-999999`);
+    } else {
+      setBudgetFilter('All');
+    }
+    setActiveDropdown(null);
+  };
+
   return (
-    <div>
-      {/* Hero Banner */}
-      <div className="relative rounded-3xl bg-slate-900 text-white p-8 md:p-12 mb-10 overflow-hidden shadow-xl">
-        <div className="absolute right-0 top-0 w-1/2 h-full opacity-20 bg-cover bg-center pointer-events-none" style={{ backgroundImage: `url('https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=1200&h=800&fit=crop')` }}></div>
-        <div className="relative z-10 max-w-2xl">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-semibold mb-4 border border-emerald-500/30">
-            <ShieldCheck className="w-4 h-4" /> 100% Escrow Protection Guaranteed
-          </div>
-          <h1 className="text-3xl md:text-4xl font-bold leading-tight mb-4 text-white text-wrap balance">
-            {currentCategory === 'All' ? 'Hire top freelance talent for fixed-price gigs' : `${currentCategory} Freelance Gigs`}
-          </h1>
-          <p className="text-slate-300 text-sm md:text-base leading-body mb-8">
-            Connect with elite developers, designers, and AI experts. Funds are safely held in escrow until you approve the deliverables.
-          </p>
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 font-sans text-slate-800">
+      {isHomePage ? (
+        /* ========================================================= */
+        /* HOMEPAGE HERO BANNER                                      */
+        /* ========================================================= */
+        <div className="relative rounded-3xl bg-slate-900 text-white p-8 md:p-12 mb-10 overflow-hidden shadow-xl">
+          <div
+            className="absolute right-0 top-0 w-1/2 h-full opacity-20 bg-cover bg-center pointer-events-none"
+            style={{ backgroundImage: `url('https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=1200&h=800&fit=crop')` }}
+          />
+          <div className="relative z-10 max-w-2xl">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-semibold mb-4 border border-emerald-500/30">
+              <ShieldCheck className="w-4 h-4" /> 100% Escrow Protection Guaranteed
+            </div>
+            <h1 className="text-3xl md:text-4xl font-bold leading-tight mb-4 text-white text-wrap balance">
+              {currentCategory === 'All' ? 'Hire top freelance talent for fixed-price gigs' : `${currentCategory} Freelance Gigs`}
+            </h1>
+            <p className="text-slate-300 text-sm md:text-base leading-relaxed mb-8">
+              Connect with elite developers, designers, and AI experts. Funds are safely held in escrow until you approve the deliverables.
+            </p>
 
-          {/* Search Bar */}
-          <div className="flex items-center bg-white rounded-2xl p-2 shadow-lg max-w-xl">
-            <Search className="w-5 h-5 text-slate-400 ml-3" />
-            <input 
-              type="text" 
-              placeholder="Search services (e.g. React, UI/UX, Automation)..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full px-3 py-2 text-sm text-fiverr-dark placeholder:text-slate-400 focus:outline-none"
-            />
-            <button className="px-6 py-3 bg-slate-900 text-white text-xs font-semibold rounded-xl hover:bg-slate-800 transition-colors">
-              Search
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Filter Toolbar Bar */}
-      <div className="relative flex flex-wrap items-center justify-between gap-4 bg-white border border-slate-200 rounded-2xl p-4 mb-8 shadow-xs">
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Service Options Dropdown */}
-          <div className="relative">
-            <button 
-              onClick={() => setActiveDropdown(activeDropdown === 'service' ? null : 'service')}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-fiverr-dark hover:bg-slate-100 transition-colors"
-            >
-              <span>Service options {serviceOptionFilter !== 'All' ? `(${serviceOptionFilter})` : ''}</span>
-              <ChevronRight className={`w-3.5 h-3.5 transition-transform ${activeDropdown === 'service' ? 'rotate-270' : 'rotate-90'} text-slate-400`} />
-            </button>
-            {activeDropdown === 'service' && (
-              <div className="absolute left-0 mt-2 w-56 bg-white border border-slate-200 rounded-2xl shadow-xl z-30 p-2 space-y-1">
-                {['All', 'Development & IT', 'AI & Data', 'Design & Creative', 'Mobile Apps'].map(opt => (
-                  <button
-                    key={opt}
-                    onClick={() => { setServiceOptionFilter(opt); setActiveDropdown(null); }}
-                    className={`w-full text-left px-3 py-2 text-xs rounded-xl font-medium transition-colors ${serviceOptionFilter === opt ? 'bg-slate-900 text-white' : 'text-fiverr-dark hover:bg-slate-100'}`}
-                  >
-                    {opt}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Seller Details Dropdown */}
-          <div className="relative">
-            <button 
-              onClick={() => setActiveDropdown(activeDropdown === 'seller' ? null : 'seller')}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-fiverr-dark hover:bg-slate-100 transition-colors"
-            >
-              <span>Seller details {sellerLevelFilter !== 'All' ? `(${sellerLevelFilter})` : ''}</span>
-              <ChevronRight className={`w-3.5 h-3.5 transition-transform ${activeDropdown === 'seller' ? 'rotate-270' : 'rotate-90'} text-slate-400`} />
-            </button>
-            {activeDropdown === 'seller' && (
-              <div className="absolute left-0 mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-xl z-30 p-2 space-y-1">
-                {['All', 'Top Rated', 'Level 2', 'Level 1'].map(lvl => (
-                  <button
-                    key={lvl}
-                    onClick={() => { setSellerLevelFilter(lvl); setActiveDropdown(null); }}
-                    className={`w-full text-left px-3 py-2 text-xs rounded-xl font-medium transition-colors ${sellerLevelFilter === lvl ? 'bg-slate-900 text-white' : 'text-fiverr-dark hover:bg-slate-100'}`}
-                  >
-                    {lvl}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Budget Dropdown */}
-          <div className="relative">
-            <button 
-              onClick={() => setActiveDropdown(activeDropdown === 'budget' ? null : 'budget')}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-fiverr-dark hover:bg-slate-100 transition-colors"
-            >
-              <span>Budget {budgetFilter !== 'All' ? `(${budgetFilter})` : ''}</span>
-              <ChevronRight className={`w-3.5 h-3.5 transition-transform ${activeDropdown === 'budget' ? 'rotate-270' : 'rotate-90'} text-slate-400`} />
-            </button>
-            {activeDropdown === 'budget' && (
-              <div className="absolute left-0 mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-xl z-30 p-2 space-y-1">
-                {[
-                  { label: 'Any Budget', value: 'All' },
-                  { label: 'Under $500', value: 'under_500' },
-                  { label: '$500 - $1,000', value: '500_1000' },
-                  { label: '$1,000+', value: '1000_plus' },
-                ].map(b => (
-                  <button
-                    key={b.value}
-                    onClick={() => { setBudgetFilter(b.value); setActiveDropdown(null); }}
-                    className={`w-full text-left px-3 py-2 text-xs rounded-xl font-medium transition-colors ${budgetFilter === b.value ? 'bg-slate-900 text-white' : 'text-fiverr-dark hover:bg-slate-100'}`}
-                  >
-                    {b.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Delivery Time Dropdown */}
-          <div className="relative">
-            <button 
-              onClick={() => setActiveDropdown(activeDropdown === 'delivery' ? null : 'delivery')}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-fiverr-dark hover:bg-slate-100 transition-colors"
-            >
-              <span>Delivery time {deliveryTimeFilter !== null ? `(≤ ${deliveryTimeFilter}d)` : ''}</span>
-              <ChevronRight className={`w-3.5 h-3.5 transition-transform ${activeDropdown === 'delivery' ? 'rotate-270' : 'rotate-90'} text-slate-400`} />
-            </button>
-            {activeDropdown === 'delivery' && (
-              <div className="absolute left-0 mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-xl z-30 p-2 space-y-1">
-                {[
-                  { label: 'Any Delivery Time', value: null },
-                  { label: 'Up to 3 Days', value: 3 },
-                  { label: 'Up to 5 Days', value: 5 },
-                  { label: 'Up to 10 Days', value: 10 },
-                ].map(d => (
-                  <button
-                    key={String(d.value)}
-                    onClick={() => { setDeliveryTimeFilter(d.value); setActiveDropdown(null); }}
-                    className={`w-full text-left px-3 py-2 text-xs rounded-xl font-medium transition-colors ${deliveryTimeFilter === d.value ? 'bg-slate-900 text-white' : 'text-fiverr-dark hover:bg-slate-100'}`}
-                  >
-                    {d.label}
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* Search Bar */}
+            <div className="flex items-center bg-white rounded-2xl p-2 shadow-lg max-w-xl">
+              <Search className="w-5 h-5 text-slate-400 ml-3 shrink-0" />
+              <input
+                type="text"
+                placeholder="Search services (e.g. React, UI/UX, Automation)..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={(e) => navigate('/gigs', e)}
+                className="px-6 py-3 bg-slate-900 text-white text-xs font-semibold rounded-xl hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+              >
+                Search
+              </button>
+            </div>
           </div>
         </div>
-
-        <div className="flex items-center gap-4 text-xs font-semibold text-fiverr-dark">
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input 
-              type="checkbox" 
-              checked={onlineNowOnly}
-              onChange={(e) => setOnlineNowOnly(e.target.checked)}
-              className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 w-4 h-4" 
-            />
-            <span>Online now</span>
-          </label>
-
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl">
-            <button
-              onClick={() => setGigViewMode('grid')}
-              className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer ${gigViewMode === 'grid' ? 'bg-white text-fiverr-dark shadow-xs font-bold' : 'text-fiverr-muted hover:text-fiverr-dark'}`}
-              title="Grid View"
+      ) : (
+        /* ========================================================= */
+        /* EXPLORE GIGS HEADER: Breadcrumbs & Page Headline          */
+        /* ========================================================= */
+        <div className="mb-6">
+          {/* Breadcrumb row */}
+          <div className="flex items-center gap-1.5 text-xs text-slate-400 mb-2">
+            <a 
+              href="/" 
+              onClick={(e) => navigate('/', e)} 
+              className="hover:text-slate-700 transition-colors"
             >
-              <Grid className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setGigViewMode('list')}
-              className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer ${gigViewMode === 'list' ? 'bg-white text-fiverr-dark shadow-xs font-bold' : 'text-fiverr-muted hover:text-fiverr-dark'}`}
-              title="Listicle View"
-            >
-              <List className="w-4 h-4" />
-            </button>
+              Fivepa
+            </a>
+            <ChevronRight className="w-3.5 h-3.5 text-slate-300" />
+            <span className="text-slate-600 font-medium capitalize">
+              {currentCategory === 'All' ? 'Services' : currentCategory}
+            </span>
+          </div>
+
+          {/* Category Title & Description */}
+          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
+                {currentCategory === 'All' ? 'Explore Freelance Services' : `${currentCategory} Services`}
+              </h1>
+              <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-2xl leading-relaxed">
+                Find top-rated talent, review verified portfolios, and hire securely with Fivepa USD Escrow protection.
+              </p>
+            </div>
+
+            {/* Quick Search Input */}
+            <div className="relative w-full md:w-80 shrink-0">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input 
+                type="text" 
+                placeholder="Search gigs..." 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:border-slate-400 shadow-2xs"
+              />
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      {/* Categories Filter Tabs with Search-Engine-Friendly URLs */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-4 mb-8 scrollbar-none">
+      {/* ========================================================= */}
+      {/* FIVERR CATEGORY PILL STRIP                                 */}
+      {/* ========================================================= */}
+      <div className="flex items-center gap-2 overflow-x-auto pb-2 mb-6 scrollbar-none">
         {['All', 'Development & IT', 'AI & Data', 'Design & Creative', 'Mobile Apps'].map(catName => {
           const slug = CATEGORY_SLUGS[catName];
           const catUrl = slug === 'all' ? '/' : `/categories/${slug}`;
@@ -261,7 +301,11 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
               key={catName}
               href={catUrl}
               onClick={(e) => navigate(catUrl, e)}
-              className={`px-4 py-2 text-xs font-medium rounded-xl whitespace-nowrap transition-all ${isActive ? 'bg-slate-900 text-white shadow-md' : 'bg-white text-fiverr-dark hover:bg-slate-100 border border-slate-200'}`}
+              className={`px-3.5 py-1.5 text-xs font-semibold rounded-full whitespace-nowrap transition-all border ${
+                isActive 
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-xs' 
+                  : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
+              }`}
             >
               {catName}
             </a>
@@ -269,332 +313,751 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
         })}
       </div>
 
-      {/* Gigs Grid or Listicle View */}
-      {filteredGigs.length === 0 ? (
-        <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center max-w-lg mx-auto shadow-xs space-y-4 my-8">
-          <div className="w-16 h-16 rounded-2xl bg-slate-100 flex items-center justify-center mx-auto text-slate-400">
-            <Briefcase className="w-8 h-8" />
+      {/* ========================================================= */}
+      {/* FIVERR FILTER TOOLBAR                                     */}
+      {/* ========================================================= */}
+      <div className="bg-white border border-slate-200/90 rounded-2xl p-4 mb-6 shadow-2xs">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          {/* Left: Filter Buttons */}
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Service Options Filter */}
+            <div className="relative">
+              <button 
+                onClick={() => setActiveDropdown(activeDropdown === 'service' ? null : 'service')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                  serviceOptionFilter !== 'All'
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300'
+                }`}
+              >
+                <span>Service options {serviceOptionFilter !== 'All' ? `(${serviceOptionFilter})` : ''}</span>
+                <ChevronRight className={`w-3.5 h-3.5 transition-transform ${activeDropdown === 'service' ? '-rotate-90' : 'rotate-90'}`} />
+              </button>
+              {activeDropdown === 'service' && (
+                <div className="absolute left-0 mt-2 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-30 p-2 space-y-1">
+                  {['All', 'Development & IT', 'AI & Data', 'Design & Creative', 'Mobile Apps'].map(opt => (
+                    <button
+                      key={opt}
+                      onClick={() => { setServiceOptionFilter(opt); setActiveDropdown(null); }}
+                      className={`w-full text-left px-3 py-2 text-xs rounded-lg font-medium transition-colors flex items-center justify-between cursor-pointer ${
+                        serviceOptionFilter === opt ? 'bg-slate-100 text-slate-900 font-bold' : 'text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span>{opt}</span>
+                      {serviceOptionFilter === opt && <Check className="w-3.5 h-3.5 text-emerald-600" />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Seller Details Filter */}
+            <div className="relative">
+              <button 
+                onClick={() => setActiveDropdown(activeDropdown === 'seller' ? null : 'seller')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                  sellerLevelFilter !== 'All'
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300'
+                }`}
+              >
+                <span>Seller details {sellerLevelFilter !== 'All' ? `(${sellerLevelFilter})` : ''}</span>
+                <ChevronRight className={`w-3.5 h-3.5 transition-transform ${activeDropdown === 'seller' ? '-rotate-90' : 'rotate-90'}`} />
+              </button>
+              {activeDropdown === 'seller' && (
+                <div className="absolute left-0 mt-2 w-52 bg-white border border-slate-200 rounded-xl shadow-xl z-30 p-2 space-y-1">
+                  {[
+                    { label: 'All Sellers', value: 'All' },
+                    { label: 'Top Rated Seller', value: 'Top Rated' },
+                    { label: 'Level 2 Seller', value: 'Level 2' },
+                    { label: 'Level 1 Seller', value: 'Level 1' },
+                    { label: 'New Seller', value: 'New Seller' }
+                  ].map(lvl => (
+                    <button
+                      key={lvl.value}
+                      onClick={() => { setSellerLevelFilter(lvl.value); setActiveDropdown(null); }}
+                      className={`w-full text-left px-3 py-2 text-xs rounded-lg font-medium transition-colors flex items-center justify-between cursor-pointer ${
+                        sellerLevelFilter === lvl.value ? 'bg-slate-100 text-slate-900 font-bold' : 'text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span>{lvl.label}</span>
+                      {sellerLevelFilter === lvl.value && <Check className="w-3.5 h-3.5 text-emerald-600" />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Budget Filter with Custom Range */}
+            <div className="relative">
+              <button 
+                onClick={() => setActiveDropdown(activeDropdown === 'budget' ? null : 'budget')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                  budgetFilter !== 'All'
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300'
+                }`}
+              >
+                <span>
+                  Budget {budgetFilter !== 'All' ? `(${budgetFilter.replace('custom:', '$')})` : ''}
+                </span>
+                <ChevronRight className={`w-3.5 h-3.5 transition-transform ${activeDropdown === 'budget' ? '-rotate-90' : 'rotate-90'}`} />
+              </button>
+              {activeDropdown === 'budget' && (
+                <div className="absolute left-0 mt-2 w-64 bg-white border border-slate-200 rounded-xl shadow-xl z-30 p-3 space-y-2.5">
+                  <div className="space-y-1">
+                    {[
+                      { label: 'Any Budget', value: 'All' },
+                      { label: 'Value (Under $50)', value: 'under25' },
+                      { label: 'Mid-range ($50 - $100)', value: '50to100' },
+                      { label: 'High-end ($100+)', value: 'over100' },
+                    ].map(b => (
+                      <button
+                        key={b.value}
+                        onClick={() => { setBudgetFilter(b.value); setActiveDropdown(null); }}
+                        className={`w-full text-left px-2.5 py-1.5 text-xs rounded-lg font-medium transition-colors flex items-center justify-between cursor-pointer ${
+                          budgetFilter === b.value ? 'bg-slate-100 text-slate-900 font-bold' : 'text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span>{b.label}</span>
+                        {budgetFilter === b.value && <Check className="w-3.5 h-3.5 text-emerald-600" />}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Custom Min / Max USD */}
+                  <div className="pt-2 border-t border-slate-100">
+                    <div className="text-[11px] font-bold text-slate-700 mb-1.5">Custom Budget ($ USD)</div>
+                    <div className="flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span>
+                        <input
+                          type="number"
+                          placeholder="Min"
+                          value={customMin}
+                          onChange={e => setCustomMin(e.target.value)}
+                          className="w-full pl-5 pr-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-hidden"
+                        />
+                      </div>
+                      <span className="text-slate-400 text-xs">-</span>
+                      <div className="relative flex-1">
+                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-xs">$</span>
+                        <input
+                          type="number"
+                          placeholder="Max"
+                          value={customMax}
+                          onChange={e => setCustomMax(e.target.value)}
+                          className="w-full pl-5 pr-2 py-1.5 text-xs border border-slate-200 rounded-lg focus:outline-hidden"
+                        />
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleApplyCustomBudget}
+                      className="mt-2 w-full py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold transition cursor-pointer"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Delivery Time Filter */}
+            <div className="relative">
+              <button 
+                onClick={() => setActiveDropdown(activeDropdown === 'delivery' ? null : 'delivery')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                  deliveryTimeFilter !== null
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300'
+                }`}
+              >
+                <span>Delivery time {deliveryTimeFilter !== null ? `(≤ ${deliveryTimeFilter}d)` : ''}</span>
+                <ChevronRight className={`w-3.5 h-3.5 transition-transform ${activeDropdown === 'delivery' ? '-rotate-90' : 'rotate-90'}`} />
+              </button>
+              {activeDropdown === 'delivery' && (
+                <div className="absolute left-0 mt-2 w-52 bg-white border border-slate-200 rounded-xl shadow-xl z-30 p-2 space-y-1">
+                  {[
+                    { label: 'Any Delivery Time', value: null },
+                    { label: 'Express 24H (1 day)', value: 1 },
+                    { label: 'Up to 3 Days', value: 3 },
+                    { label: 'Up to 7 Days', value: 7 },
+                    { label: 'Up to 14 Days', value: 14 },
+                  ].map(d => (
+                    <button
+                      key={String(d.value)}
+                      onClick={() => { setDeliveryTimeFilter(d.value); setActiveDropdown(null); }}
+                      className={`w-full text-left px-3 py-2 text-xs rounded-lg font-medium transition-colors flex items-center justify-between cursor-pointer ${
+                        deliveryTimeFilter === d.value ? 'bg-slate-100 text-slate-900 font-bold' : 'text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span>{d.label}</span>
+                      {deliveryTimeFilter === d.value && <Check className="w-3.5 h-3.5 text-emerald-600" />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-          <h3 className="text-lg font-bold text-slate-800">No Services or Gigs Listed Yet</h3>
-          <p className="text-xs text-slate-500 max-w-sm mx-auto">
-            The marketplace is clean and ready. Register or post the first freelance service to get started!
+
+          {/* Right: Fiverr-style Toggles (Pro Services & Online Now) */}
+          <div className="flex items-center gap-4 text-xs font-semibold text-slate-700">
+            {/* Pro Services Toggle */}
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <div 
+                onClick={() => setProServicesOnly(!proServicesOnly)}
+                className={`w-9 h-5 rounded-full transition-colors relative cursor-pointer ${
+                  proServicesOnly ? 'bg-emerald-600' : 'bg-slate-200'
+                }`}
+              >
+                <div 
+                  className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${
+                    proServicesOnly ? 'left-4.5' : 'left-0.5'
+                  }`}
+                />
+              </div>
+              <span className="flex items-center gap-1">
+                <span>Pro services</span>
+                <Zap className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+              </span>
+            </label>
+
+            {/* Online Now Toggle */}
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <div 
+                onClick={() => setOnlineNowOnly(!onlineNowOnly)}
+                className={`w-9 h-5 rounded-full transition-colors relative cursor-pointer ${
+                  onlineNowOnly ? 'bg-emerald-600' : 'bg-slate-200'
+                }`}
+              >
+                <div 
+                  className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${
+                    onlineNowOnly ? 'left-4.5' : 'left-0.5'
+                  }`}
+                />
+              </div>
+              <span className="flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+                <span>Online now</span>
+              </span>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      {/* ========================================================= */}
+      {/* FIVERR META BAR: Count, Sort Dropdown & View Mode Switch    */}
+      {/* ========================================================= */}
+      <div className="flex items-center justify-between gap-4 mb-5 text-xs">
+        <div className="text-slate-500 font-medium">
+          <strong className="text-slate-900 font-bold">{sortedAndFilteredGigs.length.toLocaleString()}</strong> services available
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Sort By Dropdown */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowSortDropdown(!showSortDropdown)}
+              className="flex items-center gap-1.5 text-slate-700 hover:text-slate-900 font-semibold cursor-pointer px-2 py-1 rounded-lg hover:bg-slate-100 transition"
+            >
+              <span className="text-slate-500 font-normal">Sort by:</span>
+              <span>{sortLabels[sortBy]}</span>
+              <ChevronRight className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showSortDropdown ? '-rotate-90' : 'rotate-90'}`} />
+            </button>
+
+            {showSortDropdown && (
+              <div className="absolute right-0 mt-1.5 w-48 bg-white border border-slate-200 rounded-xl shadow-xl z-30 p-1.5 space-y-0.5">
+                {(Object.keys(sortLabels) as SortOption[]).map(key => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => {
+                      setSortBy(key);
+                      setShowSortDropdown(false);
+                    }}
+                    className={`w-full text-left px-3 py-2 text-xs rounded-lg font-medium transition-colors flex items-center justify-between cursor-pointer ${
+                      sortBy === key ? 'bg-slate-100 text-slate-900 font-bold' : 'text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span>{sortLabels[key]}</span>
+                    {sortBy === key && <Check className="w-3.5 h-3.5 text-emerald-600" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Grid / Listicle Toggle */}
+          <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg border border-slate-200/80">
+            <button
+              type="button"
+              onClick={() => setGigViewMode('grid')}
+              className={`p-1.5 rounded-md transition-all cursor-pointer ${
+                gigViewMode === 'grid' 
+                  ? 'bg-white text-slate-900 shadow-2xs font-bold' 
+                  : 'text-slate-400 hover:text-slate-700'
+              }`}
+              title="Grid View"
+            >
+              <Grid className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setGigViewMode('list')}
+              className={`p-1.5 rounded-md transition-all cursor-pointer ${
+                gigViewMode === 'list' 
+                  ? 'bg-white text-slate-900 shadow-2xs font-bold' 
+                  : 'text-slate-400 hover:text-slate-700'
+              }`}
+              title="List View"
+            >
+              <List className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ========================================================= */}
+      {/* FIVERR GIG GRID VIEW                                       */}
+      {/* ========================================================= */}
+      {sortedAndFilteredGigs.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center max-w-lg mx-auto shadow-2xs space-y-4 my-8">
+          <div className="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center mx-auto text-slate-400">
+            <Briefcase className="w-7 h-7" />
+          </div>
+          <h3 className="text-lg font-bold text-slate-900">No Services Found</h3>
+          <p className="text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
+            Try adjusting your search query, budget parameters, or seller details to discover more freelance gigs.
           </p>
           <div className="pt-2">
             <button
+              type="button"
               onClick={() => {
-                if (!currentUser) setIsSignupModalOpen(true);
-                else navigate('/create-gig');
+                setSearchQuery('');
+                setBudgetFilter('All');
+                setSellerLevelFilter('All');
+                setServiceOptionFilter('All');
+                setDeliveryTimeFilter(null);
+                setProServicesOnly(false);
+                setOnlineNowOnly(false);
               }}
-              className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs transition cursor-pointer"
+              className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl text-xs transition cursor-pointer"
             >
-              Post First Service
+              Reset Filters
             </button>
           </div>
         </div>
       ) : gigViewMode === 'grid' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {filteredGigs.map(gig => (
-            <div 
-              key={gig.id} 
-              onClick={(e) => navigate(getGigUrl(gig), e)}
-              className="bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-xl transition-all duration-300 flex flex-col group cursor-pointer"
-            >
-              <div className="relative aspect-video overflow-hidden bg-slate-100">
-                <GigImage 
-                  src={gig.image} 
-                  title={gig.title} 
-                  category={gig.category}
-                  className="w-full h-full group-hover:scale-105 transition-transform duration-500" 
-                />
-                <button 
-                  onClick={(e) => handleToggleLike(gig.id, e)}
-                  className={`absolute top-3 right-3 w-8 h-8 rounded-full bg-white/90 backdrop-blur-md flex items-center justify-center transition-all shadow-sm cursor-pointer ${
-                    likedGigIds.includes(gig.id) ? 'text-red-500 bg-white font-bold' : 'text-fiverr-dark hover:text-red-500 hover:bg-white'
-                  }`}
-                  title={likedGigIds.includes(gig.id) ? 'Remove from Wishlist' : 'Add to Wishlist'}
-                >
-                  <Heart className={`w-4 h-4 ${likedGigIds.includes(gig.id) ? 'fill-red-500 text-red-500' : ''}`} />
-                </button>
-              </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-6">
+          {sortedAndFilteredGigs.map(gig => {
+            const currentSlide = carouselIndices[gig.id] || 0;
+            const gigUrl = getGigUrl(gig);
+            const sellerUrl = `/${slugify(gig.freelancerName)}`;
+            const isLiked = likedGigIds.includes(gig.id);
+            const isTopSeller = gig.freelancerLevel?.toLowerCase().includes('top') || gig.rating >= 4.9;
 
-              <div className="p-4 flex-1 flex flex-col justify-between">
-                <div>
-                  {/* Seller info row */}
-                  <a 
-                    href={`/${slugify(gig.freelancerName)}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigate(`/${slugify(gig.freelancerName)}`, e);
-                    }}
-                    className="flex items-center gap-2.5 mb-2.5 group/seller"
-                  >
-                    <Avatar 
-                      src={gig.freelancerAvatar} 
-                      name={gig.freelancerName} 
-                      size="sm"
-                    />
-                    <div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-sm font-bold text-fiverr-dark group-hover/seller:underline">{gig.freelancerName}</span>
-                      </div>
-                      <span className="text-xs text-fiverr-muted font-medium">{gig.freelancerLevel || 'Top Rated'}</span>
-                    </div>
-                  </a>
-
-                  <h3 className="text-gig-title font-semibold text-slate-900 text-fiverr-dark line-clamp-2 group-hover:text-emerald-600 transition-colors mb-3 leading-gig">
-                    <a
-                      href={getGigUrl(gig)}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate(getGigUrl(gig), e);
-                      }}
-                      className="text-slate-900 text-fiverr-dark hover:text-emerald-600 transition-colors block"
-                    >
-                      {gig.title}
-                    </a>
-                  </h3>
-                </div>
-
-                <div>
-                  {/* Rating */}
-                  <div className="flex items-center gap-1 text-sm font-bold text-fiverr-dark mb-3">
-                    <Star className="w-4 h-4 fill-amber-500 text-amber-500" />
-                    <span>{gig.rating}</span>
-                    <span className="text-slate-400 font-normal">({gig.reviewsCount > 999 ? (gig.reviewsCount/1000).toFixed(1) + 'k' : gig.reviewsCount})</span>
-                  </div>
-
-                  {/* Price */}
-                   <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
-                    <span className="text-[11px] uppercase font-normal text-fiverr-muted">Starting at</span>
-                    <span className="text-[18px] font-bold text-fiverr-dark">${gig.price}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="space-y-4">
-          {filteredGigs.map(gig => (
-            <div 
-              key={gig.id} 
-              onClick={(e) => navigate(getGigUrl(gig), e)}
-              className="bg-white rounded-2xl border border-slate-200 p-5 hover:shadow-xl transition-all flex flex-col md:flex-row items-center justify-between gap-6 group cursor-pointer"
-            >
-              <div className="flex items-center gap-5 w-full md:w-auto">
-                <div className="relative w-44 h-32 rounded-xl overflow-hidden bg-slate-100 shrink-0">
+            return (
+              <div 
+                key={gig.id} 
+                onClick={(e) => navigate(gigUrl, e)}
+                className="bg-white rounded-xl border border-slate-200/90 overflow-hidden hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 flex flex-col justify-between group cursor-pointer relative"
+              >
+                {/* 16:10 Fiverr Aspect Ratio Image Container */}
+                <div className="relative aspect-[16/10] overflow-hidden bg-slate-100 select-none">
                   <GigImage 
                     src={gig.image} 
                     title={gig.title} 
                     category={gig.category}
-                    className="w-full h-full group-hover:scale-105 transition-transform duration-500" 
+                    className="w-full h-full group-hover:scale-105 transition-transform duration-300 object-cover" 
                   />
+
+                  {/* Top-Left Fiverr Badge: Top Rated / Fiverr's Choice */}
+                  {gig.featured ? (
+                    <div className="absolute top-2.5 left-2.5 z-10">
+                      <span className="bg-emerald-600 text-white font-bold text-[10px] px-2 py-0.5 rounded-sm tracking-wide uppercase shadow-xs flex items-center gap-1">
+                        <Sparkles className="w-2.5 h-2.5 fill-white" />
+                        <span>Fiverr's Choice</span>
+                      </span>
+                    </div>
+                  ) : isTopSeller ? (
+                    <div className="absolute top-2.5 left-2.5 z-10">
+                      <span className="bg-slate-900 text-white font-bold text-[10px] px-2 py-0.5 rounded-sm tracking-wide uppercase shadow-xs">
+                        Top Rated
+                      </span>
+                    </div>
+                  ) : null}
+
+                  {/* Top-Right Heart Wishlist Button */}
                   <button 
+                    type="button"
                     onClick={(e) => handleToggleLike(gig.id, e)}
-                    className={`absolute top-2.5 right-2.5 w-7 h-7 rounded-full bg-white/90 flex items-center justify-center transition-all shadow-sm ${likedGigIds.includes(gig.id) ? 'text-red-500 bg-white' : 'text-fiverr-dark hover:text-red-500'}`}
-                    title={likedGigIds.includes(gig.id) ? 'Remove from Wishlist' : 'Add to Wishlist'}
+                    className={`absolute top-2.5 right-2.5 z-10 w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-xs ${
+                      isLiked 
+                        ? 'bg-white text-red-500 fill-red-500 scale-105' 
+                        : 'bg-black/30 hover:bg-white text-white hover:text-red-500 backdrop-blur-xs'
+                    }`}
+                    title={isLiked ? 'Remove from Saved' : 'Save to List'}
                   >
-                    <Heart className={`w-3.5 h-3.5 ${likedGigIds.includes(gig.id) ? 'fill-red-500 text-red-500' : ''}`} />
+                    <Heart className={`w-4 h-4 ${isLiked ? 'fill-red-500 text-red-500' : ''}`} />
                   </button>
-                </div>
-                <div className="space-y-2 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-slate-100 text-fiverr-dark uppercase tracking-wider">{gig.category}</span>
-                    <span className="text-xs text-fiverr-muted flex items-center gap-1 font-semibold">
-                      <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" /> {gig.rating} ({gig.reviewsCount} reviews)
-                    </span>
-                  </div>
-                  <h3 className="text-gig-title font-semibold text-slate-900 text-fiverr-dark group-hover:text-emerald-600 transition-colors leading-gig line-clamp-2">
-                    <a
-                      href={getGigUrl(gig)}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate(getGigUrl(gig), e);
-                      }}
-                      className="text-slate-900 text-fiverr-dark hover:text-emerald-600 transition-colors block"
+
+                  {/* Hover Left / Right Carousel Navigation Arrows */}
+                  <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                    <button
+                      type="button"
+                      onClick={(e) => handlePrevSlide(gig.id, e)}
+                      className="absolute left-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-white/90 hover:bg-white text-slate-800 shadow-md flex items-center justify-center transition cursor-pointer"
+                      title="Previous"
                     >
-                      {gig.title}
-                    </a>
-                  </h3>
-                  <a 
-                    href={`/${slugify(gig.freelancerName)}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigate(`/${slugify(gig.freelancerName)}`, e);
-                    }}
-                    className="flex items-center gap-2 text-xs text-fiverr-muted hover:underline"
-                  >
-                    <Avatar 
-                      src={gig.freelancerAvatar} 
-                      name={gig.freelancerName} 
-                      size="xs"
-                    />
-                    <span>by <strong className="text-fiverr-dark">{gig.freelancerName}</strong> ({gig.freelancerLevel || 'Top Rated'})</span>
-                  </a>
-                </div>
-              </div>
-
-              <div className="flex md:flex-col items-center md:items-end justify-between w-full md:w-auto pt-4 md:pt-0 border-t md:border-t-0 border-slate-100 gap-3">
-                <div className="text-left md:text-right">
-                  <span className="text-[10px] uppercase text-fiverr-muted block font-medium">Starting at</span>
-                  <span className="text-2xl font-bold text-fiverr-dark">${gig.price}</span>
-                </div>
-                <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    navigate(getGigUrl(gig), e);
-                  }}
-                  className="px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition"
-                >
-                  View Details & Escrow
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Featured Projects & Client Requests Section */}
-      <div className="mt-16 pt-12 border-t border-slate-200/80">
-        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
-          <div>
-            <h2 className="text-2xl font-bold text-fiverr-dark tracking-tight">
-              Active Buyer Projects & Bidding Opportunities
-            </h2>
-            <p className="text-xs text-fiverr-muted mt-1 max-w-2xl">
-              Explore open client requests with funded escrow budgets. Submit proposals, bid on custom work, and collaborate securely.
-            </p>
-          </div>
-
-          <button
-            onClick={(e) => navigate('/projects', e)}
-            className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition-all shadow-xs shrink-0 cursor-pointer"
-          >
-            <span>View All Projects ({projects.length})</span>
-            <ChevronRight className="w-4 h-4 text-emerald-400" />
-          </button>
-        </div>
-
-        {/* Listicle View of Projects */}
-        <div className="space-y-4">
-          {projects.slice(0, 8).map((project) => {
-            const projectUrl = `/projects/${project.id}`;
-            return (
-              <div
-                key={project.id}
-                onClick={(e) => navigate(projectUrl, e)}
-                className="bg-white rounded-2xl border border-slate-200 p-5 hover:border-emerald-500/50 hover:shadow-lg transition-all flex flex-col md:flex-row items-start md:items-center justify-between gap-4 group cursor-pointer"
-              >
-                <div className="flex-1 min-w-0 space-y-2.5">
-                  {/* Header Row: Buyer Info, Category Badge & Urgency */}
-                  <div className="flex flex-wrap items-center gap-2.5 text-xs">
-                    <div className="flex items-center gap-2">
-                      <img 
-                        src={project.buyerAvatar || DEFAULT_AVATAR} 
-                        alt={project.buyerName} 
-                        className="w-6 h-6 rounded-full object-cover shrink-0 ring-1 ring-slate-200" 
-                        onError={(e) => {
-                          (e.target as HTMLImageElement).src = DEFAULT_AVATAR;
-                        }}
-                      />
-                      <span className="font-bold text-fiverr-dark text-xs">{project.buyerName}</span>
-                      <span className="text-[11px] text-slate-400 font-medium">
-                        {project.countryFlag} {project.location || 'Client'}
-                      </span>
-                    </div>
-
-                    <span className="text-slate-300">•</span>
-
-                    <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-md bg-slate-100 text-slate-700 uppercase tracking-wider">
-                      {project.category}
-                    </span>
-
-                    {project.isUrgent && (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-orange-100 text-orange-800">
-                        <Flame className="w-3 h-3 text-orange-500" /> Urgent
-                      </span>
-                    )}
-
-                    {project.featured && (
-                      <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-100 text-amber-800">
-                        <Sparkles className="w-3 h-3 text-amber-500" /> Featured
-                      </span>
-                    )}
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => handleNextSlide(gig.id, e)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-white/90 hover:bg-white text-slate-800 shadow-md flex items-center justify-center transition cursor-pointer"
+                      title="Next"
+                    >
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
                   </div>
 
-                  {/* Title */}
-                  <h3 className="font-bold text-base text-slate-900 text-fiverr-dark group-hover:text-emerald-600 transition-colors line-clamp-1 leading-snug">
-                    <a 
-                      href={projectUrl} 
-                      onClick={(e) => { e.stopPropagation(); navigate(projectUrl, e); }}
-                      className="text-slate-900 text-fiverr-dark hover:text-emerald-600 transition-colors block"
-                    >
-                      {project.title}
-                    </a>
-                  </h3>
+                  {/* Carousel Indicator Dots */}
+                  <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-1 z-10">
+                    <span className={`w-1.5 h-1.5 rounded-full transition-all ${currentSlide === 0 ? 'bg-white scale-125' : 'bg-white/50'}`} />
+                    <span className={`w-1.5 h-1.5 rounded-full transition-all ${currentSlide === 1 ? 'bg-white scale-125' : 'bg-white/50'}`} />
+                    <span className={`w-1.5 h-1.5 rounded-full transition-all ${currentSlide === 2 ? 'bg-white scale-125' : 'bg-white/50'}`} />
+                  </div>
+                </div>
 
-                  {/* Description */}
-                  <p className="text-xs text-fiverr-muted line-clamp-2 leading-relaxed">
-                    {project.description}
-                  </p>
-
-                  {/* Skills Chips & Project Stats */}
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    {project.skills && project.skills.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 items-center">
-                        {project.skills.slice(0, 4).map((skill, idx) => (
-                          <span key={idx} className="text-[10px] font-medium bg-slate-50 text-slate-600 px-2 py-0.5 rounded-md border border-slate-200/60">
-                            {skill}
-                          </span>
-                        ))}
-                        {project.skills.length > 4 && (
-                          <span className="text-[10px] text-slate-400 font-medium">+{project.skills.length - 4} more</span>
-                        )}
+                {/* Card Content */}
+                <div className="p-3.5 flex-1 flex flex-col justify-between">
+                  <div>
+                    {/* Seller Profile Header Row */}
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="relative">
+                        <Avatar 
+                          src={gig.freelancerAvatar} 
+                          name={gig.freelancerName} 
+                          size="xs"
+                        />
+                        {/* Green Online Dot */}
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 ring-1.5 ring-white absolute -bottom-0.5 -right-0.5 inline-block" />
                       </div>
-                    )}
+                      <div className="flex-1 min-w-0">
+                        <a 
+                          href={sellerUrl}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            navigate(sellerUrl, e);
+                          }}
+                          className="text-xs font-bold text-slate-800 hover:underline block truncate"
+                        >
+                          {gig.freelancerName}
+                        </a>
+                        <span className="text-[11px] text-slate-400 font-medium block truncate">
+                          {gig.freelancerLevel || 'Level 2 Seller'}
+                        </span>
+                      </div>
+                    </div>
 
-                    <div className="flex items-center gap-3 text-[11px] text-slate-400 font-medium ml-auto md:ml-0 pt-1 md:pt-0">
-                      <span className="flex items-center gap-1">
-                        <Send className="w-3 h-3 text-slate-400" />
-                        <strong className="text-slate-700 font-bold">{project.proposalsCount || 0}</strong> proposals
+                    {/* Gig Title: Exactly "I will ..." */}
+                    <h3 className="text-[14px] leading-[20px] font-normal text-slate-700 group-hover:text-emerald-600 transition-colors line-clamp-2 min-h-[40px] mb-2.5">
+                      <a
+                        href={gigUrl}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(gigUrl, e);
+                        }}
+                        className="text-slate-700 hover:text-emerald-600 transition-colors block"
+                      >
+                        {formatFiverrTitle(gig.title)}
+                      </a>
+                    </h3>
+
+                    {/* Rating & Review Count */}
+                    <div className="flex items-center gap-1 text-xs mb-3">
+                      <Star className="w-3.5 h-3.5 fill-slate-900 text-slate-900 shrink-0" />
+                      <span className="font-bold text-slate-900 font-mono tabular-nums">
+                        {(gig.rating || 5.0).toFixed(1)}
                       </span>
-                      <span>•</span>
-                      <span className="flex items-center gap-1">
+                      <span className="text-slate-400 font-normal">
+                        ({formatFiverrReviewCount(gig.reviewsCount || 1)})
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Card Footer: Delivery Badge & Pricing */}
+                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
+                    <div className="flex items-center gap-1 text-[11px] text-slate-400 font-medium">
+                      <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+                      <span>{gig.deliveryDays || 3}d delivery</span>
+                    </div>
+
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">From</span>
+                      <span className="text-[16px] font-bold text-slate-900 font-mono tabular-nums">${gig.price}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        /* ========================================================= */
+        /* FIVERR LISTICLE VIEW                                      */
+        /* ========================================================= */
+        <div className="space-y-4">
+          {sortedAndFilteredGigs.map(gig => {
+            const gigUrl = getGigUrl(gig);
+            const sellerUrl = `/${slugify(gig.freelancerName)}`;
+            const isLiked = likedGigIds.includes(gig.id);
+
+            return (
+              <div 
+                key={gig.id} 
+                onClick={(e) => navigate(gigUrl, e)}
+                className="bg-white rounded-xl border border-slate-200/90 p-4 hover:shadow-md transition-all flex flex-col md:flex-row items-center justify-between gap-5 group cursor-pointer"
+              >
+                <div className="flex items-center gap-4 w-full md:w-auto">
+                  <div className="relative w-40 sm:w-48 aspect-[16/10] rounded-lg overflow-hidden bg-slate-100 shrink-0">
+                    <GigImage 
+                      src={gig.image} 
+                      title={gig.title} 
+                      category={gig.category}
+                      className="w-full h-full group-hover:scale-105 transition-transform duration-300 object-cover" 
+                    />
+                    <button 
+                      type="button"
+                      onClick={(e) => handleToggleLike(gig.id, e)}
+                      className={`absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-xs ${
+                        isLiked 
+                          ? 'bg-white text-red-500 fill-red-500' 
+                          : 'bg-black/30 text-white hover:bg-white hover:text-red-500'
+                      }`}
+                      title={isLiked ? 'Remove from Saved' : 'Save to List'}
+                    >
+                      <Heart className={`w-3.5 h-3.5 ${isLiked ? 'fill-red-500 text-red-500' : ''}`} />
+                    </button>
+                  </div>
+
+                  <div className="space-y-1.5 flex-1 min-w-0">
+                    {/* Seller row */}
+                    <div className="flex items-center gap-2">
+                      <Avatar 
+                        src={gig.freelancerAvatar} 
+                        name={gig.freelancerName} 
+                        size="xs"
+                      />
+                      <a 
+                        href={sellerUrl}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(sellerUrl, e);
+                        }}
+                        className="text-xs font-bold text-slate-800 hover:underline truncate"
+                      >
+                        {gig.freelancerName}
+                      </a>
+                      <span className="text-[11px] text-slate-400">
+                        • {gig.freelancerLevel || 'Top Rated'}
+                      </span>
+                    </div>
+
+                    <h3 className="text-sm font-semibold text-slate-900 group-hover:text-emerald-600 transition-colors line-clamp-1">
+                      <a
+                        href={gigUrl}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigate(gigUrl, e);
+                        }}
+                        className="text-slate-900 hover:text-emerald-600 transition-colors block"
+                      >
+                        {formatFiverrTitle(gig.title)}
+                      </a>
+                    </h3>
+
+                    <div className="flex items-center gap-3 text-xs">
+                      <div className="flex items-center gap-1 font-bold text-slate-900">
+                        <Star className="w-3.5 h-3.5 fill-slate-900 text-slate-900" />
+                        <span>{(gig.rating || 5.0).toFixed(1)}</span>
+                        <span className="text-slate-400 font-normal">({formatFiverrReviewCount(gig.reviewsCount || 1)})</span>
+                      </div>
+                      <span className="text-slate-300">•</span>
+                      <span className="text-slate-500 text-[11px] flex items-center gap-1">
                         <Clock className="w-3 h-3 text-slate-400" />
-                        Est. {project.deadlineDays || 7} days
+                        {gig.deliveryDays || 3} days delivery
                       </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Right Side: Budget & Submit Proposal Button */}
                 <div className="flex md:flex-col items-center md:items-end justify-between w-full md:w-auto pt-3 md:pt-0 border-t md:border-t-0 border-slate-100 gap-3 shrink-0">
                   <div className="text-left md:text-right">
-                    <span className="text-[10px] text-fiverr-muted uppercase tracking-wider font-extrabold block">
-                      {project.projectType === 'hourly' ? 'Hourly Budget' : 'Fixed Budget'}
-                    </span>
-                    <span className="text-lg font-black text-emerald-600 font-mono">
-                      ${project.budgetMin} - ${project.budgetMax}
-                      {project.projectType === 'hourly' && <span className="text-xs font-normal text-slate-500">/hr</span>}
-                    </span>
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block font-medium">Starting at</span>
+                    <span className="text-xl font-bold text-slate-900 font-mono tabular-nums">${gig.price}</span>
                   </div>
-
-                  <button
+                  <button 
+                    type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      navigate(projectUrl, e);
+                      navigate(gigUrl, e);
                     }}
-                    className="px-4 py-2 bg-slate-900 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl transition-all shadow-xs shrink-0 cursor-pointer flex items-center gap-1.5"
+                    className="px-4 py-2 bg-slate-900 hover:bg-emerald-600 text-white font-semibold text-xs rounded-xl transition cursor-pointer"
                   >
-                    <span>Submit Proposal</span>
-                    <ChevronRight className="w-3.5 h-3.5" />
+                    View Details
                   </button>
                 </div>
               </div>
             );
           })}
         </div>
-      </div>
+      )}
+
+      {/* ========================================================= */}
+      {/* Featured Projects Section                                 */}
+      {/* ========================================================= */}
+      {projects && projects.length > 0 && (
+        <div className="mt-16 pt-12 border-t border-slate-200/80">
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-8">
+            <div>
+              <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
+                Active Buyer Projects & Bidding Opportunities
+              </h2>
+              <p className="text-xs text-slate-500 mt-1 max-w-2xl">
+                Explore open client requests with funded escrow budgets. Submit proposals, bid on custom work, and collaborate securely.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={(e) => navigate('/projects', e)}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition-all shadow-xs shrink-0 cursor-pointer"
+            >
+              <span>View All Projects ({projects.length})</span>
+              <ChevronRight className="w-4 h-4 text-emerald-400" />
+            </button>
+          </div>
+
+          {/* Listicle View of Projects */}
+          <div className="space-y-4">
+            {projects.slice(0, 8).map((project) => {
+              const projectUrl = `/projects/${project.id}`;
+              return (
+                <div
+                  key={project.id}
+                  onClick={(e) => navigate(projectUrl, e)}
+                  className="bg-white rounded-2xl border border-slate-200 p-5 hover:border-emerald-500/50 hover:shadow-lg transition-all flex flex-col md:flex-row items-start md:items-center justify-between gap-4 group cursor-pointer"
+                >
+                  <div className="flex-1 min-w-0 space-y-2.5">
+                    <div className="flex flex-wrap items-center gap-2.5 text-xs">
+                      <div className="flex items-center gap-2">
+                        <img 
+                          src={project.buyerAvatar || DEFAULT_AVATAR} 
+                          alt={project.buyerName} 
+                          className="w-6 h-6 rounded-full object-cover shrink-0 ring-1 ring-slate-200" 
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).src = DEFAULT_AVATAR;
+                          }}
+                        />
+                        <span className="font-bold text-slate-900 text-xs">{project.buyerName}</span>
+                        <span className="text-[11px] text-slate-400 font-medium">
+                          {project.countryFlag} {project.location || 'Client'}
+                        </span>
+                      </div>
+
+                      <span className="text-slate-300">•</span>
+
+                      <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-md bg-slate-100 text-slate-700 uppercase tracking-wider">
+                        {project.category}
+                      </span>
+
+                      {project.isUrgent && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-orange-100 text-orange-800">
+                          <Flame className="w-3 h-3 text-orange-500" /> Urgent
+                        </span>
+                      )}
+
+                      {project.featured && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-100 text-amber-800">
+                          <Sparkles className="w-3 h-3 text-amber-500" /> Featured
+                        </span>
+                      )}
+                    </div>
+
+                    <h3 className="font-bold text-base text-slate-900 group-hover:text-emerald-600 transition-colors line-clamp-1 leading-snug">
+                      <a 
+                        href={projectUrl} 
+                        onClick={(e) => { e.stopPropagation(); navigate(projectUrl, e); }}
+                        className="text-slate-900 hover:text-emerald-600 transition-colors block"
+                      >
+                        {project.title}
+                      </a>
+                    </h3>
+
+                    <p className="text-xs text-slate-500 line-clamp-2 leading-relaxed">
+                      {project.description}
+                    </p>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      {project.skills && project.skills.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 items-center">
+                          {project.skills.slice(0, 4).map((skill, idx) => (
+                            <span key={idx} className="text-[10px] font-medium bg-slate-50 text-slate-600 px-2 py-0.5 rounded-md border border-slate-200/60">
+                              {skill}
+                            </span>
+                          ))}
+                          {project.skills.length > 4 && (
+                            <span className="text-[10px] text-slate-400 font-medium">+{project.skills.length - 4} more</span>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex items-center gap-3 text-[11px] text-slate-400 font-medium ml-auto md:ml-0 pt-1 md:pt-0">
+                        <span className="flex items-center gap-1">
+                          <Send className="w-3 h-3 text-slate-400" />
+                          <strong className="text-slate-700 font-bold">{project.proposalsCount || 0}</strong> proposals
+                        </span>
+                        <span>•</span>
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-3 h-3 text-slate-400" />
+                          Est. {project.deadlineDays || 7} days
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex md:flex-col items-center md:items-end justify-between w-full md:w-auto pt-3 md:pt-0 border-t md:border-t-0 border-slate-100 gap-3 shrink-0">
+                    <div className="text-left md:text-right">
+                      <span className="text-[10px] text-slate-400 uppercase tracking-wider font-extrabold block">
+                        {project.projectType === 'hourly' ? 'Hourly Budget' : 'Fixed Budget'}
+                      </span>
+                      <span className="text-lg font-black text-emerald-600 font-mono">
+                        ${project.budgetMin} - ${project.budgetMax}
+                        {project.projectType === 'hourly' && <span className="text-xs font-normal text-slate-500">/hr</span>}
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(projectUrl, e);
+                      }}
+                      className="px-4 py-2 bg-slate-900 hover:bg-emerald-600 text-white font-bold text-xs rounded-xl transition-all shadow-xs shrink-0 cursor-pointer flex items-center gap-1.5"
+                    >
+                      <span>Submit Proposal</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

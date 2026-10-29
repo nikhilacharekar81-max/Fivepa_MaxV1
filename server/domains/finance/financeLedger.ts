@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_FEE_CONFIG, calculateOrderFees, percentOfCents, validateFeeConfig, type FeeConfig } from '../../../src/shared/fees.js';
+import { postgresStore } from '../../db/postgresStore.js';
+import { financialTransactionService } from './financial.service.js';
 
 // Authoritative Double-Entry Ledger & Financial Engine for WorkPerHour
 
@@ -210,6 +212,7 @@ export class FinanceLedgerEngine {
   private exceptions: ReconciliationException[] = [];
   private idempotencyKeys: Set<string> = new Set();
   private escrows: Map<string, EscrowRecord> = new Map();
+  private escrowLocks: Set<string> = new Set();
   private payouts: Map<string, PayoutRecord> = new Map();
   private opResults: Map<string, any> = new Map();
   private platformCommissionRate: number = DEFAULT_FEE_CONFIG.commissionPercent;
@@ -781,53 +784,163 @@ export class FinanceLedgerEngine {
     return { journal, escrow: esc, fees };
   }
 
+  private acquireEscrowLock(orderId: string): void {
+    if (this.escrowLocks.has(orderId)) {
+      throw new Error(`Escrow operation already in progress for order ${orderId}.`);
+    }
+    this.escrowLocks.add(orderId);
+  }
+
+  private releaseEscrowLock(orderId: string): void {
+    this.escrowLocks.delete(orderId);
+  }
+
+  // Authoritative PostgreSQL transactional escrow release, refund, and split operations
+  public async releaseEscrowTransactional(params: { orderId: string; actor: string; reason?: string; requestKey?: string; allowDisputeResolution?: boolean }, externalClient?: any) {
+    const run = async (client: any) => {
+      const ordRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [params.orderId]);
+      if (ordRes.rows.length > 0) {
+        const ordStatus = ordRes.rows[0].status;
+        if (ordStatus === 'completed' || ordStatus === 'cancelled') {
+          throw new Error(`Cannot release escrow: Order is already ${ordStatus}.`);
+        }
+      }
+      const escRes = await client.query('SELECT * FROM escrows WHERE order_id = $1 FOR UPDATE', [params.orderId]);
+      if (escRes.rows.length === 0) {
+        throw new Error(`No funded escrow exists for order ${params.orderId}.`);
+      }
+      const escRow = escRes.rows[0];
+      if ((escRow.status !== 'held' && escRow.status !== 'split') || Number(escRow.remaining) <= 0) {
+        throw new Error(`Escrow for order ${params.orderId} is already ${escRow.status}; nothing left to release.`);
+      }
+      return financialTransactionService.releaseOrderFunds({
+        orderId: params.orderId,
+        actor: params.actor,
+        reason: params.reason,
+        idempotencyKey: params.requestKey,
+        allowDisputeResolution: params.allowDisputeResolution
+      }, client);
+    };
+    if (externalClient) return run(externalClient);
+    return postgresStore.executeInTransaction(run);
+  }
+
+  public async refundEscrowTransactional(params: { orderId: string; amount?: number; reason: string; actor: string; requestKey?: string }, externalClient?: any) {
+    const run = async (client: any) => {
+      const ordRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [params.orderId]);
+      if (ordRes.rows.length > 0) {
+        const ordStatus = ordRes.rows[0].status;
+        if (ordStatus === 'completed' || ordStatus === 'cancelled') {
+          throw new Error(`Cannot refund escrow: Order is already ${ordStatus}.`);
+        }
+      }
+      const escRes = await client.query('SELECT * FROM escrows WHERE order_id = $1 FOR UPDATE', [params.orderId]);
+      if (escRes.rows.length === 0) {
+        throw new Error(`No funded escrow exists for order ${params.orderId}.`);
+      }
+      const escRow = escRes.rows[0];
+      if ((escRow.status !== 'held' && escRow.status !== 'split') || Number(escRow.remaining) <= 0) {
+        throw new Error(`Escrow for order ${params.orderId} is already ${escRow.status}; nothing left to refund.`);
+      }
+      return financialTransactionService.refundOrderFunds({
+        orderId: params.orderId,
+        amount: params.amount,
+        reason: params.reason,
+        actor: params.actor,
+        idempotencyKey: params.requestKey
+      }, client);
+    };
+    if (externalClient) return run(externalClient);
+    return postgresStore.executeInTransaction(run);
+  }
+
+  public async resolveEscrowSplitTransactional(params: { orderId: string; refundAmount: number; reason: string; actor: string; requestKey?: string }, externalClient?: any) {
+    return financialTransactionService.resolveEscrowSplit({
+      orderId: params.orderId,
+      refundAmount: params.refundAmount,
+      reason: params.reason,
+      actor: params.actor,
+      idempotencyKey: params.requestKey
+    }, externalClient);
+  }
+
   // Releases everything still held for the order: net to seller, commission to the platform.
   // Can only succeed once per order; repeat calls throw and change nothing.
   public releaseEscrow(params: { orderId: string; actor: string; reason?: string; requestKey?: string }): { journal: LedgerJournal; freelancerNet: number; platformFee: number } {
     this.ensureOperational();
     const cached = this.replay<{ journal: LedgerJournal; freelancerNet: number; platformFee: number }>(params.requestKey);
     if (cached) return cached;
-    const esc = this.escrows.get(params.orderId);
-    if (!esc) throw new Error(`No funded escrow exists for order ${params.orderId}.`);
-    if (esc.status !== 'held' || esc.remaining <= 0) throw new Error(`Escrow for order ${params.orderId} is already ${esc.status}; nothing left to release.`);
-    const seller = this.requireWallet(esc.sellerId);
-    if (seller.status === 'frozen') throw new Error('Seller wallet is frozen; release blocked until it is unfrozen.');
-    const buyer = this.wallets.get(esc.buyerId);
 
-    const grossCents = Math.round(esc.remaining * 100);
-    const commissionRate = esc.commissionPercent ?? this.platformCommissionRate; // rate locked in at funding
-    const feeCents = percentOfCents(grossCents, commissionRate);
-    const gross = grossCents / 100;
-    const platformFee = feeCents / 100;
-    const freelancerNet = (grossCents - feeCents) / 100;
+    this.acquireEscrowLock(params.orderId);
+    try {
+      const rechecked = this.replay<{ journal: LedgerJournal; freelancerNet: number; platformFee: number }>(params.requestKey);
+      if (rechecked) return rechecked;
 
-    const entries: Array<{ accountCode: string; debit: number; credit: number; currency: string; description: string; userId?: string; orderId?: string }> = [
-      { accountCode: '2030', debit: gross, credit: 0, currency: DEFAULT_CURRENCY, description: `Released funds held in escrow for Order #${params.orderId}`, orderId: params.orderId },
-      { accountCode: this.walletAccount(seller, 'freelancer'), debit: 0, credit: freelancerNet, currency: DEFAULT_CURRENCY, description: `Credited net earnings to ${seller.userName} (after ${commissionRate}% commission)`, userId: seller.userId, orderId: params.orderId }
-    ];
-    if (platformFee > 0) {
-      entries.push({ accountCode: '4010', debit: 0, credit: platformFee, currency: DEFAULT_CURRENCY, description: `${commissionRate}% platform commission on Order #${params.orderId}`, orderId: params.orderId });
+      const esc = this.escrows.get(params.orderId);
+      if (!esc) throw new Error(`No funded escrow exists for order ${params.orderId}.`);
+      if ((esc.status !== 'held' && esc.status !== 'split') || esc.remaining <= 0) {
+        throw new Error(`Escrow for order ${params.orderId} is already ${esc.status}; nothing left to release.`);
+      }
+      const seller = this.requireWallet(esc.sellerId);
+      if (seller.status === 'frozen') throw new Error('Seller wallet is frozen; release blocked until it is unfrozen.');
+      const buyer = this.wallets.get(esc.buyerId);
+
+      const prevRemaining = esc.remaining;
+      const prevReleasedGross = esc.releasedGross;
+      const prevReleaseSeq = esc.releaseSeq || 0;
+      const prevStatus = esc.status;
+      const prevBuyerHold = buyer ? buyer.fundsOnHold : 0;
+
+      const grossCents = Math.round(prevRemaining * 100);
+      const commissionRate = esc.commissionPercent ?? this.platformCommissionRate; // rate locked in at funding
+      const feeCents = percentOfCents(grossCents, commissionRate);
+      const gross = grossCents / 100;
+      const platformFee = feeCents / 100;
+      const freelancerNet = (grossCents - feeCents) / 100;
+
+      const nextReleaseSeq = prevReleaseSeq + 1;
+      const relIdempKey = nextReleaseSeq === 1 ? `IDEMP-REL-${params.orderId}` : `IDEMP-REL-${params.orderId}-${nextReleaseSeq}`;
+      const relRef = nextReleaseSeq === 1 ? `ORD-${params.orderId}-RELEASE` : `ORD-${params.orderId}-RELEASE-${nextReleaseSeq}`;
+
+      // Atomically consume eligible escrow balance before posting journal entries
+      esc.remaining = 0;
+      esc.releasedGross = FinanceLedgerEngine.round(prevReleasedGross + gross);
+      esc.releaseSeq = nextReleaseSeq;
+      esc.status = esc.refundedTotal > 0 ? 'split' : 'released';
+      if (buyer) buyer.fundsOnHold = FinanceLedgerEngine.round(Math.max(0, prevBuyerHold - gross));
+
+      const entries: Array<{ accountCode: string; debit: number; credit: number; currency: string; description: string; userId?: string; orderId?: string }> = [
+        { accountCode: '2030', debit: gross, credit: 0, currency: DEFAULT_CURRENCY, description: `Released funds held in escrow for Order #${params.orderId}`, orderId: params.orderId },
+        { accountCode: this.walletAccount(seller, 'freelancer'), debit: 0, credit: freelancerNet, currency: DEFAULT_CURRENCY, description: `Credited net earnings to ${seller.userName} (after ${commissionRate}% commission)`, userId: seller.userId, orderId: params.orderId }
+      ];
+      if (platformFee > 0) {
+        entries.push({ accountCode: '4010', debit: 0, credit: platformFee, currency: DEFAULT_CURRENCY, description: `${commissionRate}% platform commission on Order #${params.orderId}`, orderId: params.orderId });
+      }
+
+      let journal: LedgerJournal;
+      try {
+        journal = this.postJournal({
+          reference: relRef,
+          description: `Escrow release for Order #${params.orderId} (${esc.orderTitle})`,
+          eventType: 'ESCROW_RELEASED_TO_FREELANCER',
+          idempotencyKey: relIdempKey,
+          actor: params.actor,
+          entries
+        });
+      } catch (err) {
+        esc.remaining = prevRemaining;
+        esc.releasedGross = prevReleasedGross;
+        esc.releaseSeq = prevReleaseSeq;
+        esc.status = prevStatus;
+        if (buyer) buyer.fundsOnHold = prevBuyerHold;
+        throw err;
+      }
+
+      this.audit({ actor: params.actor, action: 'ESCROW_RELEASED', target: `Order #${params.orderId}`, reason: params.reason || `Released $${freelancerNet.toFixed(2)} net to freelancer, $${platformFee.toFixed(2)} platform commission`, journalId: journal.id });
+      return this.remember(params.requestKey, { journal, freelancerNet, platformFee });
+    } finally {
+      this.releaseEscrowLock(params.orderId);
     }
-    const nextReleaseSeq = (esc.releaseSeq || 0) + 1;
-    const relIdempKey = nextReleaseSeq === 1 ? `IDEMP-REL-${params.orderId}` : `IDEMP-REL-${params.orderId}-${nextReleaseSeq}`;
-    const relRef = nextReleaseSeq === 1 ? `ORD-${params.orderId}-RELEASE` : `ORD-${params.orderId}-RELEASE-${nextReleaseSeq}`;
-
-    const journal = this.postJournal({
-      reference: relRef,
-      description: `Escrow release for Order #${params.orderId} (${esc.orderTitle})`,
-      eventType: 'ESCROW_RELEASED_TO_FREELANCER',
-      idempotencyKey: relIdempKey,
-      actor: params.actor,
-      entries
-    });
-
-    if (buyer) buyer.fundsOnHold = FinanceLedgerEngine.round(Math.max(0, buyer.fundsOnHold - gross));
-    esc.releasedGross = FinanceLedgerEngine.round(esc.releasedGross + gross);
-    esc.remaining = 0;
-    esc.releaseSeq = nextReleaseSeq;
-    esc.status = esc.refundedTotal > 0 ? 'split' : 'released';
-    this.audit({ actor: params.actor, action: 'ESCROW_RELEASED', target: `Order #${params.orderId}`, reason: params.reason || `Released $${freelancerNet.toFixed(2)} net to freelancer, $${platformFee.toFixed(2)} platform commission`, journalId: journal.id });
-    return this.remember(params.requestKey, { journal, freelancerNet, platformFee });
   }
 
   // Refunds all (default) or part of what is still held back to the buyer wallet.
@@ -835,46 +948,83 @@ export class FinanceLedgerEngine {
     this.ensureOperational();
     const cached = this.replay<{ journal: LedgerJournal; buyerWallet: UserWallet; refunded: number; feesRefunded: number; remaining: number }>(params.requestKey);
     if (cached) return cached;
-    const why = FinanceLedgerEngine.assertReason(params.reason, 'A refund reason');
-    const esc = this.escrows.get(params.orderId);
-    if (!esc) throw new Error(`No funded escrow exists for order ${params.orderId}.`);
-    if (esc.status !== 'held' || esc.remaining <= 0) throw new Error(`Escrow for order ${params.orderId} is already ${esc.status}; nothing left to refund.`);
-    const amount = params.amount === undefined ? esc.remaining : FinanceLedgerEngine.assertMoney(params.amount, 'Refund amount');
-    if (amount > esc.remaining) throw new Error(`Refund ($${amount.toFixed(2)}) exceeds the escrow still held ($${esc.remaining.toFixed(2)}).`);
-    const buyer = this.requireWallet(esc.buyerId);
-    if (buyer.status === 'frozen') throw new Error('Buyer wallet is frozen; refund blocked until it is unfrozen.');
 
-    // When the refunds add up to the whole order (nothing was released), the client fees are returned too.
-    // Partial refunds and dispute splits keep the fees, because the order is still partly delivered.
-    const completesFullRefund = FinanceLedgerEngine.round(esc.refundedTotal + amount) === esc.amount && esc.releasedGross === 0;
-    const refundFees = this.refundClientFeesOnFullRefund && completesFullRefund && !esc.feesRefunded;
-    const serviceFeeBack = refundFees ? esc.serviceFee : 0;
-    const smallFeeBack = refundFees ? esc.smallOrderFee : 0;
-    const feesBack = FinanceLedgerEngine.round(serviceFeeBack + smallFeeBack);
+    this.acquireEscrowLock(params.orderId);
+    try {
+      const rechecked = this.replay<{ journal: LedgerJournal; buyerWallet: UserWallet; refunded: number; feesRefunded: number; remaining: number }>(params.requestKey);
+      if (rechecked) return rechecked;
 
-    const refundEntries: Array<{ accountCode: string; debit: number; credit: number; currency: string; description: string; userId?: string; orderId?: string }> = [
-      { accountCode: '2030', debit: amount, credit: 0, currency: DEFAULT_CURRENCY, description: `Debited escrow liability for refunded Order #${params.orderId}`, orderId: params.orderId }
-    ];
-    if (serviceFeeBack > 0) refundEntries.push({ accountCode: '4020', debit: serviceFeeBack, credit: 0, currency: DEFAULT_CURRENCY, description: `Reversed client service fee on fully refunded Order #${params.orderId}`, orderId: params.orderId });
-    if (smallFeeBack > 0) refundEntries.push({ accountCode: '4030', debit: smallFeeBack, credit: 0, currency: DEFAULT_CURRENCY, description: `Reversed small-order fee on fully refunded Order #${params.orderId}`, orderId: params.orderId });
-    refundEntries.push({ accountCode: this.walletAccount(buyer, 'buyer'), debit: 0, credit: FinanceLedgerEngine.round(amount + feesBack), currency: DEFAULT_CURRENCY, description: `Restored available wallet balance for ${buyer.userName}${feesBack > 0 ? ' (including client fees)' : ''}`, userId: buyer.userId, orderId: params.orderId });
+      const why = FinanceLedgerEngine.assertReason(params.reason, 'A refund reason');
+      const esc = this.escrows.get(params.orderId);
+      if (!esc) throw new Error(`No funded escrow exists for order ${params.orderId}.`);
+      if ((esc.status !== 'held' && esc.status !== 'split') || esc.remaining <= 0) {
+        throw new Error(`Escrow for order ${params.orderId} is already ${esc.status}; nothing left to refund.`);
+      }
+      const amount = params.amount === undefined ? esc.remaining : FinanceLedgerEngine.assertMoney(params.amount, 'Refund amount');
+      if (amount > esc.remaining) throw new Error(`Refund ($${amount.toFixed(2)}) exceeds the escrow still held ($${esc.remaining.toFixed(2)}).`);
+      const buyer = this.requireWallet(esc.buyerId);
+      if (buyer.status === 'frozen') throw new Error('Buyer wallet is frozen; refund blocked until it is unfrozen.');
 
-    const journal = this.postJournal({
-      reference: `ORD-${params.orderId}-REFUND-${esc.refundSeq + 1}`,
-      description: `Escrow refund to Buyer for Order #${params.orderId} (${esc.orderTitle}): ${why}`,
-      eventType: feesBack > 0 ? 'ESCROW_REFUNDED_WITH_FEES' : 'ESCROW_REFUNDED_TO_BUYER',
-      idempotencyKey: `IDEMP-REF-${params.orderId}-${esc.refundSeq + 1}`,
-      actor: params.actor,
-      entries: refundEntries
-    });
-    if (feesBack > 0) esc.feesRefunded = true;
-    buyer.fundsOnHold = FinanceLedgerEngine.round(Math.max(0, buyer.fundsOnHold - amount));
-    esc.remaining = FinanceLedgerEngine.round(esc.remaining - amount);
-    esc.refundedTotal = FinanceLedgerEngine.round(esc.refundedTotal + amount);
-    esc.refundSeq += 1;
-    if (esc.remaining === 0) esc.status = 'refunded';
-    this.audit({ actor: params.actor, action: 'ESCROW_REFUNDED', target: `Order #${params.orderId}`, reason: why, journalId: journal.id });
-    return this.remember(params.requestKey, { journal, buyerWallet: buyer, refunded: amount, feesRefunded: feesBack, remaining: esc.remaining });
+      const prevRemaining = esc.remaining;
+      const prevRefundedTotal = esc.refundedTotal;
+      const prevRefundSeq = esc.refundSeq;
+      const prevStatus = esc.status;
+      const prevFeesRefunded = esc.feesRefunded;
+      const prevBuyerHold = buyer.fundsOnHold;
+
+      // When the refunds add up to the whole order (nothing was released), the client fees are returned too.
+      // Partial refunds and dispute splits keep the fees, because the order is still partly delivered.
+      const completesFullRefund = FinanceLedgerEngine.round(prevRefundedTotal + amount) === esc.amount && esc.releasedGross === 0;
+      const refundFees = this.refundClientFeesOnFullRefund && completesFullRefund && !prevFeesRefunded;
+      const serviceFeeBack = refundFees ? esc.serviceFee : 0;
+      const smallFeeBack = refundFees ? esc.smallOrderFee : 0;
+      const feesBack = FinanceLedgerEngine.round(serviceFeeBack + smallFeeBack);
+
+      const nextSeq = prevRefundSeq + 1;
+      const newRemaining = FinanceLedgerEngine.round(prevRemaining - amount);
+
+      // Atomically consume refunded escrow balance before posting journal entries
+      if (feesBack > 0) esc.feesRefunded = true;
+      buyer.fundsOnHold = FinanceLedgerEngine.round(Math.max(0, prevBuyerHold - amount));
+      esc.remaining = newRemaining;
+      esc.refundedTotal = FinanceLedgerEngine.round(prevRefundedTotal + amount);
+      esc.refundSeq = nextSeq;
+      if (newRemaining === 0) {
+        esc.status = esc.releasedGross > 0 ? 'split' : 'refunded';
+      }
+
+      const refundEntries: Array<{ accountCode: string; debit: number; credit: number; currency: string; description: string; userId?: string; orderId?: string }> = [
+        { accountCode: '2030', debit: amount, credit: 0, currency: DEFAULT_CURRENCY, description: `Debited escrow liability for refunded Order #${params.orderId}`, orderId: params.orderId }
+      ];
+      if (serviceFeeBack > 0) refundEntries.push({ accountCode: '4020', debit: serviceFeeBack, credit: 0, currency: DEFAULT_CURRENCY, description: `Reversed client service fee on fully refunded Order #${params.orderId}`, orderId: params.orderId });
+      if (smallFeeBack > 0) refundEntries.push({ accountCode: '4030', debit: smallFeeBack, credit: 0, currency: DEFAULT_CURRENCY, description: `Reversed small-order fee on fully refunded Order #${params.orderId}`, orderId: params.orderId });
+      refundEntries.push({ accountCode: this.walletAccount(buyer, 'buyer'), debit: 0, credit: FinanceLedgerEngine.round(amount + feesBack), currency: DEFAULT_CURRENCY, description: `Restored available wallet balance for ${buyer.userName}${feesBack > 0 ? ' (including client fees)' : ''}`, userId: buyer.userId, orderId: params.orderId });
+
+      let journal: LedgerJournal;
+      try {
+        journal = this.postJournal({
+          reference: `ORD-${params.orderId}-REFUND-${nextSeq}`,
+          description: `Escrow refund to Buyer for Order #${params.orderId} (${esc.orderTitle}): ${why}`,
+          eventType: feesBack > 0 ? 'ESCROW_REFUNDED_WITH_FEES' : 'ESCROW_REFUNDED_TO_BUYER',
+          idempotencyKey: `IDEMP-REF-${params.orderId}-${nextSeq}`,
+          actor: params.actor,
+          entries: refundEntries
+        });
+      } catch (err) {
+        esc.feesRefunded = prevFeesRefunded;
+        buyer.fundsOnHold = prevBuyerHold;
+        esc.remaining = prevRemaining;
+        esc.refundedTotal = prevRefundedTotal;
+        esc.refundSeq = prevRefundSeq;
+        esc.status = prevStatus;
+        throw err;
+      }
+
+      this.audit({ actor: params.actor, action: 'ESCROW_REFUNDED', target: `Order #${params.orderId}`, reason: why, journalId: journal.id });
+      return this.remember(params.requestKey, { journal, buyerWallet: buyer, refunded: amount, feesRefunded: feesBack, remaining: esc.remaining });
+    } finally {
+      this.releaseEscrowLock(params.orderId);
+    }
   }
 
   // Dispute split: refund `refundAmount` to the buyer and release the rest to the seller.
@@ -882,7 +1032,7 @@ export class FinanceLedgerEngine {
     const why = FinanceLedgerEngine.assertReason(params.reason, 'A resolution reason');
     const esc = this.escrows.get(params.orderId);
     if (!esc) throw new Error(`No funded escrow exists for order ${params.orderId}.`);
-    if (esc.status !== 'held') throw new Error(`Escrow for order ${params.orderId} is already ${esc.status}.`);
+    if (esc.status !== 'held' && esc.status !== 'split') throw new Error(`Escrow for order ${params.orderId} is already ${esc.status}.`);
     const refund = FinanceLedgerEngine.assertMoney(params.refundAmount, 'Refund amount');
     if (refund >= esc.remaining) throw new Error('For a split, the refund must be less than the escrow held. Use a full refund instead.');
     if (this.requireWallet(esc.buyerId).status === 'frozen') throw new Error('Buyer wallet is frozen.');
@@ -1283,6 +1433,7 @@ export class FinanceLedgerEngine {
     this.exceptions = [];
     this.idempotencyKeys.clear();
     this.escrows.clear();
+    this.escrowLocks.clear();
     this.payouts.clear();
     this.opResults.clear();
     this.wallets.clear();

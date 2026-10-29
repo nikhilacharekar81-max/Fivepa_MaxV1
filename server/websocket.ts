@@ -67,6 +67,12 @@ export function initWebSocketServer(server: Server): WebSocketServer {
   wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
   server.on('upgrade', (request, socket, head) => {
+    const protocol = String(request?.headers?.['sec-websocket-protocol'] || '');
+    if (protocol.includes('vite-hmr')) {
+      socket.destroy();
+      return;
+    }
+
     const ip = resolveWsClientIp(request);
     if (!checkWsIpRateLimit(ip)) {
       console.warn(`[Security] WebSocket connection attempt from ${ip} rejected: rate limit exceeded.`);

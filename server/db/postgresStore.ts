@@ -1,5 +1,6 @@
 import pkg from 'pg';
 import { PGlite } from '@electric-sql/pglite';
+import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -117,6 +118,8 @@ declare global {
   var _appMockPool: any | undefined;
 }
 
+const txAsyncStorage = new AsyncLocalStorage<{ client: any; depth: number }>();
+
 class PGlitePool {
   private pglite: PGlite;
   private isReadyPromise: Promise<void>;
@@ -169,6 +172,21 @@ class PGlitePool {
 
   async connect() {
     await this.isReadyPromise;
+    const activeTx = txAsyncStorage.getStore();
+    if (activeTx) {
+      const spName = `sp_nested_${++activeTx.depth}`;
+      return {
+        query: async (text: string, params?: any[]) => {
+          const upper = text.trim().toUpperCase();
+          if (upper === 'BEGIN') return this.query(`SAVEPOINT ${spName}`);
+          if (upper === 'COMMIT') return this.query(`RELEASE SAVEPOINT ${spName}`);
+          if (upper === 'ROLLBACK') return this.query(`ROLLBACK TO SAVEPOINT ${spName}`);
+          return this.query(text, params);
+        },
+        release: () => {}
+      };
+    }
+
     let releaseLock!: () => void;
     const prevLock = this.txLock;
     this.txLock = new Promise<void>(resolve => {
@@ -177,11 +195,22 @@ class PGlitePool {
     await prevLock;
 
     let released = false;
+    const safetyTimer = setTimeout(() => {
+      if (!released) {
+        released = true;
+        releaseLock();
+      }
+    }, 30000);
+    if (typeof (safetyTimer as any).unref === 'function') {
+      (safetyTimer as any).unref();
+    }
+
     return {
       query: async (text: string, params?: any[]) => this.query(text, params),
       release: () => {
         if (!released) {
           released = true;
+          clearTimeout(safetyTimer);
           releaseLock();
         }
       }
@@ -270,14 +299,28 @@ export class PostgresStore {
   }
 
   public async executeInTransaction<T>(fn: (client: pkg.PoolClient) => Promise<T>): Promise<T> {
+    const existingTx = txAsyncStorage.getStore();
+    if (existingTx) {
+      const spName = `sp_tx_${++existingTx.depth}`;
+      await existingTx.client.query(`SAVEPOINT ${spName}`);
+      try {
+        const result = await fn(existingTx.client);
+        await existingTx.client.query(`RELEASE SAVEPOINT ${spName}`);
+        return result;
+      } catch (err) {
+        try { await existingTx.client.query(`ROLLBACK TO SAVEPOINT ${spName}`); } catch {}
+        throw err;
+      }
+    }
+
     const client = await this.getPool().connect();
     try {
       await client.query('BEGIN');
-      const result = await fn(client);
+      const result = await txAsyncStorage.run({ client, depth: 0 }, () => fn(client));
       await client.query('COMMIT');
       return result;
     } catch (err) {
-      await client.query('ROLLBACK');
+      try { await client.query('ROLLBACK'); } catch {}
       throw err;
     } finally {
       client.release();
@@ -437,6 +480,10 @@ export class PostgresStore {
   // --- MARKETPLACE: GIGS, PROJECTS, PROPOSALS, CLARIFICATIONS (Delegated to MarketplaceRepo) ---
   async saveGigs(gigs: Gig[]): Promise<void> {
     return this.marketplaceRepo.saveGigs(gigs);
+  }
+
+  async updateGig(id: string, updates: Record<string, any>, expectedFreelancerId?: string): Promise<Gig | null> {
+    return this.marketplaceRepo.updateGig(id, updates, expectedFreelancerId);
   }
 
   async listGigs(): Promise<Gig[]> {
@@ -659,8 +706,8 @@ export class PostgresStore {
   }
 
   // --- NOTIFICATIONS (Delegated to NotificationsRepo) ---
-  async saveNotification(n: Notification): Promise<{ inserted: boolean; duplicate?: boolean }> {
-    return this.notificationsRepo.saveNotification(n);
+  async saveNotification(n: Notification, client?: any): Promise<{ inserted: boolean; duplicate?: boolean }> {
+    return this.notificationsRepo.saveNotification(n, client);
   }
 
   async listNotificationsForUser(userId: string): Promise<Notification[]> {

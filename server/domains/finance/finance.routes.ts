@@ -42,14 +42,18 @@ import {
   releaseOrderFunds,
   refundOrderFunds,
   fundOrderEscrowWithEvent,
+  topUpOrderEscrowWithEvent,
+  recordOrder,
   syncUserBalances,
   ensureWallet,
   LATE_ORDER_PROTECTION_HOURS,
   registerAuditLog,
-  validateOrderReleasePreconditions
+  validateOrderReleasePreconditions,
+  parseDeadlineInstant
 } from '../../services/orderService.js';
+import { siteSettings } from '../../../src/server/siteSettings.js';
 import { broadcastMessage } from '../../websocket.js';
-import { recordMessage } from '../../services/messagingService.js';
+import { recordMessage, emitSystemEvent } from '../../services/messagingService.js';
 import { closeActiveDispute } from '../../services/disputeService.js';
 import {
   handlePayoutRequest,
@@ -209,6 +213,8 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     
     const activeEscrowStatuses = ['funded_in_escrow', 'in_progress', 'delivered', 'revision', 'disputed', 'draft_review', 'work_in_progress'];
     const userOrders = await store.listOrdersForUser(userId);
+    const allUsers = await store.listUsers();
+    const userMap = new Map(allUsers.map(usr => [usr.id, usr]));
 
     const buyerEscrowOrders = userOrders.filter(o => o.buyerId === userId && activeEscrowStatuses.includes(o.status));
     const buyerEscrowAmount = await financialRepository.getBuyerHeldEscrowTotal(userId);
@@ -216,7 +222,47 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     const freelancerEscrowOrders = userOrders.filter(o => o.sellerId === userId && activeEscrowStatuses.includes(o.status));
     const freelancerEscrowAmount = await financialRepository.getFreelancerHeldEscrowTotal(userId);
 
+    const enrichOrderFinancialRow = async (o: Order) => {
+      const esc = await financialRepository.getEscrow(o.id);
+      const offers = await store.listOffersForOrder(o.id);
+      const inEscrow = esc
+        ? Number(esc.remaining || 0)
+        : (activeEscrowStatuses.includes(o.status) ? Number(o.amount || 0) : 0);
+      const escrowFunded = esc ? Number(esc.amount || 0) : ((o.status as string) !== 'payment_pending' && (o.status as string) !== 'pending' ? Number(o.amount || 0) : 0);
+      const depositRequests = offers.filter(off => (off.kind === 'deposit' || off.kind === 'proposal') && off.status === 'pending');
+      const pendingInvoices = offers.filter(off => off.kind === 'invoice' && off.status === 'pending');
+      const paidInvoiceOffers = offers.filter(off => off.kind === 'invoice' && (off.status === 'paid' || off.status === 'accepted'));
+      const paidOffersSum = paidInvoiceOffers.reduce((s, off) => s + Number(off.amount || 0), 0);
+      const releasedAmount = esc ? Number(esc.releasedGross || 0) : (o.status === 'completed' ? Number(o.amount || 0) : 0);
+      const paidInvoiceAmount = Math.max(paidOffersSum, releasedAmount, o.status === 'completed' ? Number(o.amount || 0) : 0);
+      const hasPaidInvoice = o.status === 'completed' || paidInvoiceOffers.length > 0 || releasedAmount > 0;
+      const buyerUser = userMap.get(o.buyerId);
+      const sellerUser = userMap.get(o.sellerId);
+
+      return {
+        ...enrichOrderWithServiceInfo(o),
+        buyerName: buyerUser?.name || (o as any).buyerName || o.buyerUsername || 'Buyer',
+        sellerName: sellerUser?.name || (o as any).sellerName || o.sellerUsername || 'Freelancer',
+        inEscrow,
+        escrowFunded,
+        depositRequests,
+        pendingInvoices,
+        paidInvoiceAmount,
+        hasPaidInvoice
+      };
+    };
+
+    const buyerAllOrders = userOrders.filter(o => o.buyerId === userId && o.status !== 'cancelled');
+    const freelancerAllOrders = userOrders.filter(o => o.sellerId === userId && o.status !== 'cancelled');
+
+    const [buyerOrdersSummary, freelancerOrdersSummary] = await Promise.all([
+      Promise.all(buyerAllOrders.map(enrichOrderFinancialRow)),
+      Promise.all(freelancerAllOrders.map(enrichOrderFinancialRow))
+    ]);
+
     const currentYearMonth = new Date().toISOString().slice(0, 7);
+    const twoMonthsAgoDate = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+
     const userPaidOrders = userOrders.filter(o => o.buyerId === userId && ['funded_in_escrow', 'in_progress', 'delivered', 'revision', 'disputed', 'completed'].includes(o.status));
     const paidToDate = userPaidOrders.reduce((sum, o) => sum + (o.amount || 0), 0);
     const paidThisMonth = userPaidOrders.filter(o => (o.createdAt || '').startsWith(currentYearMonth)).reduce((sum, o) => sum + (o.amount || 0), 0);
@@ -224,11 +270,17 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     const userEarnedOrders = userOrders.filter(o => o.sellerId === userId && o.status === 'completed');
     const earnedToDate = Number(u?.earned || 0) || userEarnedOrders.reduce((sum, o) => sum + financeLedger.quoteOrder(o.amount).freelancerNet, 0);
     const earnedThisMonth = userEarnedOrders.filter(o => (o.createdAt || '').startsWith(currentYearMonth)).reduce((sum, o) => sum + financeLedger.quoteOrder(o.amount).freelancerNet, 0);
+    const earnedPastTwoMonths = userEarnedOrders
+      .filter(o => (o.completedAt || o.createdAt || '') >= twoMonthsAgoDate)
+      .reduce((sum, o) => sum + financeLedger.quoteOrder(o.amount).freelancerNet, 0);
 
     let userMethods: PaymentMethodRecord[] = [];
     try {
       userMethods = await store.listPaymentMethodsForUser(userId);
     } catch {}
+
+    const commSettings = siteSettings.getSettings()?.commission;
+    const clearingPeriodDays = Number(commSettings?.escrowProtectionDays) || 14;
 
     res.json({
       userId,
@@ -237,17 +289,167 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
       freelancerEscrowAmount,
       buyerEscrowOrders,
       freelancerEscrowOrders,
+      buyerOrdersSummary,
+      freelancerOrdersSummary,
       paidToDate,
       paidThisMonth,
       earnedToDate,
       earnedThisMonth,
-      earnedPastTwoMonths: earnedThisMonth,
-      clearingPeriodDays: 14,
+      earnedPastTwoMonths,
+      clearingPeriodDays,
       paymentMethods: userMethods,
       walletStatus: wallet?.status || 'active'
     });
   } catch (err: any) {
     res.status(500).json(formatApiError(err));
+  }
+});
+
+router.post('/payments/escrow/deposit', requireAuth, requireFinancialActiveStatus, rateLimit(15, 60_000), async (req: Request, res: Response) => {
+  const { orderId, amount: rawAmount, title: rawTitle, fundSource = 'wallet', idempotencyKey: rawKey } = req.body || {};
+  if (!orderId || typeof orderId !== 'string') {
+    return res.status(400).json({ error: 'Order ID is required to fund escrow.' });
+  }
+  if (!tryAcquireOrderLock(orderId, res)) return;
+  try {
+    const authUserId = (req as any).authenticatedUserId;
+    const caller = await store.getUser(authUserId);
+    if (!caller) return res.status(401).json({ error: 'Unauthorized' });
+
+    const order = await store.getOrder(orderId);
+    if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+    const isAdmin = caller.role === 'admin' || caller.role === 'super_admin';
+    if (!isAdmin && order.buyerId !== authUserId) {
+      return res.status(403).json({ error: 'Forbidden: Only the buyer of this order can deposit into its escrow.' });
+    }
+
+    const amount = Math.round(Number(rawAmount) * 100) / 100;
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'Please enter a valid escrow deposit amount greater than $0.00.' });
+    }
+    if (amount > 100000) {
+      return res.status(400).json({ error: 'Amount exceeds maximum limit ($100,000.00).' });
+    }
+
+    await ensureWallet(order.buyerId);
+    await ensureWallet(order.sellerId);
+
+    const idempotencyKey = String(rawKey || `escrow-dep-${order.id}-${Date.now()}`);
+    const walletBal = await financialRepository.getWalletBalance(order.buyerId);
+
+    // If buyer selected instant card/gateway deposit or needs wallet top-up when simulated deposits are enabled
+    if (fundSource === 'instant_deposit' || (walletBal < amount && req.body?.autoDeposit === true)) {
+      if (!areSimulatedDepositsAllowed()) {
+        return res.status(400).json({ error: 'Insufficient wallet balance. Please deposit funds first.' });
+      }
+      const shortfall = fundSource === 'instant_deposit' ? amount : Math.max(0, Number((amount - walletBal).toFixed(2)));
+      if (shortfall > 0) {
+        if (shortfall > 5000) {
+          return res.status(400).json({ error: 'Simulated instant deposits are limited to $5,000.00 per transaction.' });
+        }
+        await financialTransactionService.creditDeposit({
+          userId: order.buyerId,
+          amount: shortfall,
+          actor: `${caller.name} (Escrow Instant Deposit)`,
+          idempotencyKey: `SIM-ESC-${order.buyerId}-${idempotencyKey}`
+        });
+      }
+    }
+
+    const existingEscrow = await financialRepository.getEscrow(order.id);
+    const today = new Date().toISOString().split('T')[0];
+    const protectionDays = siteSettings.getSettings()?.commission?.escrowProtectionDays || 14;
+    const protectionEnd = new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0];
+    const depositTitle = (typeof rawTitle === 'string' && rawTitle.trim()) ? rawTitle.trim() : `Escrow deposit for ${order.title}`;
+
+    let targetOrder = order;
+
+    if (!existingEscrow && ['payment_pending', 'pending', 'in_progress'].includes(order.status)) {
+      await fundOrderEscrowWithEvent({
+        orderId: order.id,
+        orderTitle: order.title,
+        amount,
+        buyerId: order.buyerId,
+        sellerId: order.sellerId,
+        actor: `user:${order.buyerId}`,
+        idempotencyKey
+      });
+      order.amount = amount;
+      order.status = 'funded_in_escrow';
+      order.escrowProtectionStartDate = today;
+      order.escrowProtectionEndDate = protectionEnd;
+      await store.saveOrder(order);
+      await emitSystemEvent(order.id, 'escrow_funded', `🔒 $${amount.toFixed(2)} USD funded into escrow by ${caller.name}.`, { amount });
+    } else if ((order.status as string) === 'completed' || (order.status as string) === 'cancelled' || (existingEscrow && existingEscrow.remaining === 0 && (order.status as string) === 'completed')) {
+      const newOrderId = 'ord_' + randomUUID().slice(0, 12);
+      const isGigOrder = order.orderType === 'gig' || (Boolean(order.gigId) && !order.projectId);
+      const orderType: 'gig' | 'project' = isGigOrder ? 'gig' : 'project';
+      const newOrder: Order = {
+        id: newOrderId,
+        workspaceId: order.workspaceId,
+        orderType,
+        ...(orderType === 'gig' ? { gigOrderId: newOrderId } : { projectOrderId: newOrderId }),
+        title: depositTitle,
+        buyerId: order.buyerId,
+        sellerId: order.sellerId,
+        amount,
+        status: 'payment_pending',
+        createdAt: today,
+        dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
+        escrowProtectionStartDate: today,
+        escrowProtectionEndDate: protectionEnd,
+        feeBreakdown: calculateOrderFees(amount),
+        projectId: order.projectId,
+        gigId: order.gigId
+      };
+      const enrichedNew = enrichOrderWithServiceInfo(newOrder);
+      await recordOrder(enrichedNew);
+      await store.saveOrder(enrichedNew);
+
+      await fundOrderEscrowWithEvent({
+        orderId: newOrder.id,
+        orderTitle: newOrder.title,
+        amount,
+        buyerId: newOrder.buyerId,
+        sellerId: newOrder.sellerId,
+        actor: `user:${newOrder.buyerId}`,
+        idempotencyKey
+      });
+      enrichedNew.status = 'funded_in_escrow';
+      await store.saveOrder(enrichedNew);
+      await emitSystemEvent(newOrder.id, 'order_created', `Follow-on Escrow Deposit placed: ${newOrder.title} ($${amount.toFixed(2)} USD held in escrow).`);
+      targetOrder = enrichedNew;
+    } else {
+      await topUpOrderEscrowWithEvent({
+        orderId: order.id,
+        orderTitle: depositTitle,
+        amount,
+        buyerId: order.buyerId,
+        sellerId: order.sellerId,
+        actor: `user:${order.buyerId}`,
+        idempotencyKey
+      });
+      order.amount = Math.round((Number(order.amount || 0) + amount) * 100) / 100;
+      await store.saveOrder(order);
+    }
+
+    // Mark any matching pending deposit offer as accepted
+    const orderOffers = await store.listOffersForOrder(order.id);
+    const pendingDep = orderOffers.find(o => o.kind === 'deposit' && o.status === 'pending');
+    if (pendingDep) {
+      await postgresStore.getPool().query(
+        "UPDATE workstream_offers SET status = 'accepted', resolved_at = $1, resolved_by = $2 WHERE id = $3",
+        [new Date().toISOString(), caller.id, pendingDep.id]
+      );
+    }
+
+    await syncUserBalances([order.buyerId, order.sellerId]);
+    res.json({ success: true, order: enrichOrderWithServiceInfo(targetOrder), amount });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to deposit into escrow.' });
+  } finally {
+    releaseOrderLock(orderId);
   }
 });
 
@@ -801,7 +1003,8 @@ router.post('/payments/escrow/refund', requireAuth, async (req: Request, res: Re
     const isGigOrder = order.orderType === 'gig' || Boolean(order.gigOrderId);
     if (isGigOrder && isSeller && !isAdmin) return res.status(403).json({ error: 'Sellers must use the cancellation request.' });
     const overdueThresholdHours = LATE_ORDER_PROTECTION_HOURS;
-    const isOverdueByThreshold = order.dueDate ? (Date.now() > new Date(order.dueDate).getTime() + overdueThresholdHours * 60 * 60 * 1000) : false;
+    const deadlineMs = parseDeadlineInstant(order.dueDate, order.createdAt);
+    const isOverdueByThreshold = deadlineMs !== null ? (Date.now() > deadlineMs + overdueThresholdHours * 60 * 60 * 1000) : false;
 
     if (!isAdmin && !isSeller) {
       if (isBuyer && isOverdueByThreshold) {

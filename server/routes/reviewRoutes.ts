@@ -15,6 +15,7 @@ import {
   isValidIntegerRating,
   isReviewPublic,
   recalculateUserRating,
+  recalculateGigRating,
   sanitizePublicReview
 } from '../services/reviewService.js';
 import { enrichOrderWithServiceInfo } from '../services/orderService.js';
@@ -201,6 +202,10 @@ export const handleSubmitReview = async (req: Request, res: Response) => {
     }
 
     recalculateUserRating(resolvedTargetUserId);
+    const targetGigId = order.gigId || newReview.gigId;
+    if (targetGigId) {
+      await recalculateGigRating(targetGigId);
+    }
 
     createNotification({
       userId: resolvedTargetUserId,
@@ -276,6 +281,11 @@ router.put('/reviews/:id', requireAuth, async (req: Request, res: Response) => {
 
     if (review.targetUserId) {
       recalculateUserRating(review.targetUserId);
+    }
+
+    const targetGigId = review.gigId || (review.orderId ? (await store.getOrder(review.orderId))?.gigId : undefined);
+    if (targetGigId) {
+      await recalculateGigRating(targetGigId);
     }
 
     if (review.orderId) {

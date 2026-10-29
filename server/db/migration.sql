@@ -62,13 +62,14 @@ CREATE TABLE IF NOT EXISTS gigs (
   extras JSONB,
   moderation_status VARCHAR(32) DEFAULT 'approved',
   moderation_notes TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Canonical gig statuses: active, paused, moderation, deleted
 UPDATE gigs SET status = 'active' WHERE status = 'published';
 UPDATE gigs SET status = 'moderation' WHERE status IN ('pending', 'draft') OR (status NOT IN ('active', 'paused', 'deleted') AND moderation_status IN ('pending', 'rejected', 'flagged'));
-UPDATE gigs SET status = 'active' WHERE status NOT IN ('active', 'paused', 'moderation', 'deleted');
+UPDATE gigs SET status = 'moderation' WHERE status NOT IN ('active', 'paused', 'moderation', 'deleted');
 ALTER TABLE gigs ALTER COLUMN status SET DEFAULT 'active';
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -463,7 +464,7 @@ ALTER TABLE ledger_journals ADD COLUMN IF NOT EXISTS reversed_by_journal_id VARC
 
 CREATE TABLE IF NOT EXISTS ledger_entries (
   id VARCHAR(64) PRIMARY KEY,
-  journal_id VARCHAR(64) NOT NULL REFERENCES ledger_journals(id) ON DELETE CASCADE,
+  journal_id VARCHAR(64) NOT NULL,
   account_code VARCHAR(32) NOT NULL,
   debit NUMERIC(14,2) DEFAULT 0.00 NOT NULL,
   credit NUMERIC(14,2) DEFAULT 0.00 NOT NULL,
@@ -608,111 +609,17 @@ CREATE INDEX IF NOT EXISTS idx_payment_checkout_sessions_status ON payment_check
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_checkout_sessions_provider_tx_id ON payment_checkout_sessions (provider_tx_id) WHERE provider_tx_id IS NOT NULL AND status = 'completed';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_order_reviewer ON reviews (order_id, reviewer_id) WHERE order_id IS NOT NULL AND reviewer_id IS NOT NULL;
 
--- Referential Integrity Foreign Key Constraints
-DO $$ BEGIN
-  ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_id VARCHAR(64);
-  ALTER TABLE orders ADD COLUMN IF NOT EXISTS freelancer_id VARCHAR(64);
-  UPDATE orders SET client_id = buyer_id WHERE client_id IS NULL AND buyer_id IS NOT NULL;
-  UPDATE orders SET freelancer_id = seller_id WHERE freelancer_id IS NULL AND seller_id IS NOT NULL;
-  ALTER TABLE orders ADD CONSTRAINT fk_orders_buyer FOREIGN KEY (buyer_id) REFERENCES users(id) ON DELETE RESTRICT;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE orders ADD CONSTRAINT fk_orders_seller FOREIGN KEY (seller_id) REFERENCES users(id) ON DELETE RESTRICT;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE orders ADD CONSTRAINT fk_orders_client FOREIGN KEY (client_id) REFERENCES users(id) ON DELETE RESTRICT;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE orders ADD CONSTRAINT fk_orders_freelancer FOREIGN KEY (freelancer_id) REFERENCES users(id) ON DELETE RESTRICT;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE escrows ADD CONSTRAINT fk_escrows_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE proposals ADD CONSTRAINT fk_proposals_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE proposals ADD CONSTRAINT fk_proposals_freelancer FOREIGN KEY (freelancer_id) REFERENCES users(id) ON DELETE RESTRICT;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE reviews ADD CONSTRAINT fk_reviews_reviewer FOREIGN KEY (reviewer_id) REFERENCES users(id) ON DELETE SET NULL;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE disputes ADD CONSTRAINT fk_disputes_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE ledger_entries ADD CONSTRAINT fk_ledger_entries_journal FOREIGN KEY (journal_id) REFERENCES ledger_journals(id) ON DELETE CASCADE;
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
--- Authoritative Financial Database CHECK Constraints
-DO $$ BEGIN
-  ALTER TABLE wallets ADD CONSTRAINT check_wallets_available_balance CHECK (available_balance >= 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE wallets ADD CONSTRAINT check_wallets_funds_on_hold CHECK (funds_on_hold >= 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE wallets ADD CONSTRAINT check_wallets_pending_withdrawals CHECK (pending_withdrawals >= 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE escrows ADD CONSTRAINT check_escrows_amount CHECK (amount >= 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE escrows ADD CONSTRAINT check_escrows_remaining CHECK (remaining >= 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE payouts ADD CONSTRAINT check_payouts_amount CHECK (amount > 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE refunds ADD CONSTRAINT check_refunds_amount CHECK (amount > 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE earnings_clearing ADD CONSTRAINT check_earnings_clearing_amount CHECK (amount >= 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE ledger_entries ADD CONSTRAINT check_ledger_entries_debit CHECK (debit >= 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-DO $$ BEGIN
-  ALTER TABLE ledger_entries ADD CONSTRAINT check_ledger_entries_credit CHECK (credit >= 0);
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
+-- Consolidated Schema Enhancements (Columns, Tables, Indexes)
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_id VARCHAR(64);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS freelancer_id VARCHAR(64);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS selected_extras JSONB;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE payouts ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+ALTER TABLE payouts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE gigs ADD COLUMN IF NOT EXISTS featured BOOLEAN DEFAULT FALSE;
+ALTER TABLE gigs ADD COLUMN IF NOT EXISTS is_featured BOOLEAN DEFAULT FALSE;
+ALTER TABLE gigs ADD COLUMN IF NOT EXISTS featured_until VARCHAR(64);
+ALTER TABLE gigs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS reconciliation_exceptions (
   id VARCHAR(64) PRIMARY KEY,
@@ -731,34 +638,301 @@ CREATE TABLE IF NOT EXISTS reconciliation_exceptions (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS outbox_events (
+  id VARCHAR(64) PRIMARY KEY,
+  event_type VARCHAR(128) NOT NULL,
+  aggregate_type VARCHAR(64) NOT NULL,
+  aggregate_id VARCHAR(128) NOT NULL,
+  payload JSONB NOT NULL,
+  status VARCHAR(32) DEFAULT 'pending' NOT NULL,
+  retry_count INT DEFAULT 0 NOT NULL,
+  error_message TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  processed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_checkout_sessions_provider_tx_id ON payment_checkout_sessions (provider_tx_id) WHERE provider_tx_id IS NOT NULL AND status = 'completed';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_order_reviewer ON reviews (order_id, reviewer_id) WHERE order_id IS NOT NULL AND reviewer_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_reconciliation_exceptions_status ON reconciliation_exceptions(status);
 CREATE INDEX IF NOT EXISTS idx_reconciliation_exceptions_entity ON reconciliation_exceptions(entity_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_messages_client_msg_id ON messages (order_id, sender_id, (metadata->>'clientMessageId')) WHERE metadata->>'clientMessageId' IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_workstream_offers_number ON workstream_offers (number) WHERE number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_outbox_events_status ON outbox_events(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_gigs_freelancer_id ON gigs(freelancer_id);
+CREATE INDEX IF NOT EXISTS idx_gigs_status_moderation ON gigs(status, moderation_status);
 
+-- Safe Slug Unique Resolution & Constraint
+UPDATE gigs SET slug = slug || '-' || id
+WHERE id IN (
+  SELECT id FROM (
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY slug ORDER BY created_at ASC) as rn
+    FROM gigs WHERE slug IS NOT NULL AND slug != ''
+  ) s WHERE rn > 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gigs_unique_slug ON gigs(slug) WHERE slug IS NOT NULL AND slug != '';
+
+-- Authoritative Financial Database CHECK Constraints
 DO $$ BEGIN
-  ALTER TABLE workstream_offers ADD CONSTRAINT fk_offers_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_wallets_available_balance') THEN
+    ALTER TABLE wallets ADD CONSTRAINT check_wallets_available_balance CHECK (available_balance >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_wallets_funds_on_hold') THEN
+    ALTER TABLE wallets ADD CONSTRAINT check_wallets_funds_on_hold CHECK (funds_on_hold >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_wallets_pending_withdrawals') THEN
+    ALTER TABLE wallets ADD CONSTRAINT check_wallets_pending_withdrawals CHECK (pending_withdrawals >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_escrows_amount') THEN
+    ALTER TABLE escrows ADD CONSTRAINT check_escrows_amount CHECK (amount >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_escrows_remaining') THEN
+    ALTER TABLE escrows ADD CONSTRAINT check_escrows_remaining CHECK (remaining >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_payouts_amount') THEN
+    ALTER TABLE payouts ADD CONSTRAINT check_payouts_amount CHECK (amount > 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_refunds_amount') THEN
+    ALTER TABLE refunds ADD CONSTRAINT check_refunds_amount CHECK (amount > 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_earnings_clearing_amount') THEN
+    ALTER TABLE earnings_clearing ADD CONSTRAINT check_earnings_clearing_amount CHECK (amount >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_ledger_entries_debit') THEN
+    ALTER TABLE ledger_entries ADD CONSTRAINT check_ledger_entries_debit CHECK (debit >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_ledger_entries_credit') THEN
+    ALTER TABLE ledger_entries ADD CONSTRAINT check_ledger_entries_credit CHECK (credit >= 0);
+  END IF;
 END $$;
 
-DO $$ BEGIN
-  ALTER TABLE messages ADD CONSTRAINT fk_messages_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
+-- Referential Integrity Foreign Key Constraints with Pre-Existing Orphan Logging
+
+-- 1. Backfill orders.client_id and orders.freelancer_id
+UPDATE orders SET client_id = buyer_id WHERE client_id IS NULL;
+UPDATE orders SET freelancer_id = seller_id WHERE freelancer_id IS NULL;
+
+-- 2. Log orphaned records to reconciliation_exceptions instead of fabricating parents or deleting children
+-- Using stable, deterministic IDs (MD5 hash) to prevent VARCHAR(64) overflow while preserving collision safety
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_OB_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Order refers to non-existent buyer_id: ' || buyer_id, NOW()::text
+FROM orders WHERE buyer_id IS NOT NULL AND buyer_id NOT IN (SELECT id FROM users)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_OS_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Order refers to non-existent seller_id: ' || seller_id, NOW()::text
+FROM orders WHERE seller_id IS NOT NULL AND seller_id NOT IN (SELECT id FROM users)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_PF_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Proposal refers to non-existent freelancer_id: ' || freelancer_id, NOW()::text
+FROM proposals WHERE freelancer_id NOT IN (SELECT id FROM users)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_EO_' || MD5(order_id), 'ORPHAN_RECORD', order_id, 
+  'Escrow record refers to non-existent order_id: ' || order_id, NOW()::text
+FROM escrows WHERE order_id NOT IN (SELECT id FROM orders)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_DO_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Dispute refers to non-existent order_id: ' || order_id, NOW()::text
+FROM disputes WHERE order_id NOT IN (SELECT id FROM orders)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_LJ_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Ledger entry refers to non-existent journal_id: ' || journal_id, NOW()::text
+FROM ledger_entries WHERE journal_id NOT IN (SELECT id FROM ledger_journals)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_OG_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Order refers to non-existent gig_id: ' || gig_id, NOW()::text
+FROM orders WHERE gig_id IS NOT NULL AND gig_id NOT IN (SELECT id FROM gigs)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_PO_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Payout refers to non-existent freelancer_id: ' || freelancer_id, NOW()::text
+FROM payouts WHERE freelancer_id NOT IN (SELECT id FROM users)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_RO_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Refund refers to non-existent order_id: ' || order_id, NOW()::text
+FROM refunds WHERE order_id NOT IN (SELECT id FROM orders)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_CO_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Earnings clearing refers to non-existent order_id: ' || order_id, NOW()::text
+FROM earnings_clearing WHERE order_id NOT IN (SELECT id FROM orders)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_WU_' || MD5(user_id), 'ORPHAN_RECORD', user_id, 
+  'Wallet refers to non-existent user_id: ' || user_id, NOW()::text
+FROM wallets WHERE user_id NOT IN (SELECT id FROM users)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_OW_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Order refers to non-existent workspace_id: ' || workspace_id, NOW()::text
+FROM orders WHERE workspace_id IS NOT NULL AND workspace_id NOT IN (SELECT workspace_id FROM workspaces)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_OP_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Order refers to non-existent project_id: ' || project_id, NOW()::text
+FROM orders WHERE project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_MU_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Message refers to non-existent sender_id: ' || sender_id, NOW()::text
+FROM messages WHERE sender_id NOT IN (SELECT id FROM users)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_GF_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Gig refers to non-existent freelancer_id: ' || freelancer_id, NOW()::text
+FROM gigs WHERE freelancer_id NOT IN (SELECT id FROM users)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_PP_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Proposal refers to non-existent project_id: ' || project_id, NOW()::text
+FROM proposals WHERE project_id NOT IN (SELECT id FROM projects)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO reconciliation_exceptions (id, type, entity_id, description, detected_at)
+SELECT 
+  'RE_MO_' || MD5(id), 'ORPHAN_RECORD', id, 
+  'Message refers to non-existent order_id: ' || order_id, NOW()::text
+FROM messages WHERE order_id NOT IN (SELECT id FROM orders)
+ON CONFLICT (id) DO NOTHING;
+
+-- 6. Apply Foreign Key Constraints
+DO $$ 
+DECLARE
+  _r RECORD;
+  _m RECORD;
+BEGIN
+  -- Macro-like logic for managed foreign keys. Ensures exactly one named constraint with correct definition exists.
+  -- Drops duplicate FKs on the same column only if they are exactly equivalent relationships.
+  -- Corrects same-named constraints if any part of the definition (columns, reference table, delete action) is wrong.
+  
+  FOR _m IN (
+    SELECT * FROM (VALUES 
+      ('orders', 'fk_orders_buyer', 'buyer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('orders', 'fk_orders_seller', 'seller_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('orders', 'fk_orders_client', 'client_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('orders', 'fk_orders_freelancer', 'freelancer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('orders', 'fk_orders_workspace', 'workspace_id', 'workspaces', 'workspace_id', 'r', 'RESTRICT'),
+      ('orders', 'fk_orders_project', 'project_id', 'projects', 'id', 'r', 'RESTRICT'),
+      ('messages', 'fk_messages_sender', 'sender_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('proposals', 'fk_proposals_freelancer', 'freelancer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('gigs', 'fk_gigs_freelancer', 'freelancer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('proposals', 'fk_proposals_project', 'project_id', 'projects', 'id', 'r', 'RESTRICT'),
+      ('escrows', 'fk_escrows_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
+      ('disputes', 'fk_disputes_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
+      ('workstream_offers', 'fk_offers_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
+      ('messages', 'fk_messages_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
+      ('ledger_entries', 'fk_ledger_entries_journal', 'journal_id', 'ledger_journals', 'id', 'r', 'RESTRICT'),
+      ('reviews', 'fk_reviews_reviewer', 'reviewer_id', 'users', 'id', 'n', 'SET NULL'),
+      ('uploads', 'fk_uploads_order', 'order_id', 'orders', 'id', 'n', 'SET NULL'),
+      ('orders', 'fk_orders_gig', 'gig_id', 'gigs', 'id', 'n', 'SET NULL'),
+      ('projects', 'fk_projects_buyer', 'buyer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('workspaces', 'fk_workspaces_buyer', 'buyer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('workspaces', 'fk_workspaces_seller', 'seller_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('custom_invoices', 'fk_custom_invoices_buyer', 'buyer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('custom_invoices', 'fk_custom_invoices_seller', 'seller_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('custom_invoices', 'fk_custom_invoices_order', 'related_order_id', 'orders', 'id', 'r', 'RESTRICT'),
+      ('disputes', 'fk_disputes_buyer', 'buyer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('disputes', 'fk_disputes_seller', 'seller_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('refunds', 'fk_refunds_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
+      ('refunds', 'fk_refunds_buyer', 'buyer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('payouts', 'fk_payouts_freelancer', 'freelancer_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('support_tickets', 'fk_support_tickets_user', 'user_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('notifications', 'fk_notifications_user', 'user_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('project_clarifications', 'fk_clarifications_project', 'project_id', 'projects', 'id', 'r', 'RESTRICT'),
+      ('project_clarifications', 'fk_clarifications_user', 'user_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('wallet_movements', 'fk_wallet_movements_user', 'user_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('earnings_clearing', 'fk_earnings_clearing_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
+      ('earnings_clearing', 'fk_earnings_clearing_seller', 'seller_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('clearing_earnings', 'fk_clearing_earnings_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
+      ('clearing_earnings', 'fk_clearing_earnings_seller', 'seller_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('payment_checkout_sessions', 'fk_checkout_sessions_user', 'user_id', 'users', 'id', 'r', 'RESTRICT'),
+      ('payment_checkout_sessions', 'fk_checkout_sessions_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
+      ('wallets', 'fk_wallets_user', 'user_id', 'users', 'id', 'r', 'RESTRICT')
+    ) AS t(tbl, con, col, ref, ref_col, del_code, del_str)
+  ) LOOP
+    -- 1. Drop redundant/equivalent constraints with DIFFERENT names
+    -- Only drops if the relationship (child col, ref table, ref col) is exactly the same
+    FOR _r IN (
+      SELECT c.conname 
+      FROM pg_catalog.pg_constraint c 
+      JOIN pg_catalog.pg_class cl ON c.conrelid = cl.oid 
+      JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
+      JOIN pg_catalog.pg_class rcl ON c.confrelid = rcl.oid
+      JOIN pg_catalog.pg_namespace rn ON rn.oid = rcl.relnamespace
+      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+      JOIN pg_catalog.pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = ANY(c.confkey)
+      WHERE n.nspname = current_schema() AND rn.nspname = current_schema()
+        AND cl.relname = _m.tbl AND a.attname = _m.col AND c.contype = 'f' AND c.conname != _m.con
+        AND rcl.relname = _m.ref AND ra.attname = _m.ref_col AND array_length(c.conkey, 1) = 1
+    ) LOOP EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', _m.tbl, _r.conname); END LOOP;
+
+    -- 2. Drop the intended named constraint if it is defined INCORRECTLY
+    -- Checks constraint type, delete action, columns, and referenced table
+    IF EXISTS (
+      SELECT 1 FROM pg_catalog.pg_constraint c 
+      JOIN pg_catalog.pg_class cl ON c.conrelid = cl.oid 
+      JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
+      WHERE n.nspname = current_schema() AND cl.relname = _m.tbl AND c.conname = _m.con
+    ) AND NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_constraint c 
+      JOIN pg_catalog.pg_class cl ON c.conrelid = cl.oid 
+      JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
+      JOIN pg_catalog.pg_class rcl ON c.confrelid = rcl.oid
+      JOIN pg_catalog.pg_namespace rn ON rn.oid = rcl.relnamespace
+      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY(c.conkey)
+      JOIN pg_catalog.pg_attribute ra ON ra.attrelid = c.confrelid AND ra.attnum = ANY(c.confkey)
+      WHERE n.nspname = current_schema() AND rn.nspname = current_schema()
+        AND cl.relname = _m.tbl AND c.conname = _m.con AND c.contype = 'f' AND c.confdeltype = _m.del_code
+        AND a.attname = _m.col AND rcl.relname = _m.ref AND ra.attname = _m.ref_col AND array_length(c.conkey, 1) = 1
+    ) THEN EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', _m.tbl, _m.con); END IF;
+
+    -- 3. Add the intended constraint if it's missing
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_constraint c 
+      JOIN pg_catalog.pg_class cl ON c.conrelid = cl.oid 
+      JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace
+      WHERE n.nspname = current_schema() AND cl.relname = _m.tbl AND c.conname = _m.con
+    ) THEN
+      EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I(%I) ON DELETE %s NOT VALID', _m.tbl, _m.con, _m.col, _m.ref, _m.ref_col, _m.del_str);
+    END IF;
+  END LOOP;
 END $$;
 
-DO $$ BEGIN
-  ALTER TABLE uploads ADD CONSTRAINT fk_uploads_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL;
-EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL;
-END $$;
 
-CREATE INDEX IF NOT EXISTS idx_uploads_order_id ON uploads(order_id);
-CREATE INDEX IF NOT EXISTS idx_uploads_owner_id ON uploads(owner_id);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_messages_client_msg_id 
-ON messages (order_id, sender_id, (metadata->>'clientMessageId')) 
-WHERE metadata->>'clientMessageId' IS NOT NULL;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_workstream_offers_number
-ON workstream_offers (number)
-WHERE number IS NOT NULL;
-
-ALTER TABLE payouts ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
-ALTER TABLE payouts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();

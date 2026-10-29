@@ -23,46 +23,131 @@ export class MarketplaceRepo {
         for (const g of gigs) {
           if (!g?.id || seen.has(g.id)) continue;
           seen.add(g.id);
-          await client.query(
-            `INSERT INTO gigs (
-              id, freelancer_id, freelancer_name, freelancer_username, freelancer_avatar, 
-              freelancer_level, title, slug, category, subcategory, description, price, 
-              delivery_days, rating, reviews_count, image, cover_image, gallery, tags, 
-              status, featured, extras, moderation_status, moderation_notes
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
-            ON CONFLICT (id) DO UPDATE SET
-              freelancer_id = EXCLUDED.freelancer_id,
-              freelancer_name = EXCLUDED.freelancer_name,
-              freelancer_username = EXCLUDED.freelancer_username,
-              freelancer_avatar = EXCLUDED.freelancer_avatar,
-              freelancer_level = EXCLUDED.freelancer_level,
-              title = EXCLUDED.title,
-              slug = EXCLUDED.slug,
-              category = EXCLUDED.category,
-              subcategory = EXCLUDED.subcategory,
-              description = EXCLUDED.description,
-              price = EXCLUDED.price,
-              delivery_days = EXCLUDED.delivery_days,
-              rating = EXCLUDED.rating,
-              reviews_count = EXCLUDED.reviews_count,
-              image = EXCLUDED.image,
-              cover_image = EXCLUDED.cover_image,
-              gallery = EXCLUDED.gallery,
-              tags = EXCLUDED.tags,
-              status = EXCLUDED.status,
-              featured = EXCLUDED.featured,
-              extras = EXCLUDED.extras,
-              moderation_status = EXCLUDED.moderation_status,
-              moderation_notes = EXCLUDED.moderation_notes`,
-            [
-              g.id, g.freelancerId, g.freelancerName, g.freelancerUsername || null, g.freelancerAvatar || null,
-              g.freelancerLevel || null, g.title, g.slug || null, g.category, g.subcategory || null,
-              g.description || null, g.price, g.deliveryDays, g.rating ?? 5.0, g.reviewsCount ?? 0,
-              g.image || null, g.coverImage || null, g.gallery || [], g.tags || [],
-              g.status || 'active', !!g.featured, JSON.stringify(g.extras || []),
-              g.moderationStatus || 'approved', g.moderationNotes || null
-            ]
-          );
+          let slug = g.slug || g.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '') || 'gig-' + g.id;
+          if (slug.length < 2) slug = 'gig-' + g.id;
+          try {
+            const collisionRes = await client.query(
+              'SELECT id FROM gigs WHERE slug = $1 AND id != $2 LIMIT 1',
+              [slug, g.id]
+            );
+            if (collisionRes.rows.length > 0) {
+              slug = `${slug}-${g.id}`;
+            }
+          } catch {}
+
+          const executeRowInsert = async (targetSlug: string) => {
+            await client.query(
+              `INSERT INTO gigs (
+                id, freelancer_id, freelancer_name, freelancer_username, freelancer_avatar, 
+                freelancer_level, title, slug, category, subcategory, description, price, 
+                delivery_days, rating, reviews_count, image, cover_image, gallery, tags, 
+                status, featured, is_featured, featured_until, extras, moderation_status, moderation_notes
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+              ON CONFLICT (id) DO UPDATE SET
+                freelancer_id = EXCLUDED.freelancer_id,
+                freelancer_name = EXCLUDED.freelancer_name,
+                freelancer_username = EXCLUDED.freelancer_username,
+                freelancer_avatar = EXCLUDED.freelancer_avatar,
+                freelancer_level = EXCLUDED.freelancer_level,
+                title = EXCLUDED.title,
+                slug = EXCLUDED.slug,
+                category = EXCLUDED.category,
+                subcategory = EXCLUDED.subcategory,
+                description = EXCLUDED.description,
+                price = EXCLUDED.price,
+                delivery_days = EXCLUDED.delivery_days,
+                rating = COALESCE(gigs.rating, EXCLUDED.rating),
+                reviews_count = COALESCE(gigs.reviews_count, EXCLUDED.reviews_count),
+                image = EXCLUDED.image,
+                cover_image = EXCLUDED.cover_image,
+                gallery = EXCLUDED.gallery,
+                tags = EXCLUDED.tags,
+                status = CASE 
+                  WHEN gigs.status = 'deleted' THEN 'deleted' 
+                  WHEN gigs.moderation_status IN ('rejected', 'flagged') AND EXCLUDED.status = 'active' THEN gigs.status 
+                  ELSE EXCLUDED.status 
+                END,
+                featured = (
+                  CASE 
+                    WHEN (EXCLUDED.featured_until IS NOT NULL AND EXCLUDED.featured_until::timestamptz > NOW()) THEN TRUE
+                    WHEN (gigs.featured_until IS NOT NULL AND gigs.featured_until::timestamptz > NOW()) THEN TRUE
+                    ELSE FALSE
+                  END
+                ),
+                is_featured = (
+                  CASE 
+                    WHEN (EXCLUDED.featured_until IS NOT NULL AND EXCLUDED.featured_until::timestamptz > NOW()) THEN TRUE
+                    WHEN (gigs.featured_until IS NOT NULL AND gigs.featured_until::timestamptz > NOW()) THEN TRUE
+                    ELSE FALSE
+                  END
+                ),
+                featured_until = (
+                  CASE
+                    WHEN EXCLUDED.featured_until IS NOT NULL AND gigs.featured_until IS NOT NULL THEN
+                      CASE WHEN EXCLUDED.featured_until::timestamptz > gigs.featured_until::timestamptz THEN EXCLUDED.featured_until ELSE gigs.featured_until END
+                    WHEN EXCLUDED.featured_until IS NOT NULL THEN EXCLUDED.featured_until
+                    ELSE gigs.featured_until
+                  END
+                ),
+                extras = EXCLUDED.extras,
+                moderation_status = CASE 
+                  WHEN gigs.moderation_status IN ('rejected', 'flagged') AND EXCLUDED.moderation_status NOT IN ('rejected', 'flagged') THEN gigs.moderation_status 
+                  ELSE EXCLUDED.moderation_status 
+                END,
+                moderation_notes = COALESCE(EXCLUDED.moderation_notes, gigs.moderation_notes)`,
+              [
+                g.id, g.freelancerId, g.freelancerName, g.freelancerUsername || null, g.freelancerAvatar || null,
+                g.freelancerLevel || null, g.title, targetSlug, g.category, g.subcategory || null,
+                g.description || null, g.price, g.deliveryDays, g.rating ?? 5.0, g.reviewsCount ?? 0,
+                g.image || null, g.coverImage || null, g.gallery || [], g.tags || [],
+                g.status || 'active', !!g.featured, !!g.featured || !!(g as any).isFeatured, (g as any).featuredUntil || null,
+                JSON.stringify(g.extras || []),
+                g.moderationStatus || 'approved', g.moderationNotes || null
+              ]
+            );
+          };
+
+          let savepointSeq = 0;
+          const attemptInsertWithSavepoint = async (targetSlug: string): Promise<void> => {
+            const spName = `sp_gig_${savepointSeq++}`;
+            await client.query(`SAVEPOINT ${spName}`);
+            try {
+              await executeRowInsert(targetSlug);
+              await client.query(`RELEASE SAVEPOINT ${spName}`);
+            } catch (err) {
+              try {
+                await client.query(`ROLLBACK TO SAVEPOINT ${spName}`);
+                await client.query(`RELEASE SAVEPOINT ${spName}`);
+              } catch (cleanupErr) {
+                console.error(`[MarketplaceRepo.saveGigs] Failed to clean up savepoint ${spName}:`, cleanupErr);
+                throw cleanupErr;
+              }
+              throw err;
+            }
+          };
+
+          const isSlugConflict = (err: any) =>
+            err?.code === '23505' &&
+            (err?.constraint === 'idx_gigs_unique_slug' || String(err?.message || '').includes('idx_gigs_unique_slug'));
+
+          try {
+            await attemptInsertWithSavepoint(slug);
+          } catch (insertErr: any) {
+            if (isSlugConflict(insertErr)) {
+              const fallbackSlug = `${slug}-${g.id}`;
+              try {
+                await attemptInsertWithSavepoint(fallbackSlug);
+              } catch (retryErr: any) {
+                if (isSlugConflict(retryErr)) {
+                  await attemptInsertWithSavepoint(`${fallbackSlug}-${Date.now().toString(36)}`);
+                } else {
+                  throw retryErr;
+                }
+              }
+            } else {
+              throw insertErr;
+            }
+          }
         }
         await client.query('COMMIT');
       } catch (e) {
@@ -70,6 +155,110 @@ export class MarketplaceRepo {
         throw e;
       } finally {
         client.release();
+      }
+    });
+  }
+
+  async updateGig(id: string, updates: Record<string, any>, expectedFreelancerId?: string): Promise<Gig | null> {
+    return this.ctx.withLock('gigs', async () => {
+      const fieldMap: Record<string, string> = {
+        title: 'title',
+        slug: 'slug',
+        category: 'category',
+        subcategory: 'subcategory',
+        description: 'description',
+        price: 'price',
+        deliveryDays: 'delivery_days',
+        image: 'image',
+        coverImage: 'cover_image',
+        gallery: 'gallery',
+        tags: 'tags',
+        extras: 'extras',
+        status: 'status',
+        moderationStatus: 'moderation_status',
+        moderationNotes: 'moderation_notes',
+        freelancerName: 'freelancer_name',
+        freelancerUsername: 'freelancer_username',
+        freelancerAvatar: 'freelancer_avatar',
+        freelancerLevel: 'freelancer_level'
+      };
+
+      const setClauses: string[] = [];
+      const values: any[] = [];
+      let idx = 1;
+
+      for (const [key, col] of Object.entries(fieldMap)) {
+        if (updates[key] !== undefined) {
+          let val = updates[key];
+          if (key === 'extras') {
+            val = JSON.stringify(val || []);
+          }
+          setClauses.push(`${col} = $${idx}`);
+          values.push(val);
+          idx++;
+        }
+      }
+
+      if (setClauses.length === 0) {
+        const existing = await this.getGig(id);
+        return existing || null;
+      }
+
+      setClauses.push('updated_at = NOW()');
+
+      let whereClause = `WHERE id = $${idx} AND status != 'deleted'`;
+      values.push(id);
+      idx++;
+
+      if (expectedFreelancerId) {
+        whereClause += ` AND freelancer_id = $${idx}`;
+        values.push(expectedFreelancerId);
+        idx++;
+      }
+
+      const runUpdate = async (overrideSlug?: string) => {
+        const localClauses = [...setClauses];
+        const localValues = [...values];
+        if (overrideSlug !== undefined) {
+          const slugIdx = localClauses.findIndex(c => c.startsWith('slug = '));
+          if (slugIdx >= 0) {
+            const match = localClauses[slugIdx].match(/\$(\d+)/);
+            if (match) {
+              const paramNum = parseInt(match[1], 10);
+              localValues[paramNum - 1] = overrideSlug;
+            }
+          }
+        }
+        const query = `
+          UPDATE gigs
+          SET ${localClauses.join(', ')}
+          ${whereClause}
+          RETURNING *
+        `;
+        return await this.ctx.getPool().query(query, localValues);
+      };
+
+      try {
+        const res = await runUpdate();
+        if (res.rows.length === 0) return null;
+        return mapGigRow(res.rows[0]);
+      } catch (err: any) {
+        if (err?.code === '23505' && (err?.constraint === 'idx_gigs_unique_slug' || String(err?.message || '').includes('idx_gigs_unique_slug')) && updates.slug) {
+          const fallbackSlug = `${updates.slug}-${id}`;
+          try {
+            const res = await runUpdate(fallbackSlug);
+            if (res.rows.length === 0) return null;
+            return mapGigRow(res.rows[0]);
+          } catch (retryErr: any) {
+            if (retryErr?.code === '23505' && (retryErr?.constraint === 'idx_gigs_unique_slug' || String(retryErr?.message || '').includes('idx_gigs_unique_slug'))) {
+              const res = await runUpdate(`${fallbackSlug}-${Date.now().toString(36)}`);
+              if (res.rows.length === 0) return null;
+              return mapGigRow(res.rows[0]);
+            }
+            throw retryErr;
+          }
+        }
+        throw err;
       }
     });
   }
@@ -88,10 +277,10 @@ export class MarketplaceRepo {
   }
 
   async getGig(idOrSlug: string): Promise<Gig | null> {
-    let res = await this.ctx.getPool().query('SELECT * FROM gigs WHERE id = $1 OR slug = $1', [idOrSlug]);
+    let res = await this.ctx.getPool().query('SELECT * FROM gigs WHERE id = $1 OR slug = $1 ORDER BY (CASE WHEN id = $1 THEN 0 ELSE 1 END) ASC LIMIT 1', [idOrSlug]);
     if (res.rows.length === 0) {
       await seedDefaultGigsIfNeeded(this.ctx.getPool());
-      res = await this.ctx.getPool().query('SELECT * FROM gigs WHERE id = $1 OR slug = $1', [idOrSlug]);
+      res = await this.ctx.getPool().query('SELECT * FROM gigs WHERE id = $1 OR slug = $1 ORDER BY (CASE WHEN id = $1 THEN 0 ELSE 1 END) ASC LIMIT 1', [idOrSlug]);
     }
     return res.rows.length > 0 ? mapGigRow(res.rows[0]) : null;
   }
