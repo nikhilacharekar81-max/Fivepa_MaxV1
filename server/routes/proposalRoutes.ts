@@ -18,7 +18,7 @@ import {
   formatApiError
 } from '../middleware/auth.js';
 import { workspaceService } from '../../src/server/workspaceService.js';
-import { calculateOrderFees } from '../domains/finance/fees.js';
+import { calculateOrderFees, quoteOrderWithLiveSettings } from '../domains/finance/fees.js';
 import { financialTransactionService } from '../domains/finance/index.js';
 import { siteSettings } from '../../src/server/siteSettings.js';
 import { emitSystemEvent } from '../services/messagingService.js';
@@ -90,7 +90,7 @@ proposalRouter.post('/proposals', requireAuth, requireActiveStatus, rateLimit(30
     if (!proj) return res.status(404).json({ error: 'Project not found.' });
 
     const buyerId = proj.buyerId || (proj as any).buyer_id;
-    if (!['open', 'published', 'in_progress'].includes(proj.status)) {
+    if (!['open', 'published', 'in_progress', 'in-progress'].includes(proj.status)) {
       return res.status(400).json({ error: 'This project is completed and closed to new proposals.' });
     }
     if (buyerId === caller.id) {
@@ -230,7 +230,7 @@ export async function processProposalAccept(req: any, res: any) {
           escrowProtectionEndDate: new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0],
           projectId: proj.id,
           proposalId: proposal.id,
-          feeBreakdown: calculateOrderFees(proposal.bidAmount)
+          feeBreakdown: await quoteOrderWithLiveSettings(proposal.bidAmount)
         };
 
         await workspaceService.ensureWorkspaceForOrderAsync(order, client);
@@ -240,6 +240,7 @@ export async function processProposalAccept(req: any, res: any) {
           id: offerId,
           number: offerNum,
           orderId: order.id,
+          workspaceId: workspace.workspaceId,
           proposalId: proposal.id,
           kind: 'proposal',
           title: proj.title,
@@ -251,11 +252,7 @@ export async function processProposalAccept(req: any, res: any) {
           createdAt: resolvedAt
         };
 
-        await client.query(
-          `INSERT INTO workstream_offers (id, number, order_id, kind, title, amount, delivery_days, status, created_by, created_at, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-          [offer.id, offer.number, offer.orderId, offer.kind, offer.title, offer.amount, offer.deliveryDays, offer.status, offer.createdBy, offer.createdAt, JSON.stringify({ proposalId: proposal.id })]
-        );
+        await store.saveOffer(offer, client);
 
         await financialTransactionService.fundEscrow({
           orderId: order.id,
@@ -282,8 +279,8 @@ export async function processProposalAccept(req: any, res: any) {
         );
         const newHiresCount = parseInt(newHiresRes.rows[0]?.count || '0', 10);
         if (newHiresCount >= maxHires) {
-          proj.status = 'in-progress';
-          await client.query("UPDATE projects SET status = 'in-progress' WHERE id = $1", [proj.id]);
+          proj.status = 'in_progress' as any;
+          await client.query("UPDATE projects SET status = 'in_progress' WHERE id = $1", [proj.id]);
           await client.query("UPDATE proposals SET status = 'declined' WHERE project_id = $1 AND status = 'pending'", [proj.id]);
         } else {
           proj.status = 'open';
@@ -396,7 +393,7 @@ proposalRouter.post('/proposals/:id/decline', requireAuth, requireActiveStatus, 
   await processProposalDecline(req, res);
 });
 
-proposalRouter.post('/proposals/:id/:action(accept|decline)', requireAuth, rateLimit(20, 60_000), async (req: Request, res: Response) => {
+proposalRouter.post('/proposals/:id/:action(accept|decline)', requireAuth, requireActiveStatus, rateLimit(20, 60_000), async (req: Request, res: Response) => {
   if (req.params.action === 'accept') {
     return await processProposalAccept(req, res);
   } else {
@@ -532,20 +529,22 @@ proposalRouter.patch('/admin/proposals/:id/status', requireAdmin, async (req: Re
     const p = await store.getProposal(req.params.id);
     if (!p) return res.status(404).json({ error: 'Proposal not found' });
 
+    const nextStatus = typeof req.body?.status === 'string' ? req.body.status.trim() : '';
+    if (!nextStatus) return res.status(400).json({ error: 'Valid status is required' });
     const oldStatus = p.status;
-    await postgresStore.getPool().query('UPDATE proposals SET status = $1 WHERE id = $2', [req.body.status, req.params.id]);
+    await postgresStore.getPool().query('UPDATE proposals SET status = $1 WHERE id = $2', [nextStatus, req.params.id]);
 
     await registerAuditLog({
       id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: adminActor(req),
       role: (req as any).authenticatedUser?.role || 'admin',
-      action: `PROPOSAL_STATUS_${req.body.status.toUpperCase()}`,
+      action: `PROPOSAL_STATUS_${nextStatus.toUpperCase()}`,
       target: `Proposal #${p.id}`,
-      details: `Changed proposal status from "${oldStatus}" to "${req.body.status}" for freelancer ${p.freelancerName}`,
+      details: `Changed proposal status from "${oldStatus}" to "${nextStatus}" for freelancer ${p.freelancerName}`,
       timestamp: new Date().toLocaleString()
     });
 
-    res.json({ ...p, status: req.body.status });
+    res.json({ ...p, status: nextStatus });
   } catch (err: any) {
     res.status(500).json(formatApiError(err, 'Failed to update status'));
   }

@@ -34,6 +34,7 @@ import {
 import { recordMessage } from '../services/messagingService.js';
 import { broadcastMessage, disconnectUserSockets } from '../websocket.js';
 import { notifyUserOnAdminAction } from '../services/notificationService.js';
+import { recalculateUserRating, recalculateGigRating } from '../services/reviewService.js';
 
 export let categories: Category[] = [
   {
@@ -172,13 +173,25 @@ export function setCategories(newCats: Category[]) {
   categories = newCats;
 }
 
+export function getCategories(): Category[] {
+  return categories;
+}
+
 const router = Router();
 
 // ==========================================
 // CATEGORIES ADMIN
 // ==========================================
 
-router.get('/categories', (_req: Request, res: Response) => {
+router.get('/categories', async (_req: Request, res: Response) => {
+  if (isPostgresEnabled()) {
+    try {
+      const persisted = await postgresStore.loadCategories();
+      if (persisted && Array.isArray(persisted) && persisted.length > 0) {
+        categories = persisted;
+      }
+    } catch {}
+  }
   res.json(categories);
 });
 
@@ -876,7 +889,7 @@ router.patch('/admin/users/:id/verify', requireAdmin, async (req: Request, res: 
   }
 });
 
-router.delete('/admin/users/:id', requireAdmin, async (req: Request, res: Response) => {
+export async function handleDeleteUserAccount(req: Request, res: Response) {
   try {
     const target = await store.getUser(req.params.id);
     if (!target) return res.status(404).json({ error: 'User not found' });
@@ -930,7 +943,7 @@ router.delete('/admin/users/:id', requireAdmin, async (req: Request, res: Respon
     const admin = (req as any).authenticatedUser;
     await registerAuditLog({
       id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
-      actor: admin?.name || 'Admin',
+      actor: admin?.name || adminActor(req),
       role: admin?.role || 'admin',
       action: 'USER_DELETED',
       target: `User ${target.name}`,
@@ -938,13 +951,15 @@ router.delete('/admin/users/:id', requireAdmin, async (req: Request, res: Respon
       timestamp: new Date().toLocaleString()
     });
 
-    disconnectUserSockets(req.params.id, 'Account deleted');
+    disconnectUserSockets(target.id, 'Account deleted');
     res.json({ success: true, id: target.id });
   } catch (err: any) {
     const status = err?.statusCode || 400;
-    res.status(status).json({ error: err.message });
+    res.status(status).json({ error: err.message || 'Failed to delete user' });
   }
-});
+}
+
+router.delete('/admin/users/:id', requireAdmin, handleDeleteUserAccount);
 
 // ==========================================
 // DISPUTE RESOLUTION
@@ -1406,6 +1421,13 @@ router.patch('/admin/reviews/:id/status', requireAdmin, async (req: Request, res
     if (!review) return res.status(404).json({ error: 'Review not found' });
     (review as any).moderationStatus = status || moderationStatus || 'approved';
     await store.saveReview(review);
+    if (review.targetUserId) {
+      await recalculateUserRating(review.targetUserId);
+    }
+    const targetGigId = review.gigId || (review.orderId ? (await store.getOrder(review.orderId))?.gigId : undefined);
+    if (targetGigId) {
+      await recalculateGigRating(targetGigId);
+    }
     res.json({ success: true, review });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -1418,6 +1440,13 @@ router.delete('/admin/reviews/:id', requireAdmin, async (req: Request, res: Resp
     if (!review) return res.status(404).json({ error: 'Review not found' });
     (review as any).moderationStatus = 'hidden';
     await store.saveReview(review);
+    if (review.targetUserId) {
+      await recalculateUserRating(review.targetUserId);
+    }
+    const targetGigId = review.gigId || (review.orderId ? (await store.getOrder(review.orderId))?.gigId : undefined);
+    if (targetGigId) {
+      await recalculateGigRating(targetGigId);
+    }
     res.json({ success: true, id: req.params.id });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -1476,7 +1505,17 @@ router.get('/admin/reports', requireAdmin, async (_req: Request, res: Response) 
 
 router.patch('/admin/reports/:id', requireAdmin, async (req: Request, res: Response) => {
   try {
-    res.json({ success: true, id: req.params.id, status: req.body.status || 'resolved' });
+    const nextStatus = req.body.status || 'resolved';
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
+      actor: adminActor(req),
+      role: (req as any).authenticatedUser?.role || 'admin',
+      action: `REPORT_${String(nextStatus).toUpperCase()}`,
+      target: `Report #${req.params.id}`,
+      details: req.body.note || `Updated report #${req.params.id} status to ${nextStatus}`,
+      timestamp: new Date().toLocaleString()
+    });
+    res.json({ success: true, id: req.params.id, status: nextStatus });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1485,6 +1524,15 @@ router.patch('/admin/reports/:id', requireAdmin, async (req: Request, res: Respo
 router.post('/admin/messages/moderate', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { threadId, action, note } = req.body;
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
+      actor: adminActor(req),
+      role: (req as any).authenticatedUser?.role || 'admin',
+      action: `MESSAGE_MODERATION_${String(action || 'REVIEWED').toUpperCase()}`,
+      target: `Thread ${threadId || 'unknown'}`,
+      details: note || `Admin moderated thread ${threadId} with action: ${action || 'reviewed'}`,
+      timestamp: new Date().toLocaleString()
+    });
     res.json({ success: true, threadId, action, note });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

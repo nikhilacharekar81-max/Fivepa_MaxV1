@@ -14,6 +14,7 @@ import {
   requireAdmin,
   adminActor,
   resolveAuthenticatedUserId,
+  isStaffUser,
   escapeHtml
 } from '../middleware/auth.js';
 import { siteSettings } from '../../src/server/siteSettings.js';
@@ -81,12 +82,8 @@ gigRouter.get('/gigs/:id', async (req: Request, res: Response) => {
     if (!gig) return res.status(404).json({ error: 'Gig not found' });
 
     const authUserId = resolveAuthenticatedUserId(req);
-    let callerRole = null;
-    if (authUserId) {
-      const user = await store.getUser(authUserId);
-      if (user) callerRole = user.role;
-    }
-    const isAdmin = callerRole === 'admin' || callerRole === 'super_admin';
+    const user = authUserId ? await store.getUser(authUserId) : null;
+    const isAdmin = isStaffUser(user);
     const isOwner = authUserId && gig.freelancerId === authUserId;
 
     if (isGigPublic(gig)) {
@@ -270,6 +267,19 @@ const handleGigUpdate = async (req: Request, res: Response) => {
     }
     if (req.body.deliveryDays !== undefined) {
       updates.deliveryDays = Math.min(365, Math.max(1, Math.round(Number(req.body.deliveryDays)) || 7));
+    }
+    if (req.body.packages !== undefined && typeof req.body.packages === 'object') {
+      const activeSettings = siteSettings.getSettings();
+      const minGigPrice = activeSettings.marketplace.minimumGigPrice ?? 1;
+      for (const tier of ['basic', 'standard', 'premium']) {
+        if (req.body.packages[tier]) {
+          const p = Number(req.body.packages[tier].price);
+          if (!Number.isFinite(p) || p < minGigPrice) {
+            return res.status(400).json({ error: `Package tier '${tier}' price ($${p}) must be a valid number >= $${minGigPrice}.` });
+          }
+        }
+      }
+      updates.packages = req.body.packages;
     }
     if (req.body.extras !== undefined && Array.isArray(req.body.extras)) {
       const parsedExtras: { id: string; title: string; price: number; deliveryDays: number }[] = [];

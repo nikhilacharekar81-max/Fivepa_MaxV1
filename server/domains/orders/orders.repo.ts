@@ -168,8 +168,21 @@ export class OrdersRepo {
   }
 
   async getOrder(id: string, client?: any): Promise<Order | null> {
+    if (!id) return null;
     const dbRunner = client || this.ctx.getPool();
-    const res = await dbRunner.query('SELECT * FROM orders WHERE id = $1', [id]);
+    const res = await dbRunner.query(
+      `SELECT * FROM orders
+       WHERE id = $1 OR gig_order_id = $1 OR project_order_id = $1 OR workspace_id = $1
+       ORDER BY
+         CASE
+           WHEN id = $1 THEN 0
+           WHEN gig_order_id = $1 OR project_order_id = $1 THEN 1
+           ELSE 2
+         END ASC,
+         created_at DESC
+       LIMIT 1`,
+      [id]
+    );
     return res.rows.length > 0 ? mapRowToOrder(res.rows[0]) : null;
   }
 

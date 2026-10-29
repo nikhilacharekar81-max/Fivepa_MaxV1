@@ -14,6 +14,7 @@ import { workspaceService } from '../src/server/workspaceService.js';
 import { paymentGatewayManager } from '../src/server/paymentGateways.js';
 import { postgresStore, isPostgresEnabled, isRemotePostgresConfigured } from './db/postgresStore.js';
 import { financialRepository, financialTransactionService } from './services/financialService.js';
+import { calculateOrderFees } from './domains/finance/fees.js';
 
 export { financeLedger, siteSettings, DEFAULT_SITE_SETTINGS, FinanceLedgerEngine, postgresStore, isPostgresEnabled };
 
@@ -564,8 +565,21 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   async getOrder(id: string, client?: any): Promise<Order | undefined> {
+    if (!id) return undefined;
     const dbRunner = client || postgresStore.getPool();
-    const res = await dbRunner.query('SELECT * FROM orders WHERE id = $1', [id]);
+    const res = await dbRunner.query(
+      `SELECT * FROM orders
+       WHERE id = $1 OR gig_order_id = $1 OR project_order_id = $1 OR workspace_id = $1
+       ORDER BY
+         CASE
+           WHEN id = $1 THEN 0
+           WHEN gig_order_id = $1 OR project_order_id = $1 THEN 1
+           ELSE 2
+         END ASC,
+         created_at DESC
+       LIMIT 1`,
+      [id]
+    );
     if (res.rows.length > 0) return mapOrderRow(res.rows[0]);
     return undefined;
   }
@@ -1593,9 +1607,11 @@ export async function hydrateStoreFromPostgres() {
       if (persistedGateways) paymentGatewayManager.loadFromState(persistedGateways);
 
       const persistedCategories = await postgresStore.loadCategories();
-      if (persistedCategories && Array.isArray(persistedCategories)) {
-        const { setCategories } = await import('./routes/adminRoutes.js');
+      const { setCategories, getCategories } = await import('./routes/adminRoutes.js');
+      if (persistedCategories && Array.isArray(persistedCategories) && persistedCategories.length > 0) {
         setCategories(persistedCategories);
+      } else {
+        await postgresStore.saveCategories(getCategories());
       }
     } catch (settErr) {
       console.warn('[Store] Notice: Failed to hydrate site settings/gateways/categories:', settErr);
@@ -1858,7 +1874,7 @@ export async function hydrateStoreFromPostgres() {
         escrowProtectionStartDate: todayDate,
         escrowProtectionEndDate: protectionEnd,
         requirements: 'Build an enterprise-grade Workstream & Escrow collaboration module with real-time WebSockets and 100% PostgreSQL persistence.',
-        feeBreakdown: financeLedger.quoteOrder(450),
+        feeBreakdown: calculateOrderFees(450, siteSettings.getFeeConfig()),
         deliverableFiles: [],
         revisions: [],
         deliveryHistory: [],
@@ -1911,7 +1927,8 @@ export async function hydrateStoreFromPostgres() {
     const allOrders = await store.listOrders();
     if (allOrders.length > 0) {
       for (const o of allOrders) {
-        if (!o.workspaceId || !workspaceService.getWorkspace(o.workspaceId)) {
+        const existingWs = o.workspaceId ? await workspaceService.getWorkspaceAsync(o.workspaceId) : undefined;
+        if (!o.workspaceId || !existingWs) {
           await workspaceService.ensureWorkspaceForOrderAsync(o);
           await store.saveOrder(o);
         }

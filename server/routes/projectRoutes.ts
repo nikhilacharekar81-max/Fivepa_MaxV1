@@ -45,7 +45,7 @@ export async function getBuyerStats(buyerId: string) {
 
     for (const proj of buyerProjects) {
       const hasAcceptedProposal = proposalsList.some(p => p.project_id === proj.id && p.status === 'accepted');
-      const isHired = hasAcceptedProposal || proj.status === 'in_progress';
+      const isHired = hasAcceptedProposal || proj.status === 'in_progress' || proj.status === 'in-progress';
       const isDecided = isHired || (proj.status === 'completed' && Number(proj.proposals_count || 0) > 0);
 
       if (isHired) hiredCount++;
@@ -327,11 +327,12 @@ projectRouter.put('/projects/:id', requireAuth, requireActiveStatus, async (req:
     project.budgetMax = budgetMax;
     if (req.body.deadlineDays !== undefined) project.deadlineDays = Math.max(1, Math.min(365, Number(req.body.deadlineDays) || 14));
     if (req.body.status !== undefined) {
+      const normalizedStatus = req.body.status === 'in-progress' ? 'in_progress' : req.body.status;
       const allowedStatuses = ['open', 'in_progress', 'completed', 'cancelled', 'closed'];
-      if (!allowedStatuses.includes(req.body.status)) {
+      if (!allowedStatuses.includes(normalizedStatus)) {
         return res.status(400).json({ error: 'Invalid project status.' });
       }
-      project.status = req.body.status;
+      project.status = normalizedStatus;
     }
 
     await store.saveProject(project);
@@ -355,7 +356,8 @@ projectRouter.patch('/projects/:id/status', requireAuth, requireActiveStatus, as
       return res.status(403).json({ error: 'Forbidden: Only the project owner can update this project status.' });
     }
 
-    const requestedStatus = typeof req.body?.status === 'string' ? req.body.status.trim().toLowerCase() : 'completed';
+    const rawStatus = typeof req.body?.status === 'string' ? req.body.status.trim().toLowerCase() : 'completed';
+    const requestedStatus = rawStatus === 'in-progress' ? 'in_progress' : rawStatus;
     const allowedStatuses = ['open', 'in_progress', 'completed', 'cancelled', 'closed'];
     if (!allowedStatuses.includes(requestedStatus)) {
       return res.status(400).json({ error: 'Invalid project status.' });
@@ -402,7 +404,7 @@ projectRouter.post('/projects/:id/hire', requireAuth, requireActiveStatus, async
     );
     const hiresCount = parseInt(acceptedRes.rows[0]?.count || '0', 10);
     if (hiresCount >= maxHires) {
-      project.status = 'in-progress';
+      project.status = 'in_progress' as any;
       await store.saveProject(project);
       await postgresStore.getPool().query("UPDATE proposals SET status = 'declined' WHERE project_id = $1 AND status = 'pending'", [project.id]);
     } else {

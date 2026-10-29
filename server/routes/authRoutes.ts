@@ -107,7 +107,7 @@ authRouter.post('/signup', rateLimit(20, 3_600_000), async (req: Request, res: R
     };
 
     await store.saveUser(newUser);
-    ensureWallet(newUserId);
+    await ensureWallet(newUserId);
 
     const emailCode = generate6DigitCode();
     const now = Date.now();
@@ -137,9 +137,22 @@ authRouter.post('/signup', rateLimit(20, 3_600_000), async (req: Request, res: R
 
     if (trimmedMobile) {
       const smsCode = generate6DigitCode();
+      const smsExpiresAtMs = Date.now() + 30 * 60 * 1000;
+      if (isPostgresEnabled()) {
+        try {
+          await postgresStore.getPool().query(
+            `INSERT INTO auth_verification_codes (email, code, type, attempts, last_resend_at, expires_at, created_at)
+             VALUES ($1, $2, 'sms', 0, $3, $4, NOW())
+             ON CONFLICT (email, type) DO UPDATE SET code = $2, attempts = 0, last_resend_at = $3, expires_at = $4, created_at = NOW()`,
+            [trimmedMobile, smsCode, Date.now(), new Date(smsExpiresAtMs)]
+          );
+        } catch (e) {
+          console.warn('[Auth] Failed to persist SMS verification code to DB:', e);
+        }
+      }
       smsVerificationCodes.set(trimmedMobile, {
         code: smsCode,
-        expiresAt: Date.now() + 30 * 60 * 1000,
+        expiresAt: smsExpiresAtMs,
         lastResendAt: Date.now(),
         attempts: 0
       });
@@ -349,24 +362,68 @@ authRouter.post('/verify-sms', rateLimit(30, 3_600_000), async (req: Request, re
   if (typeof mobile !== 'string' || !mobile.trim() || rawCode === undefined || rawCode === null || String(rawCode).trim() === '') {
     return res.status(400).json({ error: 'Mobile number and code are required.' });
   }
-  const code = String(rawCode);
+  const code = String(rawCode).trim();
   const cleanMobile = mobile.trim();
-  const record = smsVerificationCodes.get(cleanMobile);
-  if (!record) return res.status(400).json({ error: 'No SMS verification code found or expired.' });
-  if (Date.now() > record.expiresAt) {
+
+  if (isPostgresEnabled()) {
+    try {
+      const result = await postgresStore.executeInTransaction(async (client) => {
+        const codeRes = await client.query(
+          `SELECT * FROM auth_verification_codes WHERE email = $1 AND type = 'sms' FOR UPDATE`,
+          [cleanMobile]
+        );
+        if (codeRes.rows.length === 0) {
+          return { status: 400, error: 'No SMS verification code found or expired.' };
+        }
+        const row = codeRes.rows[0];
+        if (new Date() > new Date(row.expires_at)) {
+          await client.query(`DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'sms'`, [cleanMobile]);
+          return { status: 400, error: 'SMS verification code has expired.' };
+        }
+        if (Number(row.attempts || 0) >= 5) {
+          await client.query(`DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'sms'`, [cleanMobile]);
+          return { status: 429, error: 'Too many failed attempts.' };
+        }
+        if (row.code === code) {
+          await client.query(`DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'sms'`, [cleanMobile]);
+          return { ok: true };
+        }
+        const upd = await client.query(
+          `UPDATE auth_verification_codes SET attempts = attempts + 1 WHERE email = $1 AND type = 'sms' RETURNING attempts`,
+          [cleanMobile]
+        );
+        if (Number(upd.rows[0]?.attempts || 0) >= 5) {
+          await client.query(`DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'sms'`, [cleanMobile]);
+          return { status: 429, error: 'Too many failed attempts.' };
+        }
+        return { status: 400, error: 'Invalid SMS verification code.' };
+      });
+      if (result.error) {
+        return res.status(result.status).json({ error: result.error });
+      }
+      smsVerificationCodes.delete(cleanMobile);
+    } catch (e) {
+      console.error('[Auth] Error verifying SMS code in DB:', e);
+      return res.status(500).json({ error: 'Failed to verify SMS code.' });
+    }
+  } else {
+    const record = smsVerificationCodes.get(cleanMobile);
+    if (!record) return res.status(400).json({ error: 'No SMS verification code found or expired.' });
+    if (Date.now() > record.expiresAt) {
+      smsVerificationCodes.delete(cleanMobile);
+      return res.status(400).json({ error: 'SMS verification code has expired.' });
+    }
+    if (record.attempts >= 5) {
+      smsVerificationCodes.delete(cleanMobile);
+      return res.status(429).json({ error: 'Too many failed attempts.' });
+    }
+    if (record.code !== code) {
+      record.attempts++;
+      return res.status(400).json({ error: 'Invalid SMS verification code.' });
+    }
     smsVerificationCodes.delete(cleanMobile);
-    return res.status(400).json({ error: 'SMS verification code has expired.' });
-  }
-  if (record.attempts >= 5) {
-    smsVerificationCodes.delete(cleanMobile);
-    return res.status(429).json({ error: 'Too many failed attempts.' });
-  }
-  if (record.code !== code.trim()) {
-    record.attempts++;
-    return res.status(400).json({ error: 'Invalid SMS verification code.' });
   }
 
-  smsVerificationCodes.delete(cleanMobile);
   const user = await store.getUserByMobile(cleanMobile);
   if (user) {
     user.mobileVerified = true;
@@ -376,20 +433,44 @@ authRouter.post('/verify-sms', rateLimit(30, 3_600_000), async (req: Request, re
   res.json({ success: true, message: 'Mobile verified successfully via SMS! Account is now active and usable.' });
 });
 
-authRouter.post('/resend-sms-code', rateLimit(10, 3_600_000), (req: Request, res: Response) => {
+authRouter.post('/resend-sms-code', rateLimit(10, 3_600_000), async (req: Request, res: Response) => {
   const { mobile } = req.body || {};
   if (typeof mobile !== 'string' || !mobile.trim()) return res.status(400).json({ error: 'Mobile number is required.' });
   const cleanMobile = mobile.trim();
-  const existing = smsVerificationCodes.get(cleanMobile);
   const now = Date.now();
-  if (existing && now - existing.lastResendAt < 30_000) {
-    return res.status(429).json({ error: 'Please wait 30 seconds before resending SMS.' });
+  const newCode = generate6DigitCode();
+  const expiresAtMs = now + 30 * 60 * 1000;
+
+  if (isPostgresEnabled()) {
+    const pool = postgresStore.getPool();
+    try {
+      const existingRes = await pool.query(
+        `SELECT last_resend_at FROM auth_verification_codes WHERE email = $1 AND type = 'sms'`,
+        [cleanMobile]
+      );
+      if (existingRes.rows.length > 0 && now - Number(existingRes.rows[0].last_resend_at || 0) < 30_000) {
+        return res.status(429).json({ error: 'Please wait 30 seconds before resending SMS.' });
+      }
+      await pool.query(
+        `INSERT INTO auth_verification_codes (email, code, type, attempts, last_resend_at, expires_at, created_at)
+         VALUES ($1, $2, 'sms', 0, $3, $4, NOW())
+         ON CONFLICT (email, type) DO UPDATE SET code = $2, attempts = 0, last_resend_at = $3, expires_at = $4, created_at = NOW()`,
+        [cleanMobile, newCode, now, new Date(expiresAtMs)]
+      );
+    } catch (e) {
+      console.error('[Auth] Failed to persist resend SMS code to DB:', e);
+      return res.status(500).json({ error: 'Failed to generate SMS verification code.' });
+    }
+  } else {
+    const existing = smsVerificationCodes.get(cleanMobile);
+    if (existing && now - existing.lastResendAt < 30_000) {
+      return res.status(429).json({ error: 'Please wait 30 seconds before resending SMS.' });
+    }
   }
 
-  const newCode = generate6DigitCode();
   smsVerificationCodes.set(cleanMobile, {
     code: newCode,
-    expiresAt: now + 30 * 60 * 1000,
+    expiresAt: expiresAtMs,
     lastResendAt: now,
     attempts: 0
   });

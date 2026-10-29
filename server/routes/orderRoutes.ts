@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { createHash, randomUUID } from 'crypto';
 import {
   DEFAULT_SITE_SETTINGS,
+  siteSettings,
   store,
   type ExtensionRequest,
   type Message,
@@ -138,7 +139,7 @@ router.get('/orders/:id', requireAuth, async (req: Request, res: Response) => {
 
     const authUserId = resolveAuthenticatedUserId(req)!;
     const caller = await store.getUser(authUserId);
-    const isAdmin = caller?.role === 'admin' || caller?.role === 'super_admin';
+    const isAdmin = isStaffUser(caller);
     if (!isAdmin && order.buyerId !== authUserId && order.sellerId !== authUserId) {
       return res.status(403).json({ error: 'Forbidden: Access to this order is restricted to participants.' });
     }
@@ -171,7 +172,7 @@ router.get('/orders/:id/invoice', requireAuth, async (req: Request, res: Respons
 
     const authUserId = resolveAuthenticatedUserId(req)!;
     const caller = await store.getUser(authUserId);
-    const isAdmin = caller?.role === 'admin' || caller?.role === 'super_admin';
+    const isAdmin = isStaffUser(caller);
     if (!isAdmin && order.buyerId !== authUserId && order.sellerId !== authUserId) {
       return res.status(403).json({ error: 'Forbidden: Access to this invoice is restricted to order participants.' });
     }
@@ -498,7 +499,7 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
           createdAt: today,
           dueDate: serverDerivedDueDate,
           escrowProtectionStartDate: today,
-          escrowProtectionEndDate: new Date(Date.now() + DEFAULT_SITE_SETTINGS.commission.escrowProtectionDays * 86400000).toISOString().split('T')[0],
+          escrowProtectionEndDate: new Date(Date.now() + (siteSettings.getSettings().commission.escrowProtectionDays || DEFAULT_SITE_SETTINGS.commission.escrowProtectionDays) * 86400000).toISOString().split('T')[0],
           gigId: req.body.gigId,
           projectId: req.body.projectId,
           feeBreakdown: await quoteOrderWithLiveSettings(rawAmount).catch(() => calculateOrderFees(rawAmount)),

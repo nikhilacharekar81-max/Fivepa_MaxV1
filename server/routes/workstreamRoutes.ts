@@ -12,7 +12,7 @@ import {
   type Message
 } from '../store.js';
 import { postgresStore } from '../db/postgresStore.js';
-import { calculateOrderFees } from '../domains/finance/fees.js';
+import { calculateOrderFees, quoteOrderWithLiveSettings } from '../domains/finance/fees.js';
 import { financialRepository } from '../services/financialService.js';
 import { siteSettings } from '../../src/server/siteSettings.js';
 import { workspaceService } from '../../src/server/workspaceService.js';
@@ -612,10 +612,11 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
     const order = await store.getOrder(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
     if (caller.id !== order.sellerId) return res.status(403).json({ error: 'Only the seller of this workstream can send this.' });
-    if (order.status === 'cancelled' && order.orderType !== 'gig' && !order.gigOrderId) return res.status(409).json({ error: 'Cannot send offers on a cancelled order.' });
-
     const kind = req.body?.kind as WorkstreamOfferKind;
     if (!['proposal', 'invoice', 'deposit'].includes(kind)) return res.status(400).json({ error: 'Invalid type.' });
+    if ((order.status === 'cancelled' || (order.status as string) === 'refunded') && kind === 'invoice') {
+      return res.status(409).json({ error: 'Cannot send a final invoice on a cancelled or refunded order. Send a proposal or deposit to start a follow-on order.' });
+    }
 
     const amount = Math.round(Number(req.body?.amount) * 100) / 100;
     const minAmount = Number(siteSettings.getFlattenedSettings().minOrderAmount) || 0;
@@ -896,9 +897,9 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
     await ensureWallet(order.sellerId);
     const today = now.split('T')[0];
     const protectionEnd = new Date(Date.now() + siteSettings.getSettings().commission.escrowProtectionDays * 86400000).toISOString().split('T')[0];
-    const isInitialFunding = !(await orderHasEscrow(order.id));
+    const isInitialFunding = !(await orderHasEscrow(order.id)) && order.status !== 'cancelled' && (order.status as string) !== 'refunded' && order.status !== 'completed';
     const isFollowOnAfterCompletion = (await orderHasEscrow(order.id)) && (order.status === 'completed' || (await getActiveEscrowRemaining(order)) === 0);
-    const isCancelledGigFollowOn = order.status === 'cancelled' && (order.orderType === 'gig' || order.gigOrderId);
+    const isCancelledOrRefundedFollowOn = order.status === 'cancelled' || (order.status as string) === 'refunded';
 
     if (offer.kind === 'invoice') {
       const validationError = validateOrderReleasePreconditions(order, false, true);
@@ -1051,7 +1052,7 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
         return res.status(400).json({ error: fundingErr.message || 'Failed to fund escrow for offer.' });
       }
       return res.json({ offer: await viewOffer(offer), order: enrichOrderWithServiceInfo(order) });
-    } else if (isFollowOnAfterCompletion || isCancelledGigFollowOn || (order.orderType === 'project' && (order.status === 'completed' || order.status === 'cancelled') && offer.kind === 'proposal')) {
+    } else if (isFollowOnAfterCompletion || isCancelledOrRefundedFollowOn || ((order.status === 'completed' || order.status === 'cancelled' || (order.status as string) === 'refunded') && offer.kind === 'proposal')) {
       const newOrderId = 'ord_' + randomUUID().slice(0, 12);
       const isGigFollowOn = order.orderType === 'gig' || (Boolean(order.gigId) && !order.projectId);
       const orderType: 'gig' | 'project' = isGigFollowOn ? 'gig' : 'project';
@@ -1075,7 +1076,7 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
           : new Date(Date.now() + 7 * 86400000).toISOString(),
         escrowProtectionStartDate: today,
         escrowProtectionEndDate: protectionEnd,
-        feeBreakdown: calculateOrderFees(offer.amount),
+        feeBreakdown: await quoteOrderWithLiveSettings(offer.amount),
         projectId: order.projectId,
         gigId: order.gigId
       };
@@ -1277,7 +1278,7 @@ router.post(
             dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
             escrowProtectionStartDate: today,
             escrowProtectionEndDate: new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0],
-            feeBreakdown: calculateOrderFees(offerAmount)
+            feeBreakdown: await quoteOrderWithLiveSettings(offerAmount)
           };
 
           await postgresStore.executeInTransaction(async (client) => {
@@ -1432,10 +1433,11 @@ router.post(
           const hasExistingEscrow = await orderHasEscrow(freshOrder.id);
           const isFollowOnOrder =
             (hasExistingEscrow && (freshOrder.status === 'completed' || (await getActiveEscrowRemaining(freshOrder)) === 0)) ||
-            (freshOrder.status === 'cancelled' && (freshOrder.orderType === 'gig' || Boolean(freshOrder.gigOrderId))) ||
-            (freshOrder.orderType === 'project' && (freshOrder.status === 'completed' || freshOrder.status === 'cancelled') && targetOffer.kind === 'proposal');
+            freshOrder.status === 'cancelled' ||
+            (freshOrder.status as string) === 'refunded' ||
+            (freshOrder.status === 'completed' && targetOffer.kind === 'proposal');
 
-          if (!hasExistingEscrow) {
+          if (!hasExistingEscrow && !isFollowOnOrder) {
             const today = new Date().toISOString().split('T')[0];
             const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays || 14;
             const protectionEnd = new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0];
@@ -1476,9 +1478,20 @@ router.post(
               targetOffer.status = 'accepted';
               targetOffer.resolvedAt = new Date().toISOString();
               targetOffer.resolvedBy = caller.id;
+              if (targetOffer.kind === 'proposal') {
+                const linkedProp = await findLinkedProposalForOffer(targetOffer, freshOrder, client);
+                if (linkedProp) {
+                  linkedProp.status = 'accepted';
+                  linkedProp.workstreamOrderId = freshOrder.id;
+                  linkedProp.offerId = targetOffer.id;
+                  freshOrder.proposalId = linkedProp.id;
+                  await store.saveProposal(linkedProp, client);
+                }
+              }
               await saveOfferToDb(targetOffer, client);
               await store.saveOrder(freshOrder, client);
               await syncUserBalances([freshOrder.buyerId, freshOrder.sellerId].filter(Boolean), client);
+              await postOfferMessage(freshOrder, targetOffer, null, `${targetOffer.number} was accepted and escrow was funded ($${amountToFund}).`, 'offer_accepted', client);
             });
 
             return res.json({ success: true, order: enrichOrderWithServiceInfo(freshOrder), offer: await viewOffer(targetOffer) });
@@ -1506,7 +1519,7 @@ router.post(
                 : new Date(Date.now() + 7 * 86400000).toISOString(),
               escrowProtectionStartDate: today,
               escrowProtectionEndDate: protectionEnd,
-              feeBreakdown: calculateOrderFees(amountToFund),
+              feeBreakdown: await quoteOrderWithLiveSettings(amountToFund),
               projectId: freshOrder.projectId,
               gigId: freshOrder.gigId
             };
