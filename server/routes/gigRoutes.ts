@@ -406,15 +406,30 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
       return res.status(500).json({ error: 'Feature fee is not configured.' });
     }
 
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
-    const callerIdempKey = (req.body?.idempotencyKey || req.headers['x-idempotency-key']) as string | undefined;
+    const existingGig = await store.getGig(req.params.id);
+    const existingUntilMs = existingGig?.featuredUntil ? new Date(existingGig.featuredUntil).getTime() : NaN;
+    const baseMs = Number.isFinite(existingUntilMs) && existingUntilMs > Date.now()
+      ? existingUntilMs
+      : Date.now();
+    const expiresAt = new Date(baseMs + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    const callerIdempKey = (
+      req.headers['idempotency-key'] ||
+      req.headers['x-idempotency-key'] ||
+      req.body?.idempotencyKey ||
+      req.body?.requestKey ||
+      req.body?.operationId
+    ) as string | undefined;
+    const operationId = (req as any).requestId || randomUUID();
+
     const result = await financialTransactionService.chargeFeaturedGigFee({
       gigId: req.params.id,
       sellerId: caller.id,
       feeAmount: fee,
       featuredUntil: expiresAt,
       actor: `user:${caller.id}`,
-      idempotencyKey: callerIdempKey ? String(callerIdempKey) : undefined
+      idempotencyKey: callerIdempKey && String(callerIdempKey).trim() ? String(callerIdempKey).trim() : undefined,
+      operationId
     });
 
     res.json(result);

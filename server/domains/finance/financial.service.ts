@@ -1727,12 +1727,17 @@ export class FinancialTransactionService {
     featuredUntil: string;
     actor: string;
     idempotencyKey?: string;
+    operationId?: string;
   }, externalClient?: any) {
     assertValidMoneyAmount(params.feeAmount, 'featured gig fee');
 
+    const operationIdempKey =
+      (params.idempotencyKey && params.idempotencyKey.trim())
+        ? params.idempotencyKey.trim()
+        : `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${params.operationId?.trim() || randomUUID()}`;
+
     const run = async (client: any) => {
-      const featuredWindow = (params.featuredUntil || new Date().toISOString()).substring(0, 10);
-      const idempKey = params.idempotencyKey || `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${featuredWindow}`;
+      const idempKey = operationIdempKey;
       const payloadFingerprint = {
         gigId: params.gigId,
         sellerId: params.sellerId,
@@ -1819,12 +1824,17 @@ export class FinancialTransactionService {
     description: string;
     actor: string;
     idempotencyKey?: string;
+    operationId?: string;
   }, externalClient?: any) {
     assertValidMoneyAmount(params.feeAmount, 'promotion fee');
 
+    const operationIdempKey =
+      (params.idempotencyKey && params.idempotencyKey.trim())
+        ? params.idempotencyKey.trim()
+        : `IDEMP-PROMO-${params.targetType}-${params.targetId}-${params.operationId?.trim() || randomUUID()}`;
+
     const run = async (client: any) => {
-      const today = new Date().toISOString().substring(0, 10);
-      const idempKey = params.idempotencyKey || `IDEMP-PROMO-${params.targetType}-${params.targetId}-${today}`;
+      const idempKey = operationIdempKey;
       const payloadFingerprint = {
         targetType: params.targetType,
         targetId: params.targetId,

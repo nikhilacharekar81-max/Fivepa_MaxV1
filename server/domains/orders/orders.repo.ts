@@ -291,28 +291,20 @@ export class OrdersRepo {
   }
 
   async listUnclearedEarningsForUser(sellerId: string, client?: any): Promise<ClearingEarning[]> {
-    try {
-      const dbRunner = client || this.ctx.getPool();
-      const res = await dbRunner.query(
-        "SELECT * FROM earnings_clearing WHERE seller_id = $1 AND clearance_end > NOW() AND status = 'clearing'",
-        [sellerId]
-      );
-      return res.rows.map((r: any) => this.mapClearingEarningRow(r));
-    } catch {
-      return [];
-    }
+    const dbRunner = client || this.ctx.getPool();
+    const res = await dbRunner.query(
+      "SELECT * FROM earnings_clearing WHERE seller_id = $1 AND clearance_end > NOW() AND status = 'clearing'",
+      [sellerId]
+    );
+    return res.rows.map((r: any) => this.mapClearingEarningRow(r));
   }
 
   async getUnclearedEarningsAmount(sellerId: string, client?: any): Promise<number> {
-    try {
-      const dbRunner = client || this.ctx.getPool();
-      const res = await dbRunner.query(
-        "SELECT COALESCE(SUM(amount), 0) AS total FROM earnings_clearing WHERE seller_id = $1 AND clearance_end > NOW() AND status = 'clearing'",
-        [sellerId]
-      );
-      return Number(res.rows[0]?.total || 0);
-    } catch {
-      return 0;
-    }
+    const dbRunner = client || this.ctx.getPool();
+    const res = await dbRunner.query(
+      "SELECT COALESCE(SUM(amount), 0) AS total FROM earnings_clearing WHERE seller_id = $1 AND clearance_end > NOW() AND status = 'clearing'",
+      [sellerId]
+    );
+    return Number(res.rows[0]?.total || 0);
   }
 }

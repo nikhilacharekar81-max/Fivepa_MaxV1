@@ -37,6 +37,7 @@ import {
   NotificationsRepo,
   AdminRepo
 } from '../domains/index.js';
+import { IS_PRODUCTION as INIT_IS_PRODUCTION, resolveIsProduction } from '../initEnv.js';
 
 const { Pool } = pkg;
 
@@ -45,6 +46,18 @@ const __dirname = path.dirname(__filename);
 
 export function isRemotePostgresConfigured(): boolean {
   return Boolean(process.env.DATABASE_URL || process.env.SQL_HOST);
+}
+
+export function isProductionPostgresRequired(): boolean {
+  return Boolean(INIT_IS_PRODUCTION || process.env.NODE_ENV === 'production' || resolveIsProduction(import.meta.url));
+}
+
+export function assertProductionPostgresConfigured(): void {
+  if (isProductionPostgresRequired() && !isRemotePostgresConfigured()) {
+    throw new Error(
+      'FATAL: Production requires a configured remote PostgreSQL database (DATABASE_URL or SQL_HOST). Embedded PGlite fallback is strictly disabled in production.'
+    );
+  }
 }
 
 export function isPostgresEnabled(): boolean {
@@ -226,7 +239,7 @@ class PGlitePool {
     await this.isReadyPromise;
     const activeTx = getActiveTx();
     if (activeTx) {
-      return this._rawQuery(text, params);
+      return activeTx.client.query(text, params);
     }
 
     let releaseLock!: () => void;
@@ -257,19 +270,13 @@ class PGlitePool {
     await prevLock;
 
     let released = false;
-    const safetyTimer = setTimeout(() => {
-      if (!released) {
-        released = true;
-        releaseLock();
-      }
-    }, 30000);
-    if (typeof (safetyTimer as any).unref === 'function') {
-      (safetyTimer as any).unref();
-    }
-
     let clientQueue: Promise<any> = Promise.resolve();
+
     return {
       query: (text: string, params?: any[]) => {
+        if (released) {
+          return Promise.reject(new Error('Cannot execute query on a released database client.'));
+        }
         const next = clientQueue.then(
           () => this._rawQuery(text, params),
           () => this._rawQuery(text, params)
@@ -280,8 +287,9 @@ class PGlitePool {
       release: () => {
         if (!released) {
           released = true;
-          clearTimeout(safetyTimer);
-          releaseLock();
+          clientQueue.finally(() => {
+            releaseLock();
+          });
         }
       }
     };
@@ -295,6 +303,7 @@ class PGlitePool {
 
 export function getRawPool(): pkg.Pool {
   if (!isRemotePostgresConfigured()) {
+    assertProductionPostgresConfigured();
     if (!global._appMockPool) {
       try {
         const pgDataDir = process.env.NODE_ENV === 'test'
@@ -471,6 +480,7 @@ export class PostgresStore {
   }
 
   async runMigrations(): Promise<void> {
+    assertProductionPostgresConfigured();
     if (!isPostgresEnabled()) return;
     const candidatePaths = [
       path.join(__dirname, 'migration.sql'),
@@ -488,6 +498,7 @@ export class PostgresStore {
     }
 
     if (!isRemotePostgresConfigured()) {
+      assertProductionPostgresConfigured();
       await this.getPool().query(sql);
       console.log(`[PostgresStore] Migrations executed successfully on embedded PostgreSQL (${getDatabaseName()}).`);
       return;

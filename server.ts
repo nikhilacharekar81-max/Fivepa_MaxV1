@@ -10,13 +10,14 @@ import { initWebSocketServer } from './server/websocket.js';
 import { runBackgroundJobs } from './server/jobs/backgroundJobs.js';
 import { setupSSR } from './server/ssr.js';
 import { slugify } from './src/utils/slugify.js';
-import { postgresStore } from './server/db/postgresStore.js';
+import { postgresStore, assertProductionPostgresConfigured } from './server/db/postgresStore.js';
 import { apiRouter } from './server/routes/index.js';
 import { categories } from './server/routes/adminRoutes.js';
 import { rootRouter } from './server/routes/rootRoutes.js';
 import { siteSettings, DEFAULT_SITE_SETTINGS } from './src/server/siteSettings.js';
 import { isGigPublic, sanitizePublicGig } from './server/publicData.js';
-import { safeUser } from './server/middleware/auth.js';
+import { safeUser, assertProductionJwtSecret } from './server/middleware/auth.js';
+import { assertProductionGatewayEncryptionKey } from './server/domains/finance/paymentGateways.js';
 import {
   saveOrdersToDisk,
   hydrateStoreFromPostgres,
@@ -96,6 +97,9 @@ const IS_PROD = IS_PRODUCTION;
 
 if (IS_PROD) {
   (process.env as any).NODE_ENV = 'production';
+  assertProductionJwtSecret();
+  assertProductionGatewayEncryptionKey();
+  assertProductionPostgresConfigured();
 }
 
 let isShuttingDown = false;

@@ -1,1 +1,1 @@
-export * from '../../../server/middleware/adminAuth.js';
+export * from '../../../server/middleware/auth.js';

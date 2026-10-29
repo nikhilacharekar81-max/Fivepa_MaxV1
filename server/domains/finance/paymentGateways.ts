@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { IS_PRODUCTION as INIT_IS_PRODUCTION, resolveIsProduction } from '../../initEnv.js';
 
 export interface GatewayConfig {
   enabled: boolean;
@@ -40,12 +41,61 @@ const DEFAULT_STATE: PaymentGatewaysState = {
   sandbox: JSON.parse(JSON.stringify(DEFAULT_ENV_GATEWAYS))
 };
 
-function getEncryptionKey(): Buffer {
-  const keyHex = process.env.GATEWAY_ENCRYPTION_KEY || process.env.JWT_SECRET;
-  if (!keyHex || keyHex.trim() === '') {
-    return crypto.createHash('sha256').update('dev_mode_fixed_gateway_encryption_key_12345').digest();
+const WEAK_GATEWAY_KEY_PLACEHOLDERS = new Set([
+  'changeme',
+  'secret',
+  'default',
+  'gateway_encryption_key',
+  'your-gateway-encryption-key',
+  'your_gateway_encryption_key',
+  'dev_mode_fixed_gateway_encryption_key_12345',
+  'replace-with-strong-secret'
+]);
+
+const EPHEMERAL_DEV_GATEWAY_KEY = crypto.randomBytes(32);
+
+export function isValidGatewayEncryptionKey(key: unknown): key is string {
+  if (typeof key !== 'string') return false;
+  const trimmed = key.trim();
+  if (trimmed.length < 16) return false;
+  if (WEAK_GATEWAY_KEY_PLACEHOLDERS.has(trimmed.toLowerCase())) return false;
+  return true;
+}
+
+export function assertProductionGatewayEncryptionKey(): string {
+  const rawKey = process.env.GATEWAY_ENCRYPTION_KEY;
+  if (!isValidGatewayEncryptionKey(rawKey)) {
+    throw new Error(
+      'FATAL: Production requires an explicit, strong GATEWAY_ENCRYPTION_KEY environment variable (minimum 16 characters, independent of JWT_SECRET, non-placeholder). Predictable fallback encryption keys are disabled in production.'
+    );
   }
-  return crypto.createHash('sha256').update(keyHex).digest();
+  if (process.env.JWT_SECRET && rawKey.trim() === process.env.JWT_SECRET.trim()) {
+    throw new Error(
+      'FATAL: Production GATEWAY_ENCRYPTION_KEY must be independent of JWT_SECRET.'
+    );
+  }
+  return rawKey.trim();
+}
+
+if (INIT_IS_PRODUCTION || process.env.NODE_ENV === 'production' || resolveIsProduction(import.meta.url)) {
+  assertProductionGatewayEncryptionKey();
+}
+
+function getEncryptionKey(): Buffer {
+  const isProd = INIT_IS_PRODUCTION || process.env.NODE_ENV === 'production' || resolveIsProduction(import.meta.url);
+  const rawKey = process.env.GATEWAY_ENCRYPTION_KEY;
+  if (isValidGatewayEncryptionKey(rawKey)) {
+    if (isProd && process.env.JWT_SECRET && rawKey.trim() === process.env.JWT_SECRET.trim()) {
+      throw new Error(
+        'FATAL: Production GATEWAY_ENCRYPTION_KEY must be independent of JWT_SECRET.'
+      );
+    }
+    return crypto.createHash('sha256').update(rawKey.trim()).digest();
+  }
+  if (isProd) {
+    assertProductionGatewayEncryptionKey();
+  }
+  return EPHEMERAL_DEV_GATEWAY_KEY;
 }
 
 const GATEWAY_FETCH_TIMEOUT_MS = 10_000;

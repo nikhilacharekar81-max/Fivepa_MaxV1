@@ -8,14 +8,46 @@ import { disconnectUserSessionSocket } from '../websocket.js';
 
 export const IS_PRODUCTION = INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url);
 
-const EPHEMERAL_DEV_JWT_SECRET = createHmac('sha256', 'wph-dev-only-ephemeral-secret')
-  .update(process.cwd())
-  .digest('hex');
+const WEAK_JWT_SECRET_PLACEHOLDERS = new Set([
+  'changeme',
+  'secret',
+  'default',
+  'jwt_secret',
+  'your-jwt-secret',
+  'your_jwt_secret',
+  'dev_mode_fixed_jwt_secret',
+  'wph-dev-only-ephemeral-secret',
+  'replace-with-strong-secret'
+]);
 
-function resolveJwtSecret(): string {
+const EPHEMERAL_DEV_JWT_SECRET = randomBytes(32).toString('hex');
+
+export function isValidJwtSecret(secret: unknown): secret is string {
+  if (typeof secret !== 'string') return false;
+  const trimmed = secret.trim();
+  if (trimmed.length < 16) return false;
+  if (WEAK_JWT_SECRET_PLACEHOLDERS.has(trimmed.toLowerCase())) return false;
+  return true;
+}
+
+export function assertProductionJwtSecret(): string {
   const fromEnv = process.env.JWT_SECRET;
-  if (fromEnv && fromEnv.length >= 16) {
-    return fromEnv;
+  if (!isValidJwtSecret(fromEnv)) {
+    throw new Error(
+      'FATAL: Production requires an explicit, strong JWT_SECRET environment variable (minimum 16 characters, non-placeholder). Predictable or ephemeral fallback secrets are disabled in production.'
+    );
+  }
+  return fromEnv.trim();
+}
+
+export function resolveJwtSecret(): string {
+  const isProd = IS_PRODUCTION || process.env.NODE_ENV === 'production' || resolveIsProduction(import.meta.url);
+  const fromEnv = process.env.JWT_SECRET;
+  if (isValidJwtSecret(fromEnv)) {
+    return fromEnv.trim();
+  }
+  if (isProd) {
+    return assertProductionJwtSecret();
   }
   return EPHEMERAL_DEV_JWT_SECRET;
 }

@@ -47,15 +47,12 @@ export function getUnclearedEarnings(userId: string): number {
 }
 
 export async function getUnclearedEarningsFromDb(userId: string, client?: any): Promise<number> {
-  const dbAmount = await store.getUnclearedEarningsAmount(userId, client);
-  if (dbAmount > 0) return dbAmount;
-  return getUnclearedEarnings(userId);
+  return await store.getUnclearedEarningsAmount(userId, client);
 }
 
 export async function getActiveEscrowRemaining(order: Order, client?: any): Promise<number> {
   const esc = await financialRepository.getEscrow(order.id, client);
-  if (esc) return esc.remaining;
-  return (order.status === 'completed' || order.status === 'cancelled') ? 0 : Number(order.amount || 0);
+  return esc ? Number(esc.remaining || 0) : 0;
 }
 
 export const orderIndex = new Map<string, Order>();

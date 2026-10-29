@@ -12,7 +12,13 @@ import { financeLedger, FinanceLedgerEngine } from '../src/server/financeLedger.
 import { siteSettings, DEFAULT_SITE_SETTINGS } from '../src/server/siteSettings.js';
 import { workspaceService } from '../src/server/workspaceService.js';
 import { paymentGatewayManager } from '../src/server/paymentGateways.js';
-import { postgresStore, isPostgresEnabled, isRemotePostgresConfigured } from './db/postgresStore.js';
+import {
+  postgresStore,
+  isPostgresEnabled,
+  isRemotePostgresConfigured,
+  assertProductionPostgresConfigured,
+  isProductionPostgresRequired
+} from './db/postgresStore.js';
 import { financialRepository, financialTransactionService } from './services/financialService.js';
 import { calculateOrderFees } from './domains/finance/fees.js';
 
@@ -1590,7 +1596,11 @@ export function saveProjectClarificationsToDisk() { return Promise.resolve(); }
 export function saveWorkstreamUploadIndex() { return Promise.resolve(); }
 
 export async function hydrateStoreFromPostgres() {
+  assertProductionPostgresConfigured();
   if (!isPostgresEnabled()) {
+    if (isProductionPostgresRequired()) {
+      throw new Error('FATAL: PostgreSQL cannot be disabled in production.');
+    }
     postgresStore.isHydrated = true;
     console.log('DEV mode: Postgres disabled');
     return;
@@ -1937,14 +1947,9 @@ export async function hydrateStoreFromPostgres() {
 
     console.log('[PostgresStore] Zero split-brain Cloud Run architecture initialized. PostgreSQL is the 100% source of truth.');
   } catch (err: any) {
-    if (process.env.NODE_ENV === 'production') {
+    if (isProductionPostgresRequired()) {
       console.error('FATAL: PostgreSQL failed to initialize in production mode:', err);
       throw err;
-    }
-    if (err?.code === 'ECONNREFUSED' || err?.message?.includes('ECONNREFUSED')) {
-      console.warn('WARNING: PostgreSQL connection refused (ECONNREFUSED). Falling back to non-postgres mode for local development/preview.');
-      postgresStore.isHydrated = true;
-      return;
     }
     console.error('CRITICAL: Failed to initialize PostgreSQL at startup:', err);
     throw err;
