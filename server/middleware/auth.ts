@@ -17,24 +17,62 @@ const WEAK_JWT_SECRET_PLACEHOLDERS = new Set([
   'your_jwt_secret',
   'dev_mode_fixed_jwt_secret',
   'wph-dev-only-ephemeral-secret',
-  'replace-with-strong-secret'
+  'replace-with-strong-secret',
+  'password',
+  '12345678',
+  '1234567890123456',
+  'admin',
+  'administrator',
+  'supersecret',
+  'mysecretkey123456',
+  'testsecretkey1234',
+  'secretkey1234567890',
+  'production_jwt_secret',
+  'gateway_encryption_key'
 ]);
 
 const EPHEMERAL_DEV_JWT_SECRET = randomBytes(32).toString('hex');
 
-export function isValidJwtSecret(secret: unknown): secret is string {
+function hasLowEntropySecret(secret: string): boolean {
+  const trimmed = secret.trim();
+  const uniqueChars = new Set(trimmed).size;
+  if (uniqueChars < 8) return true;
+
+  for (let patternLen = 1; patternLen <= 8; patternLen++) {
+    const pattern = trimmed.slice(0, patternLen);
+    const repeated = pattern.repeat(Math.ceil(trimmed.length / patternLen)).slice(0, trimmed.length);
+    if (trimmed === repeated) return true;
+  }
+
+  const alphaSeq = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  if (alphaSeq.includes(trimmed.toLowerCase())) return true;
+  const numSeq = '0123456789012345678901234567890123456789';
+  if (numSeq.includes(trimmed)) return true;
+
+  return false;
+}
+
+export function isValidJwtSecret(secret: unknown, isProductionCheck = false): secret is string {
   if (typeof secret !== 'string') return false;
   const trimmed = secret.trim();
-  if (trimmed.length < 16) return false;
-  if (WEAK_JWT_SECRET_PLACEHOLDERS.has(trimmed.toLowerCase())) return false;
+  const minLen = isProductionCheck ? 32 : 16;
+  if (trimmed.length < minLen) return false;
+
+  const normalized = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (WEAK_JWT_SECRET_PLACEHOLDERS.has(trimmed.toLowerCase()) || WEAK_JWT_SECRET_PLACEHOLDERS.has(normalized)) {
+    return false;
+  }
+
+  if (hasLowEntropySecret(trimmed)) return false;
+
   return true;
 }
 
 export function assertProductionJwtSecret(): string {
   const fromEnv = process.env.JWT_SECRET;
-  if (!isValidJwtSecret(fromEnv)) {
+  if (!isValidJwtSecret(fromEnv, true)) {
     throw new Error(
-      'FATAL: Production requires an explicit, strong JWT_SECRET environment variable (minimum 16 characters, non-placeholder). Predictable or ephemeral fallback secrets are disabled in production.'
+      'FATAL: Production requires an explicit, high-entropy JWT_SECRET environment variable (minimum 32 characters, non-placeholder, non-repetitive). Predictable or ephemeral fallback secrets are disabled in production.'
     );
   }
   return fromEnv.trim();
@@ -43,7 +81,7 @@ export function assertProductionJwtSecret(): string {
 export function resolveJwtSecret(): string {
   const isProd = IS_PRODUCTION || process.env.NODE_ENV === 'production' || resolveIsProduction(import.meta.url);
   const fromEnv = process.env.JWT_SECRET;
-  if (isValidJwtSecret(fromEnv)) {
+  if (isValidJwtSecret(fromEnv, isProd)) {
     return fromEnv.trim();
   }
   if (isProd) {

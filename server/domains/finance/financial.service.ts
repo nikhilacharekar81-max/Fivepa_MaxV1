@@ -1731,17 +1731,21 @@ export class FinancialTransactionService {
   }, externalClient?: any) {
     assertValidMoneyAmount(params.feeAmount, 'featured gig fee');
 
-    const operationIdempKey =
-      (params.idempotencyKey && params.idempotencyKey.trim())
-        ? params.idempotencyKey.trim()
-        : `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${params.operationId?.trim() || randomUUID()}`;
+    const rawIdempKey = params.idempotencyKey && params.idempotencyKey.trim();
+    const rawOpId = params.operationId && params.operationId.trim();
+    const operationIdempKey = rawIdempKey
+      ? rawIdempKey
+      : rawOpId
+        ? `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${rawOpId}`
+        : `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${randomUUID()}`;
 
     const run = async (client: any) => {
       const idempKey = operationIdempKey;
       const payloadFingerprint = {
         gigId: params.gigId,
         sellerId: params.sellerId,
-        feeAmount: params.feeAmount
+        feeAmount: params.feeAmount,
+        featuredUntil: params.featuredUntil
       };
 
       const check = await checkOrRecordIdempotency(client, idempKey, 'chargeFeaturedGigFee', payloadFingerprint);
@@ -1828,10 +1832,13 @@ export class FinancialTransactionService {
   }, externalClient?: any) {
     assertValidMoneyAmount(params.feeAmount, 'promotion fee');
 
-    const operationIdempKey =
-      (params.idempotencyKey && params.idempotencyKey.trim())
-        ? params.idempotencyKey.trim()
-        : `IDEMP-PROMO-${params.targetType}-${params.targetId}-${params.operationId?.trim() || randomUUID()}`;
+    const rawIdempKey = params.idempotencyKey && params.idempotencyKey.trim();
+    const rawOpId = params.operationId && params.operationId.trim();
+    const operationIdempKey = rawIdempKey
+      ? rawIdempKey
+      : rawOpId
+        ? `IDEMP-PROMO-${params.targetType}-${params.targetId}-${rawOpId}`
+        : `IDEMP-PROMO-${params.targetType}-${params.targetId}-${randomUUID()}`;
 
     const run = async (client: any) => {
       const idempKey = operationIdempKey;
@@ -1839,7 +1846,8 @@ export class FinancialTransactionService {
         targetType: params.targetType,
         targetId: params.targetId,
         userId: params.userId,
-        feeAmount: params.feeAmount
+        feeAmount: params.feeAmount,
+        description: params.description
       };
 
       const check = await checkOrRecordIdempotency(client, idempKey, 'chargePromotionFee', payloadFingerprint);

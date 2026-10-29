@@ -417,10 +417,16 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
       req.headers['idempotency-key'] ||
       req.headers['x-idempotency-key'] ||
       req.body?.idempotencyKey ||
-      req.body?.requestKey ||
-      req.body?.operationId
+      req.body?.requestKey
     ) as string | undefined;
-    const operationId = (req as any).requestId || randomUUID();
+    const trimmedIdempKey = callerIdempKey && String(callerIdempKey).trim() ? String(callerIdempKey).trim() : undefined;
+
+    const callerOpId = (
+      req.body?.operationId ||
+      req.headers['x-request-id'] ||
+      (req as any).requestId
+    ) as string | undefined;
+    const trimmedOpId = callerOpId && String(callerOpId).trim() ? String(callerOpId).trim() : undefined;
 
     const result = await financialTransactionService.chargeFeaturedGigFee({
       gigId: req.params.id,
@@ -428,8 +434,8 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
       feeAmount: fee,
       featuredUntil: expiresAt,
       actor: `user:${caller.id}`,
-      idempotencyKey: callerIdempKey && String(callerIdempKey).trim() ? String(callerIdempKey).trim() : undefined,
-      operationId
+      idempotencyKey: trimmedIdempKey,
+      operationId: trimmedOpId
     });
 
     res.json(result);

@@ -49,32 +49,72 @@ const WEAK_GATEWAY_KEY_PLACEHOLDERS = new Set([
   'your-gateway-encryption-key',
   'your_gateway_encryption_key',
   'dev_mode_fixed_gateway_encryption_key_12345',
-  'replace-with-strong-secret'
+  'replace-with-strong-secret',
+  'password',
+  '12345678',
+  '1234567890123456',
+  'admin',
+  'administrator',
+  'supersecret',
+  'mysecretkey123456',
+  'testsecretkey1234',
+  'secretkey1234567890',
+  'jwt_secret',
+  'production_gateway_key'
 ]);
 
 const EPHEMERAL_DEV_GATEWAY_KEY = crypto.randomBytes(32);
 
-export function isValidGatewayEncryptionKey(key: unknown): key is string {
+function hasLowEntropyKey(key: string): boolean {
+  const trimmed = key.trim();
+  const uniqueChars = new Set(trimmed).size;
+  if (uniqueChars < 8) return true;
+
+  for (let patternLen = 1; patternLen <= 8; patternLen++) {
+    const pattern = trimmed.slice(0, patternLen);
+    const repeated = pattern.repeat(Math.ceil(trimmed.length / patternLen)).slice(0, trimmed.length);
+    if (trimmed === repeated) return true;
+  }
+
+  const alphaSeq = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  if (alphaSeq.includes(trimmed.toLowerCase())) return true;
+  const numSeq = '0123456789012345678901234567890123456789';
+  if (numSeq.includes(trimmed)) return true;
+
+  return false;
+}
+
+export function isValidGatewayEncryptionKey(key: unknown, isProductionCheck = false): key is string {
   if (typeof key !== 'string') return false;
   const trimmed = key.trim();
-  if (trimmed.length < 16) return false;
-  if (WEAK_GATEWAY_KEY_PLACEHOLDERS.has(trimmed.toLowerCase())) return false;
+  const minLen = isProductionCheck ? 32 : 16;
+  if (trimmed.length < minLen) return false;
+
+  const normalized = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (WEAK_GATEWAY_KEY_PLACEHOLDERS.has(trimmed.toLowerCase()) || WEAK_GATEWAY_KEY_PLACEHOLDERS.has(normalized)) {
+    return false;
+  }
+
+  if (hasLowEntropyKey(trimmed)) return false;
+
   return true;
 }
 
 export function assertProductionGatewayEncryptionKey(): string {
   const rawKey = process.env.GATEWAY_ENCRYPTION_KEY;
-  if (!isValidGatewayEncryptionKey(rawKey)) {
+  if (!isValidGatewayEncryptionKey(rawKey, true)) {
     throw new Error(
-      'FATAL: Production requires an explicit, strong GATEWAY_ENCRYPTION_KEY environment variable (minimum 16 characters, independent of JWT_SECRET, non-placeholder). Predictable fallback encryption keys are disabled in production.'
+      'FATAL: Production requires an explicit, high-entropy GATEWAY_ENCRYPTION_KEY environment variable (minimum 32 characters, independent of JWT_SECRET, non-placeholder, non-repetitive). Predictable fallback encryption keys are disabled in production.'
     );
   }
-  if (process.env.JWT_SECRET && rawKey.trim() === process.env.JWT_SECRET.trim()) {
+  const trimmedKey = rawKey.trim();
+  const jwtSecret = process.env.JWT_SECRET?.trim();
+  if (jwtSecret && trimmedKey.toLowerCase() === jwtSecret.toLowerCase()) {
     throw new Error(
       'FATAL: Production GATEWAY_ENCRYPTION_KEY must be independent of JWT_SECRET.'
     );
   }
-  return rawKey.trim();
+  return trimmedKey;
 }
 
 if (INIT_IS_PRODUCTION || process.env.NODE_ENV === 'production' || resolveIsProduction(import.meta.url)) {
@@ -84,8 +124,8 @@ if (INIT_IS_PRODUCTION || process.env.NODE_ENV === 'production' || resolveIsProd
 function getEncryptionKey(): Buffer {
   const isProd = INIT_IS_PRODUCTION || process.env.NODE_ENV === 'production' || resolveIsProduction(import.meta.url);
   const rawKey = process.env.GATEWAY_ENCRYPTION_KEY;
-  if (isValidGatewayEncryptionKey(rawKey)) {
-    if (isProd && process.env.JWT_SECRET && rawKey.trim() === process.env.JWT_SECRET.trim()) {
+  if (isValidGatewayEncryptionKey(rawKey, isProd)) {
+    if (isProd && process.env.JWT_SECRET && rawKey.trim().toLowerCase() === process.env.JWT_SECRET.trim().toLowerCase()) {
       throw new Error(
         'FATAL: Production GATEWAY_ENCRYPTION_KEY must be independent of JWT_SECRET.'
       );
