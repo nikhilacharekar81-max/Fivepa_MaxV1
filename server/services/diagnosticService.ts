@@ -94,28 +94,39 @@ class DiagnosticService {
     return result;
   }
 
-  private async flush() {
-    if (!isPostgresEnabled() || this.queue.length === 0) return;
-    
-    const entriesToFlush = [...this.queue];
-    this.queue = [];
+  private isFlushing = false;
 
-    try {
-      await postgresStore.executeInTransaction(async (client: any) => {
-        for (const entry of entriesToFlush) {
-          await client.query(
-            `INSERT INTO runtime_diagnostic_logs (id, timestamp, severity, service, function_name, implementation, operation, request_id, outcome, error_message, details)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-            [
-              entry.id, entry.timestamp, entry.severity, entry.service, entry.function_name,
-              entry.implementation, entry.operation, entry.request_id || null, entry.outcome, entry.error_message, JSON.stringify(entry.details)
-            ]
-          );
+  private flush() {
+    if (!isPostgresEnabled() || this.queue.length === 0 || this.isFlushing) return;
+    this.isFlushing = true;
+
+    setImmediate(() => {
+      postgresStore.runOutsideTransaction(async () => {
+        try {
+          while (this.queue.length > 0) {
+            const entriesToFlush = [...this.queue];
+            this.queue = [];
+            await postgresStore.executeInTransaction(async (client: any) => {
+              for (const entry of entriesToFlush) {
+                await client.query(
+                  `INSERT INTO runtime_diagnostic_logs (id, timestamp, severity, service, function_name, implementation, operation, request_id, outcome, error_message, details)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                   ON CONFLICT (id) DO NOTHING`,
+                  [
+                    entry.id, entry.timestamp, entry.severity, entry.service, entry.function_name,
+                    entry.implementation, entry.operation, entry.request_id || null, entry.outcome, entry.error_message, JSON.stringify(entry.details)
+                  ]
+                );
+              }
+            });
+          }
+        } catch (err) {
+          console.error('[DiagnosticService] Postgres flush failed:', err);
+        } finally {
+          this.isFlushing = false;
         }
       });
-    } catch (err) {
-      console.error('[DiagnosticService] Postgres flush failed:', err);
-    }
+    });
   }
 
   private exportToFile(entry: any) {

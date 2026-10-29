@@ -156,9 +156,10 @@ class WorkspaceService {
     if (ws) {
       const updatedOrderIds = Array.isArray(ws.orderIds) ? [...ws.orderIds] : [];
       if (!updatedOrderIds.includes(order.id)) updatedOrderIds.push(order.id);
+      const isNewActiveOrder = !ws.activeOrderId || !['completed', 'cancelled', 'refunded'].includes(order.status);
       const updatedWs: Workspace & { orderIds?: string[]; updatedAt?: string } = {
         ...ws,
-        activeOrderId: ws.activeOrderId || order.id,
+        activeOrderId: isNewActiveOrder ? order.id : (ws.activeOrderId || order.id),
         orderIds: updatedOrderIds,
         updatedAt: new Date().toISOString()
       };

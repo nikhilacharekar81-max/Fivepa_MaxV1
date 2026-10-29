@@ -155,9 +155,9 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
   }
 }
 
-export async function ensureWallet(userId: string) {
+export async function ensureWallet(userId: string, client?: any) {
   try {
-    await financialTransactionService.ensureWallet(userId);
+    await financialTransactionService.ensureWallet(userId, client);
   } catch (err) {
     console.error(`[ensureWallet] Failed for user ${userId}:`, err);
   }
@@ -182,7 +182,8 @@ export async function resolveGigOrderPrice(gigId: string, extraIds: unknown): Pr
   }
   const basePrice = Number(r.price || 0);
   const baseDeliveryDays = Math.max(1, Math.round(Number(r.delivery_days || r.deliveryDays || 7)));
-  const extras = Array.isArray(r.extras) ? r.extras : [];
+  const parsedExtras = typeof r.extras === 'string' ? (() => { try { return JSON.parse(r.extras); } catch { return []; } })() : r.extras;
+  const extras = Array.isArray(parsedExtras) ? parsedExtras : [];
   const requestedIds = Array.isArray(extraIds) 
     ? Array.from(new Set(extraIds.map(String).filter(Boolean)))
     : [];

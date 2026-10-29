@@ -1083,13 +1083,13 @@ export class PostgresAsyncStore implements StoreInterface {
         small_order_fee = EXCLUDED.small_order_fee,
         selected_extras = COALESCE(EXCLUDED.selected_extras, orders.selected_extras),
         status = CASE
-          WHEN orders.status IN ('completed', 'cancelled') THEN orders.status
+          WHEN orders.status IN ('completed', 'cancelled', 'refunded') THEN orders.status
           ELSE EXCLUDED.status
         END,
         created_at = EXCLUDED.created_at,
         due_date = EXCLUDED.due_date,
         completed_at = CASE
-          WHEN orders.status IN ('completed', 'cancelled') THEN orders.completed_at
+          WHEN orders.status IN ('completed', 'cancelled', 'refunded') THEN orders.completed_at
           ELSE COALESCE(EXCLUDED.completed_at, orders.completed_at)
         END,
         requirements = EXCLUDED.requirements,
@@ -1129,7 +1129,7 @@ export class PostgresAsyncStore implements StoreInterface {
         cancellation_request = EXCLUDED.cancellation_request,
         cancellation_history = EXCLUDED.cancellation_history,
         cancellation_type = CASE
-          WHEN orders.status IN ('completed', 'cancelled') THEN orders.cancellation_type
+          WHEN orders.status IN ('completed', 'cancelled', 'refunded') THEN orders.cancellation_type
           ELSE COALESCE(EXCLUDED.cancellation_type, orders.cancellation_type)
         END,
         review_window_restarted_at = EXCLUDED.review_window_restarted_at,
@@ -1821,7 +1821,7 @@ export async function hydrateStoreFromPostgres() {
       const protectionEnd = new Date(Date.now() + 14 * 86400000).toISOString().split('T')[0];
       const nowIso = new Date().toISOString();
       const seedOrderId = 'ord_seed_1';
-      const seedWs = workspaceService.createWorkspace({
+      const seedWs = await workspaceService.createWorkspaceAsync({
         buyerId: 'u2',
         sellerId: 'u1',
         originType: 'gig',
@@ -1863,7 +1863,7 @@ export async function hydrateStoreFromPostgres() {
       } as unknown as Order;
 
       await store.saveOrder(seedOrder);
-      workspaceService.ensureWorkspaceForOrder(seedOrder);
+      await workspaceService.ensureWorkspaceForOrderAsync(seedOrder);
 
       await postgresStore.seedEscrow(seedOrderId, seedOrder.title, 'u2', 'u1', 450, 450, nowIso);
 
@@ -1905,9 +1905,9 @@ export async function hydrateStoreFromPostgres() {
 
     const allOrders = await store.listOrders();
     if (allOrders.length > 0) {
-      const migrated = workspaceService.migrateLegacyOrders(allOrders, false);
-      if (migrated.migratedCount > 0) {
-        for (const o of allOrders) {
+      for (const o of allOrders) {
+        if (!o.workspaceId || !workspaceService.getWorkspace(o.workspaceId)) {
+          await workspaceService.ensureWorkspaceForOrderAsync(o);
           await store.saveOrder(o);
         }
       }

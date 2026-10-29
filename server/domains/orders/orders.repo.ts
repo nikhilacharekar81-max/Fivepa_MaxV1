@@ -29,11 +29,14 @@ export class OrdersRepo {
         if (!order?.id || seen.has(order.id)) continue;
         seen.add(order.id);
         const resolvedOrderType = order.orderType || (order as any).type || (order.projectId ? 'project' : (order.gigId ? 'gig' : null));
-        const serviceFee = order.serviceFee ?? (order.feeBreakdown as any)?.buyerFee ?? 0;
+        const serviceFee = order.serviceFee ?? (order.feeBreakdown as any)?.buyerFee ?? (order.feeBreakdown as any)?.serviceFee ?? 0;
         const smallOrderFee = order.smallOrderFee ?? (order.feeBreakdown as any)?.smallOrderFee ?? 0;
+        const selectedExtrasJson = (order as any).selectedExtras !== undefined
+          ? JSON.stringify((order as any).selectedExtras)
+          : null;
         await client.query(
           `INSERT INTO orders (
-            id, title, buyer_id, seller_id, amount, status, created_at, due_date, completed_at, 
+            id, title, buyer_id, seller_id, client_id, freelancer_id, amount, status, created_at, due_date, completed_at, 
             requirements, deliverables, deliverable_files, revisions, admin_notes, is_muted, 
             escrow_protection_start_date, escrow_protection_end_date, gig_id, project_id, 
             service_url, gig_slug, seller_username, buyer_username, service_title, service_thumbnail, 
@@ -43,19 +46,23 @@ export class OrdersRepo {
             order_type, gig_order_id, project_order_id, proposal_id,
             extension_requests, free_extension_used, cancellation_request, cancellation_history,
             cancellation_type, review_window_restarted_at, response_deadline,
-            service_fee, small_order_fee, selected_extras
+            service_fee, small_order_fee, selected_extras, updated_at
           ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+            $1, $2, $3, $4, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
             $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
             $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
-            $49, $50, $51
+            $49, $50, $51, NOW()
           )
           ON CONFLICT (id) DO UPDATE SET
             title = EXCLUDED.title,
+            buyer_id = EXCLUDED.buyer_id,
+            seller_id = EXCLUDED.seller_id,
+            client_id = COALESCE(EXCLUDED.client_id, orders.client_id, EXCLUDED.buyer_id),
+            freelancer_id = COALESCE(EXCLUDED.freelancer_id, orders.freelancer_id, EXCLUDED.seller_id),
             amount = EXCLUDED.amount,
             service_fee = EXCLUDED.service_fee,
             small_order_fee = EXCLUDED.small_order_fee,
-            selected_extras = EXCLUDED.selected_extras,
+            selected_extras = COALESCE(EXCLUDED.selected_extras, orders.selected_extras),
             status = CASE
               WHEN orders.status IN ('completed', 'cancelled', 'refunded') THEN orders.status
               ELSE EXCLUDED.status
@@ -102,7 +109,10 @@ export class OrdersRepo {
             free_extension_used = EXCLUDED.free_extension_used,
             cancellation_request = EXCLUDED.cancellation_request,
             cancellation_history = EXCLUDED.cancellation_history,
-            cancellation_type = COALESCE(EXCLUDED.cancellation_type, orders.cancellation_type),
+            cancellation_type = CASE
+              WHEN orders.status IN ('completed', 'cancelled', 'refunded') THEN orders.cancellation_type
+              ELSE COALESCE(EXCLUDED.cancellation_type, orders.cancellation_type)
+            END,
             review_window_restarted_at = EXCLUDED.review_window_restarted_at,
             response_deadline = EXCLUDED.response_deadline,
             updated_at = NOW()`,
@@ -123,7 +133,7 @@ export class OrdersRepo {
             JSON.stringify(order.extensionRequests || []), Boolean(order.freeExtensionUsed),
             JSON.stringify(order.cancellationRequest || null), JSON.stringify(order.cancellationHistory || []),
             order.cancellationType || null, order.reviewWindowRestartedAt || null, order.responseDeadline || null,
-            serviceFee, smallOrderFee, JSON.stringify((order as any).selectedExtras || [])
+            serviceFee, smallOrderFee, selectedExtrasJson
           ]
         );
       }

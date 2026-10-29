@@ -2381,11 +2381,15 @@ export class FinancialTransactionService {
 
       const LIFECYCLE_JOURNAL_TYPES = [
         'WALLET_DEPOSIT_CREDITED',
+        'WALLET_DEPOSIT',
         'ORDER_ESCROW_FUNDED',
+        'ESCROW_FUNDED',
         'ESCROW_TOPUP',
         'ORDER_ESCROW_TOPUP',
         'ESCROW_RELEASED_TO_FREELANCER',
+        'ESCROW_RELEASED',
         'ESCROW_REFUNDED_TO_BUYER',
+        'ESCROW_REFUNDED',
         'PAYOUT_REQUESTED',
         'PAYOUT_SETTLED',
         'PAYOUT_FAILED',

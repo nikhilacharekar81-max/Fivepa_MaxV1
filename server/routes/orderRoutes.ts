@@ -418,7 +418,7 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
 
       await client.query(
         `INSERT INTO orders (
-          id, title, buyer_id, seller_id, amount, status, created_at, due_date, completed_at, 
+          id, title, buyer_id, seller_id, client_id, freelancer_id, amount, status, created_at, due_date, completed_at, 
           requirements, deliverables, deliverable_files, revisions, admin_notes, is_muted, 
           escrow_protection_start_date, escrow_protection_end_date, gig_id, project_id, 
           service_url, gig_slug, seller_username, buyer_username, service_title, service_thumbnail, 
@@ -428,19 +428,22 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
           order_type, gig_order_id, project_order_id, proposal_id,
           extension_requests, free_extension_used, cancellation_request, cancellation_history,
           cancellation_type, review_window_restarted_at, response_deadline,
-          service_fee, small_order_fee, selected_extras
+          service_fee, small_order_fee, selected_extras, updated_at
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+          $1, $2, $3, $4, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
           $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
           $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
-          $49, $50, $51
+          $49, $50, $51, NOW()
         ) ON CONFLICT (id) DO UPDATE SET
           title = EXCLUDED.title,
+          client_id = COALESCE(EXCLUDED.client_id, orders.client_id, EXCLUDED.buyer_id),
+          freelancer_id = COALESCE(EXCLUDED.freelancer_id, orders.freelancer_id, EXCLUDED.seller_id),
           amount = EXCLUDED.amount,
           service_fee = EXCLUDED.service_fee,
           small_order_fee = EXCLUDED.small_order_fee,
           selected_extras = EXCLUDED.selected_extras,
-          status = CASE WHEN orders.status IN ('completed', 'cancelled', 'refunded') THEN orders.status ELSE EXCLUDED.status END`,
+          status = CASE WHEN orders.status IN ('completed', 'cancelled', 'refunded') THEN orders.status ELSE EXCLUDED.status END,
+          updated_at = NOW()`,
         [
           newOrd.id, newOrd.title, newOrd.buyerId, newOrd.sellerId, newOrd.amount, newOrd.status,
           newOrd.createdAt, newOrd.dueDate, newOrd.completedAt || null, newOrd.requirements || null,

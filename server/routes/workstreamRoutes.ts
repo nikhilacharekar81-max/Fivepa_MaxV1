@@ -1275,7 +1275,7 @@ router.post(
 
           const newOrder: Order = {
             id: newOrderId,
-            workspaceId: newOrderId,
+            workspaceId: offer.workspaceId || newOrderId,
             title: offerTitle,
             buyerId: clientId,
             sellerId: sellerId,
@@ -1438,39 +1438,163 @@ router.post(
           await ensureWallet(freshOrder.buyerId);
           await ensureWallet(freshOrder.sellerId);
 
-          await postgresStore.executeInTransaction(async (client) => {
-            const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [targetOffer.id]);
-            if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
-              throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
-            }
+          const hasExistingEscrow = await orderHasEscrow(freshOrder.id);
+          const isFollowOnOrder =
+            (hasExistingEscrow && (freshOrder.status === 'completed' || (await getActiveEscrowRemaining(freshOrder)) === 0)) ||
+            (freshOrder.status === 'cancelled' && (freshOrder.orderType === 'gig' || Boolean(freshOrder.gigOrderId))) ||
+            (freshOrder.orderType === 'project' && (freshOrder.status === 'completed' || freshOrder.status === 'cancelled') && targetOffer.kind === 'proposal');
 
-            const topUpRes = await topUpOrderEscrowWithEvent({
-              orderId: freshOrder.id,
-              orderTitle: targetOffer.title || freshOrder.title,
-              amount: amountToFund,
+          if (!hasExistingEscrow) {
+            const today = new Date().toISOString().split('T')[0];
+            const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays || 14;
+            const protectionEnd = new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0];
+            const newTitle = targetOffer.kind === 'proposal' && (/^inquiry:/i.test(freshOrder.title) || !freshOrder.amount) ? targetOffer.title : freshOrder.title;
+
+            await postgresStore.executeInTransaction(async (client) => {
+              const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [targetOffer.id]);
+              if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+                throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
+              }
+
+              await fundOrderEscrowWithEvent({
+                orderId: freshOrder.id,
+                orderTitle: newTitle,
+                amount: amountToFund,
+                buyerId: freshOrder.buyerId,
+                sellerId: freshOrder.sellerId,
+                actor: `user:${caller.id}`,
+                idempotencyKey
+              }, client);
+
+              const fundedRow = await store.getOrder(freshOrder.id, client);
+              if (fundedRow?.feeBreakdown) {
+                freshOrder.feeBreakdown = fundedRow.feeBreakdown;
+                (freshOrder as any).serviceFee = (fundedRow as any).serviceFee;
+                (freshOrder as any).smallOrderFee = (fundedRow as any).smallOrderFee;
+              }
+
+              freshOrder.title = newTitle;
+              freshOrder.amount = amountToFund;
+              freshOrder.status = 'in_progress';
+              freshOrder.escrowProtectionStartDate = today;
+              freshOrder.escrowProtectionEndDate = protectionEnd;
+              if (targetOffer.kind === 'proposal' && targetOffer.deliveryDays) {
+                freshOrder.dueDate = new Date(Date.now() + targetOffer.deliveryDays * 86400000).toISOString();
+              }
+
+              targetOffer.status = 'accepted';
+              targetOffer.resolvedAt = new Date().toISOString();
+              targetOffer.resolvedBy = caller.id;
+              await saveOfferToDb(targetOffer, client);
+              await store.saveOrder(freshOrder, client);
+              await syncUserBalances([freshOrder.buyerId, freshOrder.sellerId].filter(Boolean), client);
+            });
+
+            return res.json({ success: true, order: enrichOrderWithServiceInfo(freshOrder), offer: await viewOffer(targetOffer) });
+          } else if (isFollowOnOrder) {
+            const newOrderId = 'ord_' + randomUUID().slice(0, 12);
+            const today = new Date().toISOString().split('T')[0];
+            const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays || 14;
+            const protectionEnd = new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0];
+            const isGigFollowOn = freshOrder.orderType === 'gig' || (Boolean(freshOrder.gigId) && !freshOrder.projectId);
+            const orderType: 'gig' | 'project' = isGigFollowOn ? 'gig' : 'project';
+
+            const followOnOrder: Order = {
+              id: newOrderId,
+              workspaceId: freshOrder.workspaceId,
+              orderType,
+              ...(orderType === 'gig' ? { gigOrderId: newOrderId } : { projectOrderId: newOrderId }),
+              title: targetOffer.title || freshOrder.title,
               buyerId: freshOrder.buyerId,
               sellerId: freshOrder.sellerId,
-              actor: `user:${caller.id}`,
-              idempotencyKey
-            }, client);
+              amount: amountToFund,
+              status: 'payment_pending',
+              createdAt: today,
+              dueDate: targetOffer.kind === 'proposal' && targetOffer.deliveryDays
+                ? new Date(Date.now() + targetOffer.deliveryDays * 86400000).toISOString()
+                : new Date(Date.now() + 7 * 86400000).toISOString(),
+              escrowProtectionStartDate: today,
+              escrowProtectionEndDate: protectionEnd,
+              feeBreakdown: calculateOrderFees(amountToFund),
+              projectId: freshOrder.projectId,
+              gigId: freshOrder.gigId
+            };
 
-            targetOffer.status = 'accepted';
-            targetOffer.resolvedAt = new Date().toISOString();
-            targetOffer.resolvedBy = caller.id;
-            await saveOfferToDb(targetOffer, client);
+            const enrichedFollowOn = enrichOrderWithServiceInfo(followOnOrder);
+            await recordOrder(enrichedFollowOn);
 
-            freshOrder.amount = Math.round((Number(freshOrder.amount || 0) + amountToFund) * 100) / 100;
-            if (topUpRes?.diff?.next) {
-              freshOrder.feeBreakdown = topUpRes.diff.next;
-              (freshOrder as any).serviceFee = topUpRes.diff.next.serviceFee ?? 0;
-              (freshOrder as any).smallOrderFee = topUpRes.diff.next.smallOrderFee ?? 0;
-            }
-            freshOrder.status = 'in_progress';
-            await store.saveOrder(freshOrder, client);
-            await syncUserBalances([freshOrder.buyerId, freshOrder.sellerId].filter(Boolean), client);
-          });
+            await postgresStore.executeInTransaction(async (client) => {
+              const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [targetOffer.id]);
+              if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+                throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
+              }
 
-          return res.json({ success: true, order: enrichOrderWithServiceInfo(freshOrder), offer: await viewOffer(targetOffer) });
+              await store.saveOrder(enrichedFollowOn, client);
+
+              await fundOrderEscrowWithEvent({
+                orderId: enrichedFollowOn.id,
+                orderTitle: enrichedFollowOn.title,
+                amount: amountToFund,
+                buyerId: enrichedFollowOn.buyerId,
+                sellerId: enrichedFollowOn.sellerId,
+                actor: `user:${caller.id}`,
+                idempotencyKey
+              }, client);
+
+              const fundedRow = await store.getOrder(enrichedFollowOn.id, client);
+              if (fundedRow?.feeBreakdown) {
+                enrichedFollowOn.feeBreakdown = fundedRow.feeBreakdown;
+                (enrichedFollowOn as any).serviceFee = (fundedRow as any).serviceFee;
+                (enrichedFollowOn as any).smallOrderFee = (fundedRow as any).smallOrderFee;
+              }
+
+              enrichedFollowOn.status = 'in_progress';
+              await store.saveOrder(enrichedFollowOn, client);
+              await syncUserBalances([enrichedFollowOn.buyerId, enrichedFollowOn.sellerId].filter(Boolean), client);
+
+              targetOffer.orderId = enrichedFollowOn.id;
+              targetOffer.status = 'accepted';
+              targetOffer.resolvedAt = new Date().toISOString();
+              targetOffer.resolvedBy = caller.id;
+              await saveOfferToDb(targetOffer, client);
+            });
+
+            return res.json({ success: true, order: enrichOrderWithServiceInfo(enrichedFollowOn), offer: await viewOffer(targetOffer) });
+          } else {
+            await postgresStore.executeInTransaction(async (client) => {
+              const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [targetOffer.id]);
+              if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+                throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
+              }
+
+              const topUpRes = await topUpOrderEscrowWithEvent({
+                orderId: freshOrder.id,
+                orderTitle: targetOffer.title || freshOrder.title,
+                amount: amountToFund,
+                buyerId: freshOrder.buyerId,
+                sellerId: freshOrder.sellerId,
+                actor: `user:${caller.id}`,
+                idempotencyKey
+              }, client);
+
+              targetOffer.status = 'accepted';
+              targetOffer.resolvedAt = new Date().toISOString();
+              targetOffer.resolvedBy = caller.id;
+              await saveOfferToDb(targetOffer, client);
+
+              freshOrder.amount = Math.round((Number(freshOrder.amount || 0) + amountToFund) * 100) / 100;
+              if (topUpRes?.diff?.next) {
+                freshOrder.feeBreakdown = topUpRes.diff.next;
+                (freshOrder as any).serviceFee = topUpRes.diff.next.serviceFee ?? 0;
+                (freshOrder as any).smallOrderFee = topUpRes.diff.next.smallOrderFee ?? 0;
+              }
+              freshOrder.status = 'in_progress';
+              await store.saveOrder(freshOrder, client);
+              await syncUserBalances([freshOrder.buyerId, freshOrder.sellerId].filter(Boolean), client);
+            });
+
+            return res.json({ success: true, order: enrichOrderWithServiceInfo(freshOrder), offer: await viewOffer(targetOffer) });
+          }
         }
       } finally {
         releaseOrderLock(lockedExistingOrderId);

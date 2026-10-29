@@ -122,10 +122,16 @@ declare global {
 interface ActiveTxContext {
   client: any;
   depth: number;
+  active: boolean;
   postCommitCallbacks: Array<() => void | Promise<void>>;
 }
 
-const txAsyncStorage = new AsyncLocalStorage<ActiveTxContext>();
+const txAsyncStorage = new AsyncLocalStorage<ActiveTxContext | undefined>();
+
+function getActiveTx(): ActiveTxContext | undefined {
+  const store = txAsyncStorage.getStore();
+  return store && store.active ? store : undefined;
+}
 
 function createNestedSavepointClient(activeTx: ActiveTxContext) {
   const spName = `sp_nested_${++activeTx.depth}`;
@@ -142,15 +148,23 @@ function createNestedSavepointClient(activeTx: ActiveTxContext) {
 }
 
 function wrapPoolWithActiveTx(rawPool: any): pkg.Pool {
-  const activeTx = txAsyncStorage.getStore();
+  const activeTx = getActiveTx();
   if (!activeTx) return rawPool as pkg.Pool;
   return new Proxy(rawPool, {
     get(target, prop, receiver) {
       if (prop === 'query') {
-        return (text: string, params?: any[]) => activeTx.client.query(text, params);
+        return (text: string, params?: any[]) => {
+          const currentTx = getActiveTx();
+          if (currentTx) return currentTx.client.query(text, params);
+          return target.query(text, params);
+        };
       }
       if (prop === 'connect') {
-        return async () => createNestedSavepointClient(activeTx);
+        return async () => {
+          const currentTx = getActiveTx();
+          if (currentTx) return createNestedSavepointClient(currentTx);
+          return target.connect();
+        };
       }
       const value = Reflect.get(target, prop, receiver);
       return typeof value === 'function' ? value.bind(target) : value;
@@ -210,7 +224,7 @@ class PGlitePool {
 
   async query(text: string, params?: any[]) {
     await this.isReadyPromise;
-    const activeTx = txAsyncStorage.getStore();
+    const activeTx = getActiveTx();
     if (activeTx) {
       return this._rawQuery(text, params);
     }
@@ -230,7 +244,7 @@ class PGlitePool {
 
   async connect() {
     await this.isReadyPromise;
-    const activeTx = txAsyncStorage.getStore();
+    const activeTx = getActiveTx();
     if (activeTx) {
       return createNestedSavepointClient(activeTx);
     }
@@ -253,8 +267,16 @@ class PGlitePool {
       (safetyTimer as any).unref();
     }
 
+    let clientQueue: Promise<any> = Promise.resolve();
     return {
-      query: async (text: string, params?: any[]) => this._rawQuery(text, params),
+      query: (text: string, params?: any[]) => {
+        const next = clientQueue.then(
+          () => this._rawQuery(text, params),
+          () => this._rawQuery(text, params)
+        );
+        clientQueue = next.catch(() => {});
+        return next;
+      },
       release: () => {
         if (!released) {
           released = true;
@@ -338,11 +360,15 @@ export class PostgresStore {
   }
 
   public isActiveTransaction(): boolean {
-    return Boolean(txAsyncStorage.getStore());
+    return Boolean(getActiveTx());
+  }
+
+  public runOutsideTransaction<T>(fn: () => Promise<T>): Promise<T> {
+    return txAsyncStorage.run(undefined, fn);
   }
 
   public onCommit(cb: () => void | Promise<void>): void {
-    const activeTx = txAsyncStorage.getStore();
+    const activeTx = getActiveTx();
     if (activeTx) {
       activeTx.postCommitCallbacks.push(cb);
     } else {
@@ -359,6 +385,9 @@ export class PostgresStore {
   public withLock<T = void>(key: string, fn: () => Promise<T>): Promise<T> {
     if (!isPostgresEnabled()) return Promise.resolve(undefined as any);
     if (!this.isHydrated && key !== 'initialization' && !key.startsWith('meta_')) return Promise.resolve(undefined as any);
+    if (this.isActiveTransaction()) {
+      return fn();
+    }
     const prev = this.locks.get(key) || Promise.resolve();
     const tail = prev.catch(() => {}).then(() => fn());
     this.locks.set(key, tail as any);
@@ -371,7 +400,7 @@ export class PostgresStore {
   }
 
   public async executeInTransaction<T>(fn: (client: pkg.PoolClient) => Promise<T>): Promise<T> {
-    const existingTx = txAsyncStorage.getStore();
+    const existingTx = getActiveTx();
     if (existingTx) {
       const spName = `sp_tx_${++existingTx.depth}`;
       const callbackCheckpoint = existingTx.postCommitCallbacks.length;
@@ -387,24 +416,45 @@ export class PostgresStore {
       }
     }
 
-    const client = await this.getRawPool().connect();
-    const txContext: ActiveTxContext = { client, depth: 0, postCommitCallbacks: [] };
+    const rawClient = await this.getRawPool().connect();
+    let txQueryQueue: Promise<any> = Promise.resolve();
+    const client = new Proxy(rawClient, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return (text: string, params?: any[]) => {
+            const next = txQueryQueue.then(
+              () => target.query(text, params),
+              () => target.query(text, params)
+            );
+            txQueryQueue = next.catch(() => {});
+            return next;
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      }
+    }) as pkg.PoolClient;
+
+    const txContext: ActiveTxContext = { client, depth: 0, active: true, postCommitCallbacks: [] };
     let committed = false;
     let result!: T;
     try {
       await client.query('BEGIN');
       result = await txAsyncStorage.run(txContext, () => fn(client));
+      txContext.active = false;
       const commitRes = await client.query('COMMIT');
       if (commitRes && (commitRes as any).command === 'ROLLBACK') {
         throw new Error('Transaction was aborted and rolled back during COMMIT');
       }
       committed = true;
     } catch (err) {
+      txContext.active = false;
       if (!committed) {
         try { await client.query('ROLLBACK'); } catch {}
       }
       throw err;
     } finally {
+      txContext.active = false;
       client.release();
     }
 
@@ -856,6 +906,14 @@ export class PostgresStore {
     if (!isPostgresEnabled()) return;
     const pool = this.getPool();
     const tables = [
+      'ledger_entries',
+      'ledger_journals',
+      'wallet_movements',
+      'escrows',
+      'payment_checkout_sessions',
+      'outbox_events',
+      'reconciliation_exceptions',
+      'financial_idempotency',
       'project_clarifications',
       'notifications',
       'audit_logs',
@@ -869,14 +927,16 @@ export class PostgresStore {
       'disputes',
       'custom_invoices',
       'workstream_offers',
-      'workspaces',
       'uploads',
       'reviews',
       'messages',
       'orders',
+      'workspaces',
       'proposals',
       'projects',
       'gigs',
+      'wallets',
+      'auth_verification_codes',
       'users',
       'financial_ledger_state',
       'app_metadata'
