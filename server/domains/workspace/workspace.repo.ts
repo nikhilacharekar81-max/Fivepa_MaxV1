@@ -12,7 +12,7 @@ export class WorkspaceRepo {
   constructor(private ctx: RepoContext) {}
 
   // --- WORKSPACES ---
-  async saveWorkspace(w: any): Promise<void> {
+  async saveWorkspace(w: any, client?: any): Promise<void> {
     if (!w?.workspaceId) return;
     const createdAt = w.createdAt || new Date().toISOString().split('T')[0];
     const updatedAt = w.updatedAt || new Date().toISOString();
@@ -25,7 +25,8 @@ export class WorkspaceRepo {
       status: w.status || 'active',
       activeOrderId: w.activeOrderId
     };
-    await this.ctx.getPool().query(
+    const dbRunner = client || this.ctx.getPool();
+    await dbRunner.query(
       `INSERT INTO workspaces (
         workspace_id, buyer_id, seller_id, order_ids, title, created_at, updated_at, last_activity_at, metadata
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -51,9 +52,10 @@ export class WorkspaceRepo {
     );
   }
 
-  async deleteWorkspace(workspaceId: string): Promise<void> {
+  async deleteWorkspace(workspaceId: string, client?: any): Promise<void> {
     if (!workspaceId) return;
-    await this.ctx.getPool().query('DELETE FROM workspaces WHERE workspace_id = $1', [workspaceId]);
+    const dbRunner = client || this.ctx.getPool();
+    await dbRunner.query('DELETE FROM workspaces WHERE workspace_id = $1', [workspaceId]);
   }
 
   async saveWorkspaces(workspaces: any[]): Promise<void> {
@@ -89,8 +91,9 @@ export class WorkspaceRepo {
     });
   }
 
-  async getWorkspace(id: string): Promise<any | null> {
-    const res = await this.ctx.getPool().query('SELECT * FROM workspaces WHERE workspace_id = $1', [id]);
+  async getWorkspace(id: string, client?: any): Promise<any | null> {
+    const dbRunner = client || this.ctx.getPool();
+    const res = await dbRunner.query('SELECT * FROM workspaces WHERE workspace_id = $1', [id]);
     if (res.rows.length === 0) return null;
     const r = res.rows[0];
     const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});

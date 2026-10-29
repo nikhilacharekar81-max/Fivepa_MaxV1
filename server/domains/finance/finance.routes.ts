@@ -501,8 +501,8 @@ router.post('/payments/deposit', requireAuth, requireFinancialActiveStatus, rate
     const newBalance = await financialRepository.getWalletBalance(targetUserId);
     const transaction = { id: `SIM-TXN-${key}` };
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: caller.name,
       role: caller.role,
       action: 'FUNDS_DEPOSITED',
@@ -665,38 +665,62 @@ const handlePaymentWebhook = async (req: Request, res: Response) => {
   const lookupOrderKey = payload?.orderId ? String(payload.orderId).trim() : null;
 
   try {
-    // Pre-fetch candidate checkout session before opening transaction so external provider HTTP verification does not hold DB locks
+    // Pre-fetch and verify candidate checkout session strictly OUTSIDE the database transaction
+    // so external provider HTTP verification never holds database locks.
     const pool = postgresStore.getPool();
+    const existingCompletedTx = await pool.query(
+      "SELECT id FROM payment_checkout_sessions WHERE provider_tx_id = $1 AND status = 'completed' LIMIT 1",
+      [txId]
+    );
+    if (existingCompletedTx.rows.length > 0) {
+      return res.json({ received: true, replayed: true });
+    }
+
     let preSess: any = null;
     if (lookupSessionKey) {
       const preRes = await pool.query(
-        'SELECT id, gateway, provider_tx_id, expected_amount, status FROM payment_checkout_sessions WHERE id = $1 OR provider_tx_id = $1 LIMIT 1',
+        'SELECT * FROM payment_checkout_sessions WHERE id = $1 OR provider_tx_id = $1 LIMIT 1',
         [lookupSessionKey]
       );
       if (preRes.rows.length > 0) preSess = preRes.rows[0];
     }
     if (!preSess) {
       const preByTx = await pool.query(
-        'SELECT id, gateway, provider_tx_id, expected_amount, status FROM payment_checkout_sessions WHERE provider_tx_id = $1 LIMIT 1',
+        'SELECT * FROM payment_checkout_sessions WHERE provider_tx_id = $1 LIMIT 1',
         [txId]
       );
       if (preByTx.rows.length > 0) preSess = preByTx.rows[0];
     }
     if (!preSess && !lookupSessionKey && lookupOrderKey) {
       const preByOrd = await pool.query(
-        "SELECT id, gateway, provider_tx_id, expected_amount, status FROM payment_checkout_sessions WHERE order_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM payment_checkout_sessions WHERE order_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
         [lookupOrderKey]
       );
       if (preByOrd.rows.length > 0) preSess = preByOrd.rows[0];
     }
 
+    if (!preSess) {
+      return res.status(400).json({ error: 'Cannot process payment webhook: no matching stored checkout session found.' });
+    }
+
+    const preExpectedAmount = Number(preSess.expected_amount);
+    if (!preSess.user_id || !Number.isFinite(preExpectedAmount) || preExpectedAmount <= 0) {
+      return res.status(400).json({ error: 'Stored checkout session has invalid user or expected amount.' });
+    }
+    if (!preSess.currency || preSess.currency !== 'USD') {
+      return res.status(400).json({ error: 'Checkout session currency mismatch: must be USD.' });
+    }
+    if (preSess.gateway && String(preSess.gateway).toLowerCase() !== gateway) {
+      return res.status(400).json({ error: 'Checkout session gateway mismatch.' });
+    }
+
     let preVerifiedSessionId: string | null = null;
-    if (preSess && preSess.status === 'pending' && Number(preSess.expected_amount) > 0) {
+    if (preSess.status === 'pending') {
       const preVerify = await paymentGatewayManager.verifyPaymentEvent({
         gateway: preSess.gateway || gateway,
         sessionId: preSess.provider_tx_id || preSess.id,
         transactionId: txId,
-        expectedAmount: Number(preSess.expected_amount),
+        expectedAmount: preExpectedAmount,
         expectedCurrency: 'USD'
       });
       if (!preVerify.verified) {
@@ -715,35 +739,12 @@ const handlePaymentWebhook = async (req: Request, res: Response) => {
         return { received: true, replayed: true };
       }
 
-      // 2. Locate and lock the authoritative stored checkout session (FAIL CLOSED if no stored session matches)
-      let sess: any = null;
-      if (lookupSessionKey) {
-        const sessRes = await client.query(
-          'SELECT * FROM payment_checkout_sessions WHERE id = $1 OR provider_tx_id = $1 FOR UPDATE',
-          [lookupSessionKey]
-        );
-        if (sessRes.rows.length > 0) {
-          sess = sessRes.rows[0];
-        }
-      }
-      if (!sess) {
-        const byTxRes = await client.query(
-          'SELECT * FROM payment_checkout_sessions WHERE provider_tx_id = $1 FOR UPDATE',
-          [txId]
-        );
-        if (byTxRes.rows.length > 0) {
-          sess = byTxRes.rows[0];
-        }
-      }
-      if (!sess && !lookupSessionKey && lookupOrderKey) {
-        const byOrderRes = await client.query(
-          "SELECT * FROM payment_checkout_sessions WHERE order_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
-          [lookupOrderKey]
-        );
-        if (byOrderRes.rows.length > 0) {
-          sess = byOrderRes.rows[0];
-        }
-      }
+      // 2. Lock the exact verified checkout session row
+      const lockedSessRes = await client.query(
+        'SELECT * FROM payment_checkout_sessions WHERE id = $1 FOR UPDATE',
+        [preSess.id]
+      );
+      const sess: any = lockedSessRes.rows[0] || null;
 
       if (!sess) {
         throw { status: 400, message: 'Cannot process payment webhook: no matching stored checkout session found.' };
@@ -812,19 +813,9 @@ const handlePaymentWebhook = async (req: Request, res: Response) => {
         throw { status: 400, message: `Checkout session already in status ${sess.status}` };
       }
 
-      // 4. Direct Provider API Object Authenticity Verification (if not already verified for this exact session prior to locking)
-      if (preVerifiedSessionId !== String(sess.id)) {
-        const liveVerification = await paymentGatewayManager.verifyPaymentEvent({
-          gateway: sess.gateway || gateway,
-          sessionId: sess.provider_tx_id || sess.id,
-          transactionId: txId,
-          expectedAmount: authoritativeAmount,
-          expectedCurrency: 'USD'
-        });
-
-        if (!liveVerification.verified) {
-          throw { status: 400, message: `Provider payment verification failed: ${liveVerification.error}` };
-        }
+      // 4. Confirm session was verified outside the transaction and its amount/currency did not mutate
+      if (preVerifiedSessionId !== String(sess.id) || Math.round(authoritativeAmount * 100) !== Math.round(preExpectedAmount * 100)) {
+        throw { status: 409, message: 'Checkout session state changed concurrently during verification.' };
       }
 
       // 5. If linked to an Order, validate Order ownership, status, and authoritative total BEFORE crediting/settling
@@ -1473,7 +1464,7 @@ router.post('/payments/invoices', requireAuth, async (req: Request, res: Respons
 
     const newInvoice: CustomInvoice = {
       id: 'inv_' + Date.now() + '_' + randomUUID().slice(0, 8),
-      invoiceNumber: `INV-${Date.now().toString().slice(-6)}`,
+      invoiceNumber: `INV-${Date.now().toString().slice(-6)}-${randomUUID().slice(0, 4).toUpperCase()}`,
       userId: authenticatedUserId,
       buyerId: resolvedBuyerId || undefined,
       sellerId: resolvedSellerId || undefined,

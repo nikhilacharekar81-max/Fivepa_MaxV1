@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { randomInt } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
 import { store } from '../store.js';
 import { postgresStore, isPostgresEnabled } from '../db/postgresStore.js';
 import {
@@ -382,7 +382,7 @@ export async function handleLogin(req: Request, res: Response) {
       deliverSecurityCode(user.email, isAdminRole ? 'ADMIN_2FA' : 'DEVICE_LOGIN', newCode);
 
       recordUserEmail({
-        id: 'email_' + Date.now(),
+        id: 'email_' + Date.now() + '_' + randomUUID().slice(0, 8),
         userId: user.id,
         userEmail: user.email,
         subject: isAdminRole ? 'Admin Login Security Notice' : 'New Device Login Security Notice',

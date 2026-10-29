@@ -160,149 +160,141 @@ export async function processProposalAccept(req: any, res: any) {
     if (!caller || (caller.status !== 'active' && caller.status !== 'restricted')) return res.status(403).json({ error: 'Authentication required' });
     if (buyerId !== caller.id) return res.status(403).json({ error: 'Forbidden: Only the project buyer can accept proposals.' });
 
-    const lockResult = await postgresStore.executeInTransaction(async (client) => {
-      const projLockRes = await client.query('SELECT * FROM projects WHERE id = $1 FOR UPDATE', [proj.id]);
-      if (projLockRes.rows.length === 0) {
-        return { status: 404 as const, error: 'Project not found' };
-      }
-      const lockedProj = projLockRes.rows[0];
-      const maxHires = Math.max(1, Number(lockedProj.max_hires || lockedProj.maxHires || lockedProj.freelancers_needed || proj.maxHires || (proj as any).freelancersNeeded || 1));
+    const orderId = 'ord_' + randomUUID().slice(0, 12);
+    const today = new Date().toISOString().split('T')[0];
+    const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays;
+    const deliveryDays = proposal.deliveryDays || 7;
+    const dueDate = new Date(Date.now() + deliveryDays * 86400000).toISOString();
 
-      const currentHiresRes = await client.query(
-        "SELECT COUNT(*) FROM proposals WHERE project_id = $1 AND status IN ('accepted', 'accepting')",
-        [proj.id]
-      );
-      const acceptedCount = parseInt(currentHiresRes.rows[0]?.count || '0', 10);
-      if (acceptedCount >= maxHires) {
-        return { status: 409 as const, error: 'Project hire capacity has already been reached.' };
-      }
+    const offerId = 'off_' + randomUUID().slice(0, 12);
+    const offerNum = generateCollisionSafeOfferNumber('proposal');
+    const resolvedAt = new Date().toISOString();
 
-      const claimProposal = await client.query(
-        "UPDATE proposals SET status = 'accepting' WHERE id = $1 AND status = 'pending' RETURNING *",
-        [proposal.id]
-      );
-      if (claimProposal.rows.length === 0) {
-        return { status: 409 as const, error: 'Proposal is already accepted or being processed', maxHires };
-      }
-      return { status: 200 as const, maxHires };
-    });
+    let createdWorkspace: any = null;
+    let createdOrder: Order | null = null;
+    let createdOffer: WorkstreamOffer | null = null;
 
-    if (lockResult.status !== 200) {
-      return res.status(lockResult.status).json({ error: lockResult.error });
-    }
-    const maxHires = lockResult.maxHires || Math.max(1, Number(proj.maxHires || (proj as any).freelancersNeeded || 1));
-
-    let escrowFundedAndAccepted = false;
-    let createdOrderId: string | null = null;
     try {
-      await ensureWallet(buyerId);
-      await ensureWallet(proposal.freelancerId);
+      const txResult = await postgresStore.executeInTransaction(async (client) => {
+        const projLockRes = await client.query('SELECT * FROM projects WHERE id = $1 FOR UPDATE', [proj.id]);
+        if (projLockRes.rows.length === 0) {
+          return { status: 404 as const, error: 'Project not found' };
+        }
+        const lockedProj = projLockRes.rows[0];
+        const maxHires = Math.max(1, Number(lockedProj.max_hires || lockedProj.maxHires || lockedProj.freelancers_needed || proj.maxHires || (proj as any).freelancersNeeded || 1));
 
-      const workspace = await workspaceService.createWorkspaceAsync({
-        buyerId,
-        sellerId: proposal.freelancerId,
-        originType: 'project',
-        originId: proj.id
-      });
+        const propLockRes = await client.query('SELECT * FROM proposals WHERE id = $1 FOR UPDATE', [proposal.id]);
+        if (propLockRes.rows.length === 0) {
+          return { status: 404 as const, error: 'Proposal not found' };
+        }
+        const lockedProposal = propLockRes.rows[0];
+        if (lockedProposal.status !== 'pending') {
+          return { status: 409 as const, error: 'Proposal is already accepted or being processed', maxHires };
+        }
 
-      const orderId = 'ord_' + randomUUID().slice(0, 12);
-      createdOrderId = orderId;
-      const today = new Date().toISOString().split('T')[0];
-      const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays;
-      const deliveryDays = proposal.deliveryDays || 7;
-      const dueDate = new Date(Date.now() + deliveryDays * 86400000).toISOString();
+        const currentHiresRes = await client.query(
+          "SELECT COUNT(*) FROM proposals WHERE project_id = $1 AND status IN ('accepted', 'accepting')",
+          [proj.id]
+        );
+        const acceptedCount = parseInt(currentHiresRes.rows[0]?.count || '0', 10);
+        if (acceptedCount >= maxHires) {
+          return { status: 409 as const, error: 'Project hire capacity has already been reached.' };
+        }
 
-      const order: Order = {
-        id: orderId,
-        projectOrderId: orderId,
-        workspaceId: workspace.workspaceId,
-        orderType: 'project',
-        type: 'project',
-        title: proj.title,
-        buyerId,
-        sellerId: proposal.freelancerId,
-        amount: proposal.bidAmount,
-        status: 'payment_pending',
-        createdAt: today,
-        dueDate,
-        escrowProtectionStartDate: today,
-        escrowProtectionEndDate: new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0],
-        projectId: proj.id,
-        proposalId: proposal.id,
-        feeBreakdown: calculateOrderFees(proposal.bidAmount)
-      };
+        await ensureWallet(buyerId, client);
+        await ensureWallet(proposal.freelancerId, client);
 
-      await workspaceService.ensureWorkspaceForOrderAsync(order);
+        const workspace = await workspaceService.createWorkspaceAsync({
+          buyerId,
+          sellerId: proposal.freelancerId,
+          originType: 'project',
+          originId: proj.id,
+          activeOrderId: orderId,
+          title: proj.title
+        }, client);
 
-      const offerId = 'off_' + randomUUID().slice(0, 12);
-      const offerNum = generateCollisionSafeOfferNumber('proposal');
-      const offer: WorkstreamOffer = {
-        id: offerId,
-        number: offerNum,
-        orderId: order.id,
-        proposalId: proposal.id,
-        kind: 'proposal',
-        title: proj.title,
-        amount: proposal.bidAmount,
-        deliveryDays: proposal.deliveryDays,
-        note: proposal.coverLetter ? proposal.coverLetter.slice(0, 1000) : undefined,
-        status: 'pending',
-        createdBy: proposal.freelancerId,
-        createdAt: new Date().toISOString()
-      };
+        const order: Order = {
+          id: orderId,
+          projectOrderId: orderId,
+          workspaceId: workspace.workspaceId,
+          orderType: 'project',
+          type: 'project',
+          title: proj.title,
+          buyerId,
+          sellerId: proposal.freelancerId,
+          amount: proposal.bidAmount,
+          status: 'payment_pending',
+          createdAt: today,
+          dueDate,
+          escrowProtectionStartDate: today,
+          escrowProtectionEndDate: new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0],
+          projectId: proj.id,
+          proposalId: proposal.id,
+          feeBreakdown: calculateOrderFees(proposal.bidAmount)
+        };
 
-      const resolvedAt = new Date().toISOString();
-      try {
-        await postgresStore.executeInTransaction(async (client) => {
-          await store.saveOrder(order, client);
+        await workspaceService.ensureWorkspaceForOrderAsync(order, client);
+        await store.saveOrder(order, client);
 
-          await client.query(
-            `INSERT INTO workstream_offers (id, number, order_id, kind, title, amount, delivery_days, status, created_by, created_at, metadata)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-            [offer.id, offer.number, offer.orderId, offer.kind, offer.title, offer.amount, offer.deliveryDays, offer.status, offer.createdBy, offer.createdAt, JSON.stringify({ proposalId: proposal.id })]
-          );
+        const offer: WorkstreamOffer = {
+          id: offerId,
+          number: offerNum,
+          orderId: order.id,
+          proposalId: proposal.id,
+          kind: 'proposal',
+          title: proj.title,
+          amount: proposal.bidAmount,
+          deliveryDays: proposal.deliveryDays,
+          note: proposal.coverLetter ? proposal.coverLetter.slice(0, 1000) : undefined,
+          status: 'pending',
+          createdBy: proposal.freelancerId,
+          createdAt: resolvedAt
+        };
 
-          await financialTransactionService.fundEscrow({
-            orderId: order.id,
-            orderTitle: order.title,
-            amount: order.amount,
-            buyerId: order.buyerId,
-            sellerId: order.sellerId,
-            actor: `user:${order.buyerId}`
-          }, client);
+        await client.query(
+          `INSERT INTO workstream_offers (id, number, order_id, kind, title, amount, delivery_days, status, created_by, created_at, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [offer.id, offer.number, offer.orderId, offer.kind, offer.title, offer.amount, offer.deliveryDays, offer.status, offer.createdBy, offer.createdAt, JSON.stringify({ proposalId: proposal.id })]
+        );
 
-          await client.query(
-            "UPDATE orders SET status = 'funded_in_escrow' WHERE id = $1",
-            [order.id]
-          );
+        await financialTransactionService.fundEscrow({
+          orderId: order.id,
+          orderTitle: order.title,
+          amount: order.amount,
+          buyerId: order.buyerId,
+          sellerId: order.sellerId,
+          actor: `user:${order.buyerId}`
+        }, client);
 
-          await client.query(
-            'UPDATE proposals SET status = $1, workstream_order_id = $2, offer_id = $3 WHERE id = $4',
-            ['accepted', order.id, offer.id, proposal.id]
-          );
+        await client.query(
+          "UPDATE orders SET status = 'funded_in_escrow' WHERE id = $1",
+          [order.id]
+        );
 
-          const newHiresRes = await client.query(
-            "SELECT COUNT(*) FROM proposals WHERE project_id = $1 AND status = 'accepted'",
-            [proj.id]
-          );
-          const newHiresCount = parseInt(newHiresRes.rows[0]?.count || '0', 10);
-          if (newHiresCount >= maxHires) {
-            proj.status = 'in-progress';
-            await client.query("UPDATE projects SET status = 'in-progress' WHERE id = $1", [proj.id]);
-            await client.query("UPDATE proposals SET status = 'declined' WHERE project_id = $1 AND status = 'pending'", [proj.id]);
-          } else {
-            proj.status = 'open';
-            await client.query("UPDATE projects SET status = 'open' WHERE id = $1", [proj.id]);
-          }
+        await client.query(
+          'UPDATE proposals SET status = $1, workstream_order_id = $2, offer_id = $3 WHERE id = $4',
+          ['accepted', order.id, offer.id, proposal.id]
+        );
 
-          await client.query(
-            'UPDATE workstream_offers SET status = $1, resolved_at = $2, resolved_by = $3 WHERE id = $4',
-            ['accepted', resolvedAt, caller.id, offer.id]
-          );
-        });
+        const newHiresRes = await client.query(
+          "SELECT COUNT(*) FROM proposals WHERE project_id = $1 AND status = 'accepted'",
+          [proj.id]
+        );
+        const newHiresCount = parseInt(newHiresRes.rows[0]?.count || '0', 10);
+        if (newHiresCount >= maxHires) {
+          proj.status = 'in-progress';
+          await client.query("UPDATE projects SET status = 'in-progress' WHERE id = $1", [proj.id]);
+          await client.query("UPDATE proposals SET status = 'declined' WHERE project_id = $1 AND status = 'pending'", [proj.id]);
+        } else {
+          proj.status = 'open';
+          await client.query("UPDATE projects SET status = 'open' WHERE id = $1", [proj.id]);
+        }
 
-        await recordOrder(order);
-        escrowFundedAndAccepted = true;
+        await client.query(
+          'UPDATE workstream_offers SET status = $1, resolved_at = $2, resolved_by = $3 WHERE id = $4',
+          ['accepted', resolvedAt, caller.id, offer.id]
+        );
+
         order.status = 'funded_in_escrow';
         proposal.status = 'accepted';
         proposal.workstreamOrderId = order.id;
@@ -310,22 +302,22 @@ export async function processProposalAccept(req: any, res: any) {
         offer.status = 'accepted';
         offer.resolvedAt = resolvedAt;
         offer.resolvedBy = caller.id;
-      } catch (fundingErr: any) {
-        const escCheck = await postgresStore.getPool().query('SELECT 1 FROM escrows WHERE order_id = $1', [order.id]);
-        if (escCheck.rows.length === 0) {
-          await postgresStore.getPool().query("UPDATE proposals SET status = 'pending', workstream_order_id = NULL, offer_id = NULL WHERE id = $1", [proposal.id]);
-          await postgresStore.getPool().query("UPDATE projects SET status = 'open' WHERE id = $1", [proj.id]);
-          await postgresStore.getPool().query('DELETE FROM orders WHERE id = $1', [order.id]);
-          await postgresStore.getPool().query('DELETE FROM workstream_offers WHERE id = $1', [offer.id]);
-          if (workspace) {
-            await workspaceService.deleteWorkspace(workspace.workspaceId);
-          }
-        } else {
-          escrowFundedAndAccepted = true;
-        }
 
-        return res.status(400).json({ error: fundingErr.message || 'Failed to fund escrow for proposal.' });
+        createdWorkspace = workspace;
+        createdOrder = order;
+        createdOffer = offer;
+        return { status: 200 as const, maxHires };
+      });
+
+      if (txResult.status !== 200) {
+        return res.status(txResult.status).json({ error: txResult.error });
       }
+
+      const order = createdOrder!;
+      const offer = createdOffer!;
+      const workspace = createdWorkspace!;
+
+      await recordOrder(order);
 
       if (Array.isArray((proj as any).proposalsList)) {
         (proj as any).proposalsList = (proj as any).proposalsList.map((p: any) => p.id === proposal.id ? { ...p, status: 'accepted', workstreamOrderId: order.id, offerId: offer.id } : p);
@@ -353,15 +345,6 @@ export async function processProposalAccept(req: any, res: any) {
 
       res.json({ success: true, proposal: await enrichProposalWithWorkstream(proposal), order: enrichOrderWithServiceInfo(order), workspace, offer: await viewOffer(offer) });
     } catch (acceptErr: any) {
-      if (!escrowFundedAndAccepted) {
-        const hasEscrow = createdOrderId
-          ? (await postgresStore.getPool().query('SELECT 1 FROM escrows WHERE order_id = $1', [createdOrderId])).rows.length > 0
-          : false;
-        if (!hasEscrow) {
-          await postgresStore.getPool().query("UPDATE proposals SET status = 'pending', workstream_order_id = NULL, offer_id = NULL WHERE id = $1 AND status = 'accepting'", [proposal.id]);
-          proposal.status = 'pending';
-        }
-      }
       return res.status(400).json({ error: acceptErr.message || 'Failed to accept proposal.' });
     }
   } finally {
@@ -527,8 +510,8 @@ proposalRouter.patch('/admin/proposals/:id', requireAdmin, async (req: Request, 
       );
     }
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: adminActor(req),
       role: (req as any).authenticatedUser?.role || 'admin',
       action: 'PROPOSAL_EDITED',
@@ -552,8 +535,8 @@ proposalRouter.patch('/admin/proposals/:id/status', requireAdmin, async (req: Re
     const oldStatus = p.status;
     await postgresStore.getPool().query('UPDATE proposals SET status = $1 WHERE id = $2', [req.body.status, req.params.id]);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: adminActor(req),
       role: (req as any).authenticatedUser?.role || 'admin',
       action: `PROPOSAL_STATUS_${req.body.status.toUpperCase()}`,
@@ -576,8 +559,8 @@ proposalRouter.delete('/admin/proposals/:id', requireAdmin, async (req: Request,
     await postgresStore.getPool().query('DELETE FROM proposals WHERE id = $1', [req.params.id]);
     await postgresStore.getPool().query('UPDATE projects SET proposals_count = GREATEST(0, proposals_count - 1) WHERE id = $1', [deleted.projectId]);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: adminActor(req),
       role: (req as any).authenticatedUser?.role || 'admin',
       action: 'PROPOSAL_DELETED',

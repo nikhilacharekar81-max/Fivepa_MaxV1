@@ -55,24 +55,12 @@ export async function getActiveEscrowRemaining(order: Order, client?: any): Prom
 export const orderIndex = new Map<string, Order>();
 
 export const orderStateLocks = new Set<string>();
-const orderStateLockTimestamps = new Map<string, number>();
-const ORDER_LOCK_TTL_MS = 60_000;
-
-function evictExpiredOrderLock(orderId: string): void {
-  const lockedAt = orderStateLockTimestamps.get(orderId);
-  if (lockedAt !== undefined && Date.now() - lockedAt > ORDER_LOCK_TTL_MS) {
-    orderStateLocks.delete(orderId);
-    orderStateLockTimestamps.delete(orderId);
-  }
-}
 
 export function acquireOrderLock(orderId: string) {
-  evictExpiredOrderLock(orderId);
   if (orderStateLocks.has(orderId)) {
     throw new Error('Action rejected: This order is currently being processed by another operation. Please retry in a moment.');
   }
   orderStateLocks.add(orderId);
-  orderStateLockTimestamps.set(orderId, Date.now());
 }
 
 export function tryAcquireOrderLock(orderId: string, res: any): boolean {
@@ -88,7 +76,6 @@ export function tryAcquireOrderLock(orderId: string, res: any): boolean {
 
 export function releaseOrderLock(orderId: string) {
   orderStateLocks.delete(orderId);
-  orderStateLockTimestamps.delete(orderId);
 }
 
 export function registerOrder(o: Order) {
@@ -96,8 +83,8 @@ export function registerOrder(o: Order) {
   return;
 }
 
-export async function recordOrder(o: Order): Promise<void> {
-  await workspaceService.ensureWorkspaceForOrderAsync(o);
+export async function recordOrder(o: Order, client?: any): Promise<void> {
+  await workspaceService.ensureWorkspaceForOrderAsync(o, client);
   registerOrder(o);
 }
 
@@ -820,7 +807,7 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
           details: `Auto-accepted deliverables (version ${latestDelivery.version}) after ${days}-day buyer review window expired`,
           timestamp: new Date(now).toISOString()
         };
-        registerAuditLog(autoLog);
+        await registerAuditLog(autoLog);
 
         processed.push({
           orderId: freshOrder.id,

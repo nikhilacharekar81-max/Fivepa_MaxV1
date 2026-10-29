@@ -173,7 +173,7 @@ gigRouter.post('/gigs', requireAuth, requireActiveStatus, async (req: Request, r
         return res.status(400).json({ error: daysCheck.error || 'Extra delivery days must be a whole number between 0 and 365.' });
       }
       extras.push({
-        id: String(ex?.id || `extra_${Date.now()}_${idx}`),
+        id: String(ex?.id || `extra_${Date.now()}_${idx}_${randomUUID().slice(0, 6)}`),
         title: String(ex?.title || '').slice(0, 200),
         price: Math.round(Math.min(100000, Math.max(0, Number(ex?.price) || 0)) * 100) / 100,
         deliveryDays: daysCheck.value
@@ -282,7 +282,7 @@ const handleGigUpdate = async (req: Request, res: Response) => {
           return res.status(400).json({ error: daysCheck.error || 'Extra delivery days must be a whole number between 0 and 365.' });
         }
         parsedExtras.push({
-          id: String(ex?.id || `extra_${Date.now()}_${idx}`),
+          id: String(ex?.id || `extra_${Date.now()}_${idx}_${randomUUID().slice(0, 6)}`),
           title: String(ex?.title || '').slice(0, 200),
           price: Math.round(Math.min(100000, Math.max(0, Number(ex?.price) || 0)) * 100) / 100,
           deliveryDays: daysCheck.value
@@ -336,8 +336,8 @@ const handleGigUpdate = async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Gig not found or cannot be updated.' });
     }
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: caller.name,
       role: caller.role,
       action: 'GIG_UPDATED',
@@ -369,8 +369,8 @@ gigRouter.delete('/gigs/:id', requireAuth, requireActiveStatus, async (req: Requ
 
     await store.deleteGig(req.params.id);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: caller.name,
       role: caller.role,
       action: 'GIG_DELETED',

@@ -30,8 +30,8 @@ export function formatPayoutRow(r: any): Payout {
   return mapPayoutRow(r);
 }
 
-export function payoutAudit(req: Request, action: string, p: Payout, details: string) {
-  registerAuditLog({
+export async function payoutAudit(req: Request, action: string, p: Payout, details: string): Promise<void> {
+  await registerAuditLog({
     id: 'FAUD-' + randomUUID().slice(0, 12),
     actor: adminActor(req),
     role: 'super_admin',
@@ -309,7 +309,7 @@ export const approvePayout = async (req: Request, res: Response) => {
       return mapPayoutRow(updated.rows[0]);
     });
 
-    payoutAudit(req, 'PAYOUT_APPROVED', updatedPayout, `Approved payout of $${updatedPayout.amount} via ${updatedPayout.method} for freelancer ${updatedPayout.freelancerId}`);
+    await payoutAudit(req, 'PAYOUT_APPROVED', updatedPayout, `Approved payout of $${updatedPayout.amount} via ${updatedPayout.method} for freelancer ${updatedPayout.freelancerId}`);
     res.json(updatedPayout);
   } catch (err: any) {
     const status = typeof err?.status === 'number' ? err.status : 400;
@@ -373,7 +373,7 @@ export const processPayout = async (req: Request, res: Response) => {
 
     const p = await store.getPayoutById(payoutId);
     if (p) {
-      payoutAudit(req, 'PAYOUT_PROCESSED', p, `Processed payout of $${p.amount} via ${p.method}`);
+      await payoutAudit(req, 'PAYOUT_PROCESSED', p, `Processed payout of $${p.amount} via ${p.method}`);
     }
     await syncUserBalances([freelancerId]);
     res.json({ success: true, payout: p, journal, ...(p || {}) });
@@ -407,7 +407,7 @@ export const rejectPayout = async (req: Request, res: Response) => {
 
     const updated = await store.getPayoutById(payoutId);
     if (updated) {
-      payoutAudit(req, 'PAYOUT_REJECTED', updated, `Rejected payout of $${updated.amount}; funds returned to wallet`);
+      await payoutAudit(req, 'PAYOUT_REJECTED', updated, `Rejected payout of $${updated.amount}; funds returned to wallet`);
     }
     await syncUserBalances([freelancerId]);
     res.json({ success: true, payout: updated, ...(updated || {}) });
@@ -454,7 +454,7 @@ export const failPayout = async (req: Request, res: Response) => {
 
     const p = await store.getPayoutById(payoutId);
     if (p) {
-      payoutAudit(req, 'PAYOUT_FAILED', p, `Payout of $${p.amount} failed; funds returned to wallet`);
+      await payoutAudit(req, 'PAYOUT_FAILED', p, `Payout of $${p.amount} failed; funds returned to wallet`);
     }
     await syncUserBalances([txResult.row.freelancer_id]);
     res.json(p || mapPayoutRow(txResult.row));
@@ -483,7 +483,7 @@ export const retryPayout = async (req: Request, res: Response) => {
 
     const updated = await store.getPayoutById(payoutId);
     if (updated) {
-      payoutAudit(req, 'PAYOUT_RETRIED', updated, `Re-queued failed payout of $${updated.amount}`);
+      await payoutAudit(req, 'PAYOUT_RETRIED', updated, `Re-queued failed payout of $${updated.amount}`);
     }
     await syncUserBalances([pRow.freelancer_id]);
     res.json(updated || mapPayoutRow(pRow));

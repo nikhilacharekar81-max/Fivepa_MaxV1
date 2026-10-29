@@ -679,7 +679,7 @@ authRouter.post('/withdrawal/request-code', requireAuth, async (req: Request, re
   deliverSecurityCode(caller.email, 'WITHDRAWAL', code);
 
   recordUserEmail({
-    id: 'email_' + Date.now(),
+    id: 'email_' + Date.now() + '_' + randomUUID().slice(0, 8),
     userId: caller.id,
     userEmail: caller.email,
     subject: 'Withdrawal Email Verification Requested',

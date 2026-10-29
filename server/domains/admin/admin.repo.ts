@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { RepoContext } from '../types.js';
 import { type AuditLog } from '../../store.js';
 
@@ -6,13 +7,16 @@ export class AdminRepo {
 
   // --- AUDIT LOGS ---
   async addAuditLog(l: AuditLog, client?: any): Promise<void> {
-    if (!l?.id) return;
+    if (!l) return;
+    const rawId = typeof l.id === 'string' && l.id.trim() ? l.id.trim() : `log_${Date.now()}_${randomUUID().slice(0, 8)}`;
+    const safeId = /^log_\d+$/.test(rawId) ? `${rawId}_${randomUUID().slice(0, 8)}` : rawId;
+    l.id = safeId;
     const dbRunner = client || this.ctx.getPool();
     await dbRunner.query(
       `INSERT INTO audit_logs (id, actor, role, action, target, details, timestamp)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (id) DO NOTHING`,
-      [l.id, l.actor, l.role, l.action, l.target, l.details || null, l.timestamp]
+      [safeId, l.actor, l.role, l.action, l.target, l.details || null, l.timestamp]
     );
   }
 

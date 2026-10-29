@@ -661,12 +661,12 @@ export class PostgresStore {
   }
 
   // --- WORKSPACE, MESSAGES, OFFERS, INVOICES, UPLOADS (Delegated to WorkspaceRepo) ---
-  async saveWorkspace(w: any): Promise<void> {
-    return this.workspaceRepo.saveWorkspace(w);
+  async saveWorkspace(w: any, client?: any): Promise<void> {
+    return this.workspaceRepo.saveWorkspace(w, client);
   }
 
-  async deleteWorkspace(workspaceId: string): Promise<void> {
-    return this.workspaceRepo.deleteWorkspace(workspaceId);
+  async deleteWorkspace(workspaceId: string, client?: any): Promise<void> {
+    return this.workspaceRepo.deleteWorkspace(workspaceId, client);
   }
 
   async saveWorkspaces(workspaces: any[]): Promise<void> {
@@ -677,8 +677,8 @@ export class PostgresStore {
     return this.workspaceRepo.listWorkspaces();
   }
 
-  async getWorkspace(workspaceId: string): Promise<any | null> {
-    return this.workspaceRepo.getWorkspace(workspaceId);
+  async getWorkspace(workspaceId: string, client?: any): Promise<any | null> {
+    return this.workspaceRepo.getWorkspace(workspaceId, client);
   }
 
   async saveMessages(messages: Message[]): Promise<void> {

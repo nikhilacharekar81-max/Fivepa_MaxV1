@@ -765,10 +765,10 @@ export class FinanceLedgerEngine {
     }
 
     const journal = this.postJournal({
-      reference: `ORD-${params.orderId}-ESCROW-TOPUP-${Date.now()}`,
+      reference: `ORD-${params.orderId}-ESCROW-TOPUP-${esc.amount}-${amount}`,
       description: `Escrow top-up for Order #${params.orderId} (${params.orderTitle})`,
       eventType: 'ORDER_ESCROW_TOPUP',
-      idempotencyKey: `IDEMP-ORD-TOPUP-${params.orderId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      idempotencyKey: (params as any).idempotencyKey || `IDEMP-ORD-TOPUP-${params.orderId}-${esc.amount}-${amount}`,
       actor: params.actor,
       timestamp: params.timestamp,
       entries: fundEntries
@@ -1203,7 +1203,7 @@ export class FinanceLedgerEngine {
       reference: `ADJ-${wallet.id}-${randomUUID().slice(0, 8)}`,
       description: `Administrative ${params.direction.toUpperCase()}: ${why} (${params.category})`,
       eventType: params.direction === 'credit_user' ? 'ADMIN_ADJUSTMENT_CREDIT' : 'ADMIN_ADJUSTMENT_DEBIT',
-      idempotencyKey: `IDEMP-ADJ-${randomUUID()}`,
+      idempotencyKey: (params as any).idempotencyKey || params.requestKey || `IDEMP-ADJ-${params.userId}-${params.direction}-${amount.toFixed(2)}-${params.category}-${why.slice(0, 40)}`,
       actor: params.actor,
       entries,
       notes: `Category: ${params.category} | Reference: ${params.evidenceReference || 'N/A'} | Reason: ${why}`

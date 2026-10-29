@@ -33,9 +33,9 @@ class WorkspaceService {
     return Array.from(this.workspaces.values());
   }
 
-  public async persistWorkspace(workspace: Workspace): Promise<void> {
+  public async persistWorkspace(workspace: Workspace, client?: any): Promise<void> {
     try {
-      await postgresStore.saveWorkspace(workspace);
+      await postgresStore.saveWorkspace(workspace, client);
     } catch (err) {
       console.error(`[WorkspaceService] Failed to persist workspace ${workspace.workspaceId} to PostgreSQL:`, err);
       throw err;
@@ -54,7 +54,7 @@ class WorkspaceService {
     originId: string;
     activeOrderId?: string;
     title?: string;
-  }): Promise<Workspace> {
+  }, client?: any): Promise<Workspace> {
     const workspaceId = 'ws_' + randomUUID().slice(0, 12);
     const createdAt = new Date().toISOString().split('T')[0];
     const workspace: Workspace & { orderIds?: string[]; title?: string; updatedAt?: string } = {
@@ -70,7 +70,7 @@ class WorkspaceService {
       orderIds: params.activeOrderId ? [params.activeOrderId] : [],
       title: params.title || params.originId
     };
-    await this.persistWorkspace(workspace);
+    await this.persistWorkspace(workspace, client);
     this.workspaces.set(workspaceId, workspace);
     return workspace;
   }
@@ -109,8 +109,8 @@ class WorkspaceService {
     return this.workspaces.get(workspaceId);
   }
 
-  public async getWorkspaceAsync(workspaceId: string): Promise<Workspace | undefined> {
-    const ws = await postgresStore.getWorkspace(workspaceId);
+  public async getWorkspaceAsync(workspaceId: string, client?: any): Promise<Workspace | undefined> {
+    const ws = await postgresStore.getWorkspace(workspaceId, client);
     if (ws) {
       this.workspaces.set(workspaceId, ws);
       return ws;
@@ -141,11 +141,11 @@ class WorkspaceService {
     return undefined;
   }
 
-  public async ensureWorkspaceForOrderAsync(order: Order): Promise<Workspace> {
+  public async ensureWorkspaceForOrderAsync(order: Order, client?: any): Promise<Workspace> {
     let ws: (Workspace & { orderIds?: string[]; updatedAt?: string }) | undefined;
 
     if (order.workspaceId) {
-      const dbWs = await postgresStore.getWorkspace(order.workspaceId);
+      const dbWs = await postgresStore.getWorkspace(order.workspaceId, client);
       if (dbWs) {
         ws = dbWs as Workspace & { orderIds?: string[]; updatedAt?: string };
       } else if (this.workspaces.has(order.workspaceId)) {
@@ -156,14 +156,13 @@ class WorkspaceService {
     if (ws) {
       const updatedOrderIds = Array.isArray(ws.orderIds) ? [...ws.orderIds] : [];
       if (!updatedOrderIds.includes(order.id)) updatedOrderIds.push(order.id);
-      const isNewActiveOrder = !ws.activeOrderId || !['completed', 'cancelled', 'refunded'].includes(order.status);
       const updatedWs: Workspace & { orderIds?: string[]; updatedAt?: string } = {
         ...ws,
-        activeOrderId: isNewActiveOrder ? order.id : (ws.activeOrderId || order.id),
+        activeOrderId: order.id,
         orderIds: updatedOrderIds,
         updatedAt: new Date().toISOString()
       };
-      await this.persistWorkspace(updatedWs);
+      await this.persistWorkspace(updatedWs, client);
       this.workspaces.set(updatedWs.workspaceId, updatedWs);
       order.workspaceId = updatedWs.workspaceId;
       return updatedWs;
@@ -179,7 +178,7 @@ class WorkspaceService {
       originId,
       activeOrderId: order.id,
       title: order.title || originId
-    });
+    }, client);
 
     order.workspaceId = ws.workspaceId;
     return ws;
@@ -194,7 +193,7 @@ class WorkspaceService {
 
     if (ws) {
       const targetWs = ws;
-      if (!targetWs.activeOrderId) targetWs.activeOrderId = order.id;
+      targetWs.activeOrderId = order.id;
       if (!Array.isArray(targetWs.orderIds)) targetWs.orderIds = [];
       if (!targetWs.orderIds.includes(order.id)) targetWs.orderIds.push(order.id);
       targetWs.updatedAt = new Date().toISOString();

@@ -1731,7 +1731,8 @@ export class FinancialTransactionService {
     assertValidMoneyAmount(params.feeAmount, 'featured gig fee');
 
     const run = async (client: any) => {
-      const idempKey = params.idempotencyKey || `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${randomUUID()}`;
+      const featuredWindow = (params.featuredUntil || new Date().toISOString()).substring(0, 10);
+      const idempKey = params.idempotencyKey || `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${featuredWindow}`;
       const payloadFingerprint = {
         gigId: params.gigId,
         sellerId: params.sellerId,
@@ -1894,7 +1895,9 @@ export class FinancialTransactionService {
   async settlePayout(params: { payoutId: string; actor: string; providerReference?: string; idempotencyKey?: string; preVerified?: boolean }, externalClient?: any) {
     assertPostgresAvailable();
     let verifiedOutsideTx = Boolean(params.preVerified);
-    if (!verifiedOutsideTx && !externalClient) {
+    let verifiedAmount: number | null = null;
+    let verifiedMethod: string | null = null;
+    if (!verifiedOutsideTx) {
       const preCheckRes = await postgresStore.getPool().query('SELECT method, amount, status FROM payouts WHERE id = $1', [params.payoutId]);
       if (preCheckRes.rows.length > 0) {
         const preRow = preCheckRes.rows[0];
@@ -1910,6 +1913,8 @@ export class FinancialTransactionService {
               throw new Error(`Payout settlement could not be verified with payment provider for payout ${params.payoutId}`);
             }
             verifiedOutsideTx = true;
+            verifiedAmount = Number(preRow.amount);
+            verifiedMethod = String(preRow.method);
           }
         }
       }
@@ -1940,20 +1945,17 @@ export class FinancialTransactionService {
         throw new Error('Provider reference is required to settle payout.');
       }
 
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
-
       if (!verifiedOutsideTx) {
-        const verification = await paymentGatewayManager.verifyPayoutSettlement({
-          method: payout.method,
-          providerReference: params.providerReference || `MOCK-${params.payoutId}`,
-          amount: Number(payout.amount),
-          payoutId: params.payoutId
-        });
-
-        if (!verification || !verification.verified) {
-          throw new Error(`Payout settlement could not be verified with payment provider for payout ${params.payoutId}`);
-        }
+        throw new Error(`Payout settlement could not be verified with payment provider for payout ${params.payoutId}`);
       }
+      if (verifiedAmount !== null && Math.round(Number(payout.amount) * 100) !== Math.round(verifiedAmount * 100)) {
+        throw new Error('Payout amount changed concurrently during settlement verification.');
+      }
+      if (verifiedMethod !== null && String(payout.method) !== verifiedMethod) {
+        throw new Error('Payout method changed concurrently during settlement verification.');
+      }
+
+      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
 
       const amount = Number(payout.amount);
       await client.query('UPDATE wallets SET pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
@@ -2128,7 +2130,7 @@ export class FinancialTransactionService {
 
       const amount = assertValidMoneyAmount(Number(payout.amount), 'payout retry amount');
 
-      const idempKey = params.idempotencyKey || `IDEMP-PAY-RETRY-${params.payoutId}-${payout.updated_at || payout.created_at || Date.now()}`;
+      const idempKey = params.idempotencyKey || `IDEMP-PAY-RETRY-${params.payoutId}-${payout.updated_at || payout.created_at || 'v1'}`;
       const payloadFingerprint = {
         payoutId: params.payoutId,
         freelancerId: payout.freelancer_id,
@@ -2275,7 +2277,9 @@ export class FinancialTransactionService {
     assertPostgresAvailable();
 
     return postgresStore.executeInTransaction(async (client) => {
-      const idempKey = params.idempotencyKey || params.requestKey || `IDEMP-ADJ-${params.userId}-${Date.now()}`;
+      const todayBucket = new Date().toISOString().substring(0, 10);
+      const reasonSlug = (params.reason || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
+      const idempKey = params.idempotencyKey || params.requestKey || `IDEMP-ADJ-${params.userId}-${params.direction}-${Number(params.amount).toFixed(2)}-${params.category}-${reasonSlug}-${todayBucket}`;
       const payloadFingerprint = {
         userId: params.userId,
         direction: params.direction,

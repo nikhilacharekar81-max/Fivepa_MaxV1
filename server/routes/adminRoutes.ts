@@ -197,8 +197,8 @@ router.post('/admin/categories', requireAdmin, async (req: Request, res: Respons
   categories.push(newCat);
   await postgresStore.saveCategories(categories);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: 'CATEGORY_CREATED',
@@ -225,8 +225,8 @@ router.post('/admin/categories/bulk-delete', requireAdmin, async (req: Request, 
   }
   await postgresStore.saveCategories(categories);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: 'CATEGORIES_BULK_DELETED',
@@ -246,8 +246,8 @@ router.patch('/admin/categories/:id', requireAdmin, async (req: Request, res: Re
   if (typeof req.body.enabled === 'boolean') cat.enabled = req.body.enabled;
   await postgresStore.saveCategories(categories);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: 'CATEGORY_UPDATED',
@@ -265,8 +265,8 @@ router.patch('/admin/categories/:id/toggle', requireAdmin, async (req: Request, 
   cat.enabled = !cat.enabled;
   await postgresStore.saveCategories(categories);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: cat.enabled ? 'CATEGORY_ENABLED' : 'CATEGORY_DISABLED',
@@ -285,8 +285,8 @@ router.delete('/admin/categories/:id', requireAdmin, async (req: Request, res: R
   categories.splice(index, 1);
   await postgresStore.saveCategories(categories);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: 'CATEGORY_DELETED',
@@ -313,8 +313,8 @@ router.post('/admin/categories/:id/subcategories', requireAdmin, async (req: Req
   cat.subcategories.push(newSub);
   await postgresStore.saveCategories(categories);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: 'SUBCATEGORY_CREATED',
@@ -336,8 +336,8 @@ router.patch('/admin/categories/:id/subcategories/:subId', requireAdmin, async (
   if (typeof req.body.enabled === 'boolean') sub.enabled = req.body.enabled;
   await postgresStore.saveCategories(categories);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: 'SUBCATEGORY_UPDATED',
@@ -357,8 +357,8 @@ router.patch('/admin/categories/:id/subcategories/:subId/toggle', requireAdmin, 
   sub.enabled = !sub.enabled;
   await postgresStore.saveCategories(categories);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: sub.enabled ? 'SUBCATEGORY_ENABLED' : 'SUBCATEGORY_DISABLED',
@@ -379,8 +379,8 @@ router.delete('/admin/categories/:id/subcategories/:subId', requireAdmin, async 
   cat.subcategories.splice(subIndex, 1);
   await postgresStore.saveCategories(categories);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: 'SUBCATEGORY_DELETED',
@@ -408,7 +408,7 @@ const handlePostSiteSettings = async (req: Request, res: Response) => {
     await siteSettings.saveToDatabase();
 
     await registerAuditLog({
-      id: 'log_' + Date.now(),
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor,
       role: 'super_admin',
       action: 'SITE_FEE_SETTINGS_UPDATED',
@@ -459,7 +459,7 @@ router.patch('/admin/payment-gateways/:environment/:gateway', requireAdmin, asyn
     await paymentGatewayManager.saveToDatabase();
 
     await registerAuditLog({
-      id: 'log_' + Date.now(),
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor,
       role: 'super_admin',
       action: 'PAYMENT_GATEWAY_UPDATED',
@@ -486,8 +486,8 @@ router.post('/admin/payment-gateways/:environment/:gateway/test', requireAdmin, 
 
     const result = await paymentGatewayManager.testConnection(env, gw);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor,
       role: 'super_admin',
       action: 'PAYMENT_GATEWAY_CONNECTION_TESTED',
@@ -532,7 +532,7 @@ router.post('/admin/memberships', requireAdmin, async (req: Request, res: Respon
     await siteSettings.saveToDatabase();
 
     await registerAuditLog({
-      id: 'log_' + Date.now(),
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor,
       role: 'super_admin',
       action: 'MEMBERSHIPS_QUOTAS_UPDATED',
@@ -634,8 +634,8 @@ router.post('/support-tickets', requireAuth, rateLimit(10, 60_000), async (req: 
 
     await store.saveSupportTicket(newTicket);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: userName,
       role: caller.role,
       action: isAppeal ? 'ACCOUNT_APPEAL_SUBMITTED' : 'SUPPORT_TICKET_OPENED',
@@ -928,8 +928,8 @@ router.delete('/admin/users/:id', requireAdmin, async (req: Request, res: Respon
     });
 
     const admin = (req as any).authenticatedUser;
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: admin?.name || 'Admin',
       role: admin?.role || 'admin',
       action: 'USER_DELETED',
@@ -1162,7 +1162,7 @@ router.patch('/admin/gigs/:id', requireAdmin, async (req: Request, res: Response
 
     if (previousStatus !== 'deleted' && updatedGig.status === 'deleted') {
       await registerAuditLog({
-        id: 'log_' + Date.now(),
+        id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
         actor: adminActor(req),
         role: (req as any).authenticatedUser?.role || 'admin',
         action: 'GIG_DELETED',

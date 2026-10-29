@@ -617,8 +617,8 @@ const handleOrderExtendTime = async (req: Request, res: Response) => {
 
     await recordMessage(sysMsg);
 
-    registerAuditLog({
-      id: 'log_' + randomUUID(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: adminActor(req),
       role: (req as any).authenticatedUser?.role || 'admin',
       action: 'ORDER_DEADLINE_EXTENDED',
@@ -922,7 +922,7 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
 
       const isDraft = Boolean(req.body.isDraft);
       const uploadedFiles = validatedFiles.map((f: any, idx: number) => ({
-        id: 'deliv_' + Date.now() + '_' + idx,
+        id: 'deliv_' + Date.now() + '_' + idx + '_' + randomUUID().slice(0, 6),
         name: f.name,
         size: f.size,
         url: f.url,
@@ -1390,8 +1390,8 @@ const handleOrderPauseTimer = async (req: Request, res: Response) => {
 
   await recordMessage(sysMsg);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: (req as any).authenticatedUser?.role || 'admin',
     action: order.isTimerPaused ? 'ORDER_TIMER_PAUSED' : 'ORDER_TIMER_RESUMED',
@@ -1580,8 +1580,8 @@ router.post('/orders/:id/cancel-request', requireAuth, requireActiveStatus, rate
       );
     }
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: caller?.name || requestedBy,
       role: caller?.role || requestedBy,
       action: 'GIG_CANCELLATION_REQUESTED',
@@ -1769,8 +1769,8 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
         link: `/messages/${order.id}`
       });
 
-      registerAuditLog({
-        id: 'log_' + Date.now(),
+      await registerAuditLog({
+        id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
         actor: txResult.caller?.name || (txResult.isBuyer ? 'Buyer' : 'Seller'),
         role: txResult.caller?.role || 'user',
         action: 'GIG_CANCELLATION_ACCEPTED',
@@ -1790,8 +1790,8 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
         link: `/messages/${order.id}`
       });
 
-      registerAuditLog({
-        id: 'log_' + randomUUID(),
+      await registerAuditLog({
+        id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
         actor: txResult.caller?.name || (txResult.isBuyer ? 'Buyer' : 'Seller'),
         role: txResult.caller?.role || 'user',
         action: 'GIG_CANCELLATION_REJECTED',

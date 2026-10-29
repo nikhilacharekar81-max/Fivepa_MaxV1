@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { randomUUID } from 'crypto';
 import bcrypt from 'bcryptjs';
 import { store } from '../store.js';
 import { postgresStore, isPostgresEnabled } from '../db/postgresStore.js';
@@ -414,8 +415,8 @@ userRouter.delete('/users/:id', requireAdmin, async (req: Request, res: Response
     });
 
     const admin = (req as any).authenticatedUser;
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: admin?.name || adminActor(req),
       role: admin?.role || 'admin',
       action: 'USER_DELETED',
@@ -440,8 +441,8 @@ userRouter.post('/users/:id/flag', requireAdmin, async (req: Request, res: Respo
   user.flagReason = user.isFlagged ? (req.body.reason || 'Flagged for TOS investigation.') : undefined;
   await store.saveUser(user);
 
-  registerAuditLog({
-    id: 'log_' + Date.now(),
+  await registerAuditLog({
+    id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
     actor: adminActor(req),
     role: 'admin',
     action: user.isFlagged ? 'USER_FLAGGED_TOS' : 'USER_UNFLAGGED_TOS',

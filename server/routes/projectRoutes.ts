@@ -365,8 +365,8 @@ projectRouter.patch('/projects/:id/status', requireAuth, requireActiveStatus, as
     p.status = requestedStatus as any;
     await store.saveProject(p);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: caller.name,
       role: caller.role || 'user',
       action: `PROJECT_STATUS_${requestedStatus.toUpperCase()}`,
@@ -484,8 +484,8 @@ projectRouter.patch('/admin/projects/:id/status', requireAdmin, async (req: Requ
     p.status = newStatus;
     await store.saveProject(p);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: adminActor(req),
       role: 'super_admin',
       action: `PROJECT_STATUS_${String(newStatus).toUpperCase()}`,
@@ -508,8 +508,8 @@ projectRouter.patch('/admin/projects/:id/feature', requireAdmin, async (req: Req
     p.featured = !p.featured;
     await store.saveProject(p);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: adminActor(req),
       role: 'super_admin',
       action: p.featured ? 'ADMIN_PROJECT_FEATURED' : 'ADMIN_PROJECT_UNFEATURED',
@@ -532,8 +532,8 @@ projectRouter.delete('/admin/projects/:id', requireAdmin, async (req: Request, r
 
     await store.deleteProject(req.params.id);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: adminActor(req),
       role: 'super_admin',
       action: 'ADMIN_PROJECT_DELETED',

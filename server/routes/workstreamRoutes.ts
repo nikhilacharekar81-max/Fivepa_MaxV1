@@ -672,7 +672,7 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
         return res.status((validation as any).status || 400).json({ error: (validation as any).error });
       }
       uploadedFiles = validation.files.map((f: any, idx: number) => ({
-        id: 'deliv_' + Date.now() + '_' + idx,
+        id: 'deliv_' + Date.now() + '_' + idx + '_' + randomUUID().slice(0, 6),
         name: f.name,
         size: f.size,
         url: f.url,
@@ -1089,7 +1089,6 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
       };
 
       const enrichedOrder = enrichOrderWithServiceInfo(newOrder);
-      await recordOrder(enrichedOrder);
 
       try {
         await postgresStore.executeInTransaction(async (client) => {
@@ -1098,6 +1097,7 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
             throw new Error(`This ${OFFER_LABEL[offer.kind]} is already ${offerLockRes.rows[0].status}.`);
           }
 
+          await recordOrder(enrichedOrder, client);
           await store.saveOrder(enrichedOrder, client);
 
           await fundOrderEscrowWithEvent({
@@ -1288,14 +1288,13 @@ router.post(
             feeBreakdown: calculateOrderFees(offerAmount)
           };
 
-          await workspaceService.ensureWorkspaceForOrderAsync(newOrder);
-
           await postgresStore.executeInTransaction(async (client) => {
             const offerLockRes = await client.query('SELECT status, order_id FROM workstream_offers WHERE id = $1 FOR UPDATE', [offer.id]);
             if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
               throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
             }
 
+            await workspaceService.ensureWorkspaceForOrderAsync(newOrder, client);
             await store.saveOrder(newOrder, client);
 
             await fundOrderEscrowWithEvent({
@@ -1521,7 +1520,6 @@ router.post(
             };
 
             const enrichedFollowOn = enrichOrderWithServiceInfo(followOnOrder);
-            await recordOrder(enrichedFollowOn);
 
             await postgresStore.executeInTransaction(async (client) => {
               const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [targetOffer.id]);
@@ -1529,6 +1527,7 @@ router.post(
                 throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
               }
 
+              await recordOrder(enrichedFollowOn, client);
               await store.saveOrder(enrichedFollowOn, client);
 
               await fundOrderEscrowWithEvent({
