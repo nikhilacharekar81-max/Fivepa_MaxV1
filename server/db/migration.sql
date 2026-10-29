@@ -157,11 +157,19 @@ CREATE TABLE IF NOT EXISTS orders (
   review_window_expires_at VARCHAR(32),
   review JSONB,
   service_fee NUMERIC(10,2) DEFAULT 0,
-  small_order_fee NUMERIC(10,2) DEFAULT 0
+  small_order_fee NUMERIC(10,2) DEFAULT 0,
+  client_id VARCHAR(64),
+  freelancer_id VARCHAR(64),
+  selected_extras JSONB,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_fee NUMERIC(10,2) DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS small_order_fee NUMERIC(10,2) DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_id VARCHAR(64);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS freelancer_id VARCHAR(64);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS selected_extras JSONB;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 
 CREATE TABLE IF NOT EXISTS messages (
   id VARCHAR(64) PRIMARY KEY,

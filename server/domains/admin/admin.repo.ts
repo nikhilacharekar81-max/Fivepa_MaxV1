@@ -5,18 +5,13 @@ export class AdminRepo {
   constructor(private ctx: RepoContext) {}
 
   // --- AUDIT LOGS ---
-  async addAuditLog(l: AuditLog): Promise<void> {
+  async addAuditLog(l: AuditLog, client?: any): Promise<void> {
     if (!l?.id) return;
-    await this.ctx.getPool().query(
+    const dbRunner = client || this.ctx.getPool();
+    await dbRunner.query(
       `INSERT INTO audit_logs (id, actor, role, action, target, details, timestamp)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (id) DO UPDATE SET
-         actor = EXCLUDED.actor,
-         role = EXCLUDED.role,
-         action = EXCLUDED.action,
-         target = EXCLUDED.target,
-         details = EXCLUDED.details,
-         timestamp = EXCLUDED.timestamp`,
+       ON CONFLICT (id) DO NOTHING`,
       [l.id, l.actor, l.role, l.action, l.target, l.details || null, l.timestamp]
     );
   }

@@ -55,8 +55,9 @@ export class TrustSafetyRepo {
     });
   }
 
-  async saveDispute(d: Dispute): Promise<void> {
-    await this.ctx.getPool().query(
+  async saveDispute(d: Dispute, client?: any): Promise<void> {
+    const dbRunner = client || this.ctx.getPool();
+    await dbRunner.query(
       `INSERT INTO disputes (
         id, order_id, buyer_id, seller_id, raised_by, reason, evidence, status, 
         created_at, resolution_notes, resolution_type, notes, assigned_to
@@ -87,14 +88,16 @@ export class TrustSafetyRepo {
     return res.rows.map(mapDisputeRow);
   }
 
-  async getDisputeById(id: string): Promise<Dispute | undefined> {
-    const res = await this.ctx.getPool().query('SELECT * FROM disputes WHERE id = $1', [id]);
+  async getDisputeById(id: string, client?: any): Promise<Dispute | undefined> {
+    const dbRunner = client || this.ctx.getPool();
+    const res = await dbRunner.query('SELECT * FROM disputes WHERE id = $1', [id]);
     if (res.rows.length === 0) return undefined;
     return mapDisputeRow(res.rows[0]);
   }
 
-  async getDisputeByOrderId(orderId: string): Promise<Dispute | undefined> {
-    const res = await this.ctx.getPool().query(
+  async getDisputeByOrderId(orderId: string, client?: any): Promise<Dispute | undefined> {
+    const dbRunner = client || this.ctx.getPool();
+    const res = await dbRunner.query(
       'SELECT * FROM disputes WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1',
       [orderId]
     );

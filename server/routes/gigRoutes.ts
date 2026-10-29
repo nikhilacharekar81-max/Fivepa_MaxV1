@@ -397,12 +397,14 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
     }
 
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const callerIdempKey = (req.body?.idempotencyKey || req.headers['x-idempotency-key']) as string | undefined;
     const result = await financialTransactionService.chargeFeaturedGigFee({
       gigId: req.params.id,
       sellerId: caller.id,
       feeAmount: fee,
       featuredUntil: expiresAt,
-      actor: `user:${caller.id}`
+      actor: `user:${caller.id}`,
+      idempotencyKey: callerIdempKey ? String(callerIdempKey) : undefined
     });
 
     res.json(result);

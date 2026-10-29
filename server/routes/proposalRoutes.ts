@@ -251,18 +251,17 @@ export async function processProposalAccept(req: any, res: any) {
         createdAt: new Date().toISOString()
       };
 
-      await postgresStore.getPool().query(
-        `INSERT INTO workstream_offers (id, number, order_id, kind, title, amount, delivery_days, status, created_by, created_at, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-        [offer.id, offer.number, offer.orderId, offer.kind, offer.title, offer.amount, offer.deliveryDays, offer.status, offer.createdBy, offer.createdAt, JSON.stringify({ proposalId: proposal.id })]
-      );
-
-      await recordOrder(order);
-      await store.saveOrder(order);
-
       const resolvedAt = new Date().toISOString();
       try {
         await postgresStore.executeInTransaction(async (client) => {
+          await store.saveOrder(order, client);
+
+          await client.query(
+            `INSERT INTO workstream_offers (id, number, order_id, kind, title, amount, delivery_days, status, created_by, created_at, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+            [offer.id, offer.number, offer.orderId, offer.kind, offer.title, offer.amount, offer.deliveryDays, offer.status, offer.createdBy, offer.createdAt, JSON.stringify({ proposalId: proposal.id })]
+          );
+
           await financialTransactionService.fundEscrow({
             orderId: order.id,
             orderTitle: order.title,
@@ -302,6 +301,7 @@ export async function processProposalAccept(req: any, res: any) {
           );
         });
 
+        await recordOrder(order);
         escrowFundedAndAccepted = true;
         order.status = 'funded_in_escrow';
         proposal.status = 'accepted';

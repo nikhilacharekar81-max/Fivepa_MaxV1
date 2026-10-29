@@ -7,8 +7,14 @@ export async function runBackgroundJobs() {
   console.log('[BackgroundJobs] Starting financial and marketplace background jobs...');
   startOutboxProcessor(3000);
 
+  let isClearingJobRunning = false;
+  let isCancelTimeoutJobRunning = false;
+  let isAutoAcceptJobRunning = false;
+
   // 1. Earnings Clearing Job (Every 5 minutes with session advisory lock on remote Postgres)
   setInterval(async () => {
+    if (isClearingJobRunning) return;
+    isClearingJobRunning = true;
     let client: any = null;
     let hasLock = false;
     try {
@@ -41,11 +47,14 @@ export async function runBackgroundJobs() {
         }
         try { client.release(); } catch {}
       }
+      isClearingJobRunning = false;
     }
   }, 5 * 60 * 1000);
 
   // 2. Cancellation Timeouts Job (Every 60 seconds with session advisory lock on remote Postgres)
   setInterval(async () => {
+    if (isCancelTimeoutJobRunning) return;
+    isCancelTimeoutJobRunning = true;
     let client: any = null;
     let hasLock = false;
     try {
@@ -67,11 +76,14 @@ export async function runBackgroundJobs() {
         }
         try { client.release(); } catch {}
       }
+      isCancelTimeoutJobRunning = false;
     }
   }, 60 * 1000);
 
   // 3. Buyer Review Window & Auto-Accept Job (Every 60 seconds with session advisory lock on remote Postgres)
   setInterval(async () => {
+    if (isAutoAcceptJobRunning) return;
+    isAutoAcceptJobRunning = true;
     let client: any = null;
     let hasLock = false;
     try {
@@ -93,6 +105,7 @@ export async function runBackgroundJobs() {
         }
         try { client.release(); } catch {}
       }
+      isAutoAcceptJobRunning = false;
     }
   }, 60 * 1000);
 }

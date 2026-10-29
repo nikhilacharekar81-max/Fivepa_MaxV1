@@ -26,6 +26,7 @@ import { createNotification, sendOrderEmail } from './notificationService.js';
 import { recalculateUserRating } from './reviewService.js';
 import { broadcastMessage } from '../websocket.js';
 import { diagnosticService } from './diagnosticService.js';
+import { cancelPendingOffersForOrder } from './workstreamService.js';
 
 export interface ClearingEarning {
   orderId: string;
@@ -39,8 +40,8 @@ export function getUnclearedEarnings(userId: string): number {
   return getRecentClearingTotalSync(userId);
 }
 
-export async function getUnclearedEarningsFromDb(userId: string): Promise<number> {
-  const dbAmount = await store.getUnclearedEarningsAmount(userId);
+export async function getUnclearedEarningsFromDb(userId: string, client?: any): Promise<number> {
+  const dbAmount = await store.getUnclearedEarningsAmount(userId, client);
   if (dbAmount > 0) return dbAmount;
   return getUnclearedEarnings(userId);
 }
@@ -54,12 +55,24 @@ export async function getActiveEscrowRemaining(order: Order, client?: any): Prom
 export const orderIndex = new Map<string, Order>();
 
 export const orderStateLocks = new Set<string>();
+const orderStateLockTimestamps = new Map<string, number>();
+const ORDER_LOCK_TTL_MS = 60_000;
+
+function evictExpiredOrderLock(orderId: string): void {
+  const lockedAt = orderStateLockTimestamps.get(orderId);
+  if (lockedAt !== undefined && Date.now() - lockedAt > ORDER_LOCK_TTL_MS) {
+    orderStateLocks.delete(orderId);
+    orderStateLockTimestamps.delete(orderId);
+  }
+}
 
 export function acquireOrderLock(orderId: string) {
+  evictExpiredOrderLock(orderId);
   if (orderStateLocks.has(orderId)) {
     throw new Error('Action rejected: This order is currently being processed by another operation. Please retry in a moment.');
   }
   orderStateLocks.add(orderId);
+  orderStateLockTimestamps.set(orderId, Date.now());
 }
 
 export function tryAcquireOrderLock(orderId: string, res: any): boolean {
@@ -75,6 +88,7 @@ export function tryAcquireOrderLock(orderId: string, res: any): boolean {
 
 export function releaseOrderLock(orderId: string) {
   orderStateLocks.delete(orderId);
+  orderStateLockTimestamps.delete(orderId);
 }
 
 export function registerOrder(o: Order) {
@@ -87,9 +101,9 @@ export async function recordOrder(o: Order): Promise<void> {
   registerOrder(o);
 }
 
-export async function registerAuditLog(log: AuditLog): Promise<void> {
+export async function registerAuditLog(log: AuditLog, client?: any): Promise<void> {
   try {
-    await store.addAuditLog(log);
+    await store.addAuditLog(log, client);
   } catch (err) {
     console.error('[PostgresStore] Failed to save audit log:', err);
   }
@@ -100,33 +114,26 @@ export function saveUsersToPostgres() { return Promise.resolve(); }
 export function saveGigsToPostgres() { return Promise.resolve(); }
 
 export async function syncUserBalances(userIds?: string[], externalClient?: any) {
+  const dbRunner = externalClient || postgresStore.getPool();
+  const useSavepoint = Boolean(externalClient);
+  const spName = 'sp_sync_user_balances';
   try {
-    const dbRunner = externalClient || postgresStore.getPool();
+    if (useSavepoint) {
+      await dbRunner.query(`SAVEPOINT ${spName}`);
+    }
     const hasSpecificUsers = Array.isArray(userIds) && userIds.length > 0;
 
     if (hasSpecificUsers) {
-      const distinctIds = Array.from(new Set(userIds.filter(Boolean)));
-      if (distinctIds.length === 0) return;
-
-      await dbRunner.query(`
-        UPDATE users u
-        SET wallet_balance = w.available_balance
-        FROM wallets w
-        WHERE u.id = w.user_id AND u.id = ANY($1)
-      `, [distinctIds]);
-
-      const walletRows = await dbRunner.query(
-        'SELECT user_id, available_balance FROM wallets WHERE user_id = ANY($1)',
-        [distinctIds]
-      );
-      const balanceMap = new Map<string, number>();
-      for (const r of walletRows.rows) {
-        balanceMap.set(r.user_id, Number(r.available_balance));
-      }
-
-      for (const u of (users || [])) {
-        if (!u || !balanceMap.has(u.id)) continue;
-        u.walletBalance = balanceMap.get(u.id)!;
+      const distinctIds = Array.from(new Set(userIds.filter(Boolean))).sort();
+      if (distinctIds.length > 0) {
+        await dbRunner.query(`
+          UPDATE users u
+          SET wallet_balance = w.available_balance
+          FROM wallets w
+          WHERE u.id = w.user_id
+            AND u.id = ANY($1::text[])
+            AND u.wallet_balance IS DISTINCT FROM w.available_balance
+        `, [distinctIds]);
       }
     } else {
       await dbRunner.query(`
@@ -134,20 +141,16 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
         SET wallet_balance = w.available_balance
         FROM wallets w
         WHERE u.id = w.user_id
+          AND u.wallet_balance IS DISTINCT FROM w.available_balance
       `);
-
-      const walletRows = await dbRunner.query('SELECT user_id, available_balance FROM wallets');
-      const balanceMap = new Map<string, number>();
-      for (const r of walletRows.rows) {
-        balanceMap.set(r.user_id, Number(r.available_balance));
-      }
-
-      for (const u of (users || [])) {
-        if (!u || !balanceMap.has(u.id)) continue;
-        u.walletBalance = balanceMap.get(u.id)!;
-      }
+    }
+    if (useSavepoint) {
+      await dbRunner.query(`RELEASE SAVEPOINT ${spName}`);
     }
   } catch (err) {
+    if (useSavepoint) {
+      try { await dbRunner.query(`ROLLBACK TO SAVEPOINT ${spName}`); } catch {}
+    }
     console.error('[syncUserBalances] Error syncing balances:', err);
   }
 }
@@ -442,7 +445,7 @@ export async function refundOrderFunds(
 
 export async function splitOrderFunds(order: Order, refundAmount: number, actor: string, reason: string, requestKey?: string, externalClient?: any) {
   assertOrderOpen(order);
-  const result = await financialTransactionService.resolveEscrowSplit({ orderId: order.id, refundAmount, reason, actor, idempotencyKey: requestKey }, externalClient);
+  const result = await financialTransactionService.resolveEscrowSplit({ orderId: order.id, refundAmount, reason, actor, idempotencyKey: requestKey, allowDisputeResolution: true }, externalClient);
   order.status = 'completed';
   if (!order.completedAt) {
     order.completedAt = new Date().toISOString();
@@ -600,9 +603,10 @@ export async function processCancellationTimeouts() {
                 }
               }
               await client.query(
-                "UPDATE orders SET status = 'cancelled', cancellation_type = 'inquiry_cancelled', cancellation_request = $1, cancellation_history = $2 WHERE id = $3",
+                "UPDATE orders SET status = 'cancelled', cancellation_type = 'inquiry_cancelled', cancellation_request = $1, cancellation_history = $2, updated_at = NOW() WHERE id = $3",
                 [JSON.stringify(cancelReq), JSON.stringify(freshOrder.cancellationHistory || []), freshOrder.id]
               );
+              await cancelPendingOffersForOrder(freshOrder.id, 'system', client);
               return [
                 {
                   userId: requesterId,
@@ -643,9 +647,10 @@ export async function processCancellationTimeouts() {
               }
             }
             await client.query(
-              "UPDATE orders SET cancellation_request = $1, cancellation_history = $2 WHERE id = $3",
+              "UPDATE orders SET cancellation_request = $1, cancellation_history = $2, cancellation_type = COALESCE(cancellation_type, 'auto_timeout'), updated_at = NOW() WHERE id = $3",
               [JSON.stringify(cancelReq), JSON.stringify(freshOrder.cancellationHistory || []), freshOrder.id]
             );
+            await cancelPendingOffersForOrder(freshOrder.id, 'system', client);
 
             return [
               {
@@ -724,8 +729,7 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
       if (order.cancellationRequest && order.cancellationRequest.status === 'pending') continue;
 
       const dispute = await store.getDisputeByOrderId(order.id);
-      const inMemoryDispute = (disputes || []).find(d => d.orderId === order.id && (d.status === 'open' || d.status === 'under_investigation'));
-      if ((dispute && (dispute.status === 'open' || dispute.status === 'under_investigation')) || inMemoryDispute) continue;
+      if (dispute && (dispute.status === 'open' || dispute.status === 'under_investigation' || (dispute.status as string) === 'under_review')) continue;
 
       const esc = await financialRepository.getEscrow(order.id);
       const hasEscrow = (esc && esc.remaining > 0 && esc.status !== 'released' && esc.status !== 'refunded');
@@ -771,6 +775,7 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
           const freshOrder = (store as any).mapOrderRow ? (store as any).mapOrderRow(freshRow) : await store.getOrder(order.id, client);
           if (!freshOrder || freshOrder.status !== 'delivered') return null;
 
+          freshOrder.acceptedVersion = latestDelivery.version;
           const relResult = await releaseOrderFunds(
             freshOrder, 
             'System Auto-Accept', 

@@ -21,7 +21,7 @@ export async function setupSSR(
   app: Express,
   isProd: boolean,
   root: string,
-  getData: () => Promise<{ gigs: any[]; users: any[]; projects: any[]; categories: any[] }> | { gigs: any[]; users: any[]; projects: any[]; categories: any[] }
+  getData: (pathname?: string) => Promise<{ gigs: any[]; users: any[]; projects: any[]; categories: any[] }> | { gigs: any[]; users: any[]; projects: any[]; categories: any[] }
 ) {
   let vite: any;
   let templateHtml: string = '';
@@ -114,7 +114,7 @@ export async function setupSSR(
       const pathParts = pathname.split('/').filter(Boolean);
 
       // 1. Load current PUBLIC data
-      const rawData = await getData();
+      const rawData = await getData(pathname);
       const PUBLIC_GIGS = rawData.gigs.filter(isGigPublic).map(sanitizePublicGig);
       const PUBLIC_USERS = rawData.users.filter(isUserPublic).map(sanitizePublicUser);
       const PUBLIC_PROJECTS = rawData.projects.filter(isProjectPublic).map(sanitizePublicProject);

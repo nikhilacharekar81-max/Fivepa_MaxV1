@@ -117,17 +117,17 @@ export interface StoreInterface {
   deleteProject(id: string): Promise<boolean>;
 
   // Proposals
-  getProposal(id: string): Promise<Proposal | undefined>;
+  getProposal(id: string, client?: any): Promise<Proposal | undefined>;
   listProposals(): Promise<Proposal[]>;
   listProposalsByProject(projectId: string): Promise<Proposal[]>;
   listProposalsByFreelancer(freelancerId: string): Promise<Proposal[]>;
   listProposalsForUser(userId: string): Promise<Proposal[]>;
-  saveProposal(proposal: Proposal): Promise<void>;
+  saveProposal(proposal: Proposal, client?: any): Promise<void>;
 
   // Offers
-  getOfferById(id: string): Promise<WorkstreamOffer | undefined>;
-  listOffersForOrder(orderId: string): Promise<WorkstreamOffer[]>;
-  saveOffer(offer: WorkstreamOffer): Promise<void>;
+  getOfferById(id: string, client?: any): Promise<WorkstreamOffer | undefined>;
+  listOffersForOrder(orderId: string, client?: any): Promise<WorkstreamOffer[]>;
+  saveOffer(offer: WorkstreamOffer, client?: any): Promise<void>;
 
   // Custom Invoices
   getCustomInvoiceById(id: string): Promise<CustomInvoice | undefined>;
@@ -135,9 +135,9 @@ export interface StoreInterface {
   saveCustomInvoice(invoice: CustomInvoice): Promise<void>;
 
   // Disputes
-  getDisputeById(id: string): Promise<Dispute | undefined>;
-  getDisputeByOrderId(orderId: string): Promise<Dispute | undefined>;
-  saveDispute(dispute: Dispute): Promise<void>;
+  getDisputeById(id: string, client?: any): Promise<Dispute | undefined>;
+  getDisputeByOrderId(orderId: string, client?: any): Promise<Dispute | undefined>;
+  saveDispute(dispute: Dispute, client?: any): Promise<void>;
 
   // Support Tickets
   getSupportTicketById(id: string): Promise<SupportTicket | undefined>;
@@ -159,12 +159,12 @@ export interface StoreInterface {
   setDefaultPaymentMethod(userId: string, id: string): Promise<void>;
 
   // Clearing Earnings
-  saveClearingEarning(e: ClearingEarning): Promise<void>;
-  listUnclearedEarningsForUser(sellerId: string): Promise<ClearingEarning[]>;
-  getUnclearedEarningsAmount(sellerId: string): Promise<number>;
+  saveClearingEarning(e: ClearingEarning, client?: any): Promise<void>;
+  listUnclearedEarningsForUser(sellerId: string, client?: any): Promise<ClearingEarning[]>;
+  getUnclearedEarningsAmount(sellerId: string, client?: any): Promise<number>;
 
   // Audit Logs
-  addAuditLog(l: AuditLog): Promise<void>;
+  addAuditLog(l: AuditLog, client?: any): Promise<void>;
   listAuditLogs(): Promise<AuditLog[]>;
 
   // User Emails
@@ -201,15 +201,25 @@ export interface StoreInterface {
 export function mapOrderRow(r: any): Order {
   if (!r) return undefined as any;
   const resolvedType = r.order_type || (r.project_id ? 'project' : 'gig');
+  const parsedFeeBreakdown = typeof r.fee_breakdown === 'string' ? JSON.parse(r.fee_breakdown) : (r.fee_breakdown || undefined);
+  const serviceFee = r.service_fee !== null && r.service_fee !== undefined
+    ? Number(r.service_fee)
+    : (parsedFeeBreakdown?.buyerFee ?? parsedFeeBreakdown?.serviceFee ?? 0);
+  const smallOrderFee = r.small_order_fee !== null && r.small_order_fee !== undefined
+    ? Number(r.small_order_fee)
+    : (parsedFeeBreakdown?.smallOrderFee ?? 0);
   return {
     id: r.id,
     title: r.title,
     orderTitle: r.title,
     buyerId: r.buyer_id,
     sellerId: r.seller_id,
+    clientId: r.client_id || r.buyer_id,
+    freelancerId: r.freelancer_id || r.seller_id,
     amount: Number(r.amount),
     status: r.status,
     createdAt: r.created_at,
+    updatedAt: r.updated_at instanceof Date ? r.updated_at.toISOString() : (r.updated_at || undefined),
     dueDate: r.due_date || r.created_at,
     completedAt: r.completed_at || undefined,
     requirements: r.requirements || undefined,
@@ -229,7 +239,9 @@ export function mapOrderRow(r: any): Order {
     serviceTitle: r.service_title || undefined,
     serviceThumbnail: r.service_thumbnail || undefined,
     isTimerPaused: Boolean(r.is_timer_paused),
-    feeBreakdown: typeof r.fee_breakdown === 'string' ? JSON.parse(r.fee_breakdown) : (r.fee_breakdown || undefined),
+    feeBreakdown: parsedFeeBreakdown,
+    serviceFee,
+    smallOrderFee,
     deliveryHistory: typeof r.delivery_history === 'string' ? JSON.parse(r.delivery_history) : (r.delivery_history || []),
     deliveryNotes: r.delivery_notes || undefined,
     deliveryReference: r.delivery_reference || undefined,
@@ -537,11 +549,12 @@ export function mapPaymentMethodRow(r: any): PaymentMethodRecord {
 
 export function mapClearingEarningRow(r: any): ClearingEarning {
   if (!r) return undefined as any;
+  const rawClearsAt = r.clearance_end || r.clears_at;
   return {
     orderId: r.order_id,
     sellerId: r.seller_id,
     amount: Number(r.amount),
-    clearsAt: r.clears_at instanceof Date ? r.clears_at.toISOString() : String(r.clears_at)
+    clearsAt: rawClearsAt instanceof Date ? rawClearsAt.toISOString() : String(rawClearsAt || '')
   };
 }
 
@@ -963,8 +976,9 @@ export class PostgresAsyncStore implements StoreInterface {
     return res.rowCount !== null && res.rowCount > 0;
   }
 
-  async getProposal(id: string): Promise<Proposal | undefined> {
-    const res = await postgresStore.getPool().query('SELECT * FROM proposals WHERE id = $1', [id]);
+  async getProposal(id: string, client?: any): Promise<Proposal | undefined> {
+    const dbRunner = client || postgresStore.getPool();
+    const res = await dbRunner.query('SELECT * FROM proposals WHERE id = $1', [id]);
     if (res.rows.length > 0) return mapProposalRow(res.rows[0]);
     return undefined;
   }
@@ -1001,8 +1015,9 @@ export class PostgresAsyncStore implements StoreInterface {
     return res.rows.map(mapProposalRow);
   }
 
-  async saveProposal(p: Proposal): Promise<void> {
-    await postgresStore.getPool().query(
+  async saveProposal(p: Proposal, client?: any): Promise<void> {
+    const dbRunner = client || postgresStore.getPool();
+    await dbRunner.query(
       `INSERT INTO proposals (
         id, project_id, freelancer_id, freelancer_name, freelancer_avatar, freelancer_title,
         cover_letter, bid_amount, delivery_days, created_at, status, workstream_order_id, offer_id
@@ -1033,9 +1048,14 @@ export class PostgresAsyncStore implements StoreInterface {
   async saveOrder(order: Order, client?: any): Promise<void> {
     const dbRunner = client || postgresStore.getPool();
     const resolvedOrderType = order.orderType || (order as any).type || (order.projectId ? 'project' : 'gig');
+    const serviceFee = (order as any).serviceFee ?? (order.feeBreakdown as any)?.buyerFee ?? (order.feeBreakdown as any)?.serviceFee ?? 0;
+    const smallOrderFee = (order as any).smallOrderFee ?? (order.feeBreakdown as any)?.smallOrderFee ?? 0;
+    const selectedExtrasJson = (order as any).selectedExtras !== undefined
+      ? JSON.stringify((order as any).selectedExtras)
+      : null;
     await dbRunner.query(
       `INSERT INTO orders (
-        id, title, buyer_id, seller_id, amount, status, created_at, due_date, completed_at, 
+        id, title, buyer_id, seller_id, client_id, freelancer_id, amount, status, created_at, due_date, completed_at, 
         requirements, deliverables, deliverable_files, revisions, admin_notes, is_muted, 
         escrow_protection_start_date, escrow_protection_end_date, gig_id, project_id, 
         service_url, gig_slug, seller_username, buyer_username, service_title, service_thumbnail, 
@@ -1044,17 +1064,24 @@ export class PostgresAsyncStore implements StoreInterface {
         workspace_id, seller_review, previous_status,
         order_type, gig_order_id, project_order_id, proposal_id, extension_requests,
         free_extension_used, cancellation_request, cancellation_history, cancellation_type,
-        review_window_restarted_at, response_deadline
+        review_window_restarted_at, response_deadline,
+        service_fee, small_order_fee, selected_extras, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+        $1, $2, $3, $4, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
         $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
-        $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48
+        $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
+        $49, $50, $51, NOW()
       )
       ON CONFLICT (id) DO UPDATE SET
         title = EXCLUDED.title,
         buyer_id = EXCLUDED.buyer_id,
         seller_id = EXCLUDED.seller_id,
+        client_id = COALESCE(EXCLUDED.client_id, orders.client_id, EXCLUDED.buyer_id),
+        freelancer_id = COALESCE(EXCLUDED.freelancer_id, orders.freelancer_id, EXCLUDED.seller_id),
         amount = EXCLUDED.amount,
+        service_fee = EXCLUDED.service_fee,
+        small_order_fee = EXCLUDED.small_order_fee,
+        selected_extras = COALESCE(EXCLUDED.selected_extras, orders.selected_extras),
         status = CASE
           WHEN orders.status IN ('completed', 'cancelled') THEN orders.status
           ELSE EXCLUDED.status
@@ -1086,10 +1113,7 @@ export class PostgresAsyncStore implements StoreInterface {
         delivery_history = EXCLUDED.delivery_history,
         delivery_notes = EXCLUDED.delivery_notes,
         delivery_reference = EXCLUDED.delivery_reference,
-        accepted_version = CASE
-          WHEN orders.status IN ('completed', 'cancelled') THEN COALESCE(orders.accepted_version, EXCLUDED.accepted_version)
-          ELSE COALESCE(EXCLUDED.accepted_version, orders.accepted_version)
-        END,
+        accepted_version = COALESCE(EXCLUDED.accepted_version, orders.accepted_version),
         review_window_days = EXCLUDED.review_window_days,
         review_window_expires_at = EXCLUDED.review_window_expires_at,
         review = EXCLUDED.review,
@@ -1109,7 +1133,8 @@ export class PostgresAsyncStore implements StoreInterface {
           ELSE COALESCE(EXCLUDED.cancellation_type, orders.cancellation_type)
         END,
         review_window_restarted_at = EXCLUDED.review_window_restarted_at,
-        response_deadline = EXCLUDED.response_deadline`,
+        response_deadline = EXCLUDED.response_deadline,
+        updated_at = NOW()`,
       [
         order.id, order.title || (order as any).orderTitle || 'Untitled Order', order.buyerId, order.sellerId, order.amount, order.status,
         order.createdAt || new Date().toISOString(), order.dueDate || order.createdAt || new Date().toISOString(), order.completedAt || null, order.requirements || null,
@@ -1133,7 +1158,10 @@ export class PostgresAsyncStore implements StoreInterface {
         JSON.stringify(order.cancellationHistory || []),
         order.cancellationType || null,
         order.reviewWindowRestartedAt || null,
-        order.responseDeadline || null
+        order.responseDeadline || null,
+        serviceFee,
+        smallOrderFee,
+        selectedExtrasJson
       ]
     );
   }
@@ -1281,7 +1309,13 @@ export class PostgresAsyncStore implements StoreInterface {
   async saveUser(u: User, client?: any): Promise<void> {
     const dbRunner = client || postgresStore.getPool();
     if (u.email) {
-      await dbRunner.query('DELETE FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2', [u.email, u.id]);
+      const conflictRes = await dbRunner.query(
+        'SELECT id FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2 LIMIT 1',
+        [u.email, u.id]
+      );
+      if (conflictRes.rows.length > 0) {
+        throw new Error('Email address is already registered to another user');
+      }
     }
     await dbRunner.query(
       `INSERT INTO users (
@@ -1347,16 +1381,16 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   // Offers
-  async getOfferById(id: string): Promise<WorkstreamOffer | undefined> {
-    return await postgresStore.getOfferById(id);
+  async getOfferById(id: string, client?: any): Promise<WorkstreamOffer | undefined> {
+    return await postgresStore.getOfferById(id, client);
   }
 
-  async listOffersForOrder(orderId: string): Promise<WorkstreamOffer[]> {
-    return await postgresStore.listOffersForOrder(orderId);
+  async listOffersForOrder(orderId: string, client?: any): Promise<WorkstreamOffer[]> {
+    return await postgresStore.listOffersForOrder(orderId, client);
   }
 
-  async saveOffer(offer: WorkstreamOffer): Promise<void> {
-    await postgresStore.saveOffer(offer);
+  async saveOffer(offer: WorkstreamOffer, client?: any): Promise<void> {
+    await postgresStore.saveOffer(offer, client);
   }
 
   // Custom Invoices
@@ -1373,16 +1407,16 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   // Disputes
-  async getDisputeById(id: string): Promise<Dispute | undefined> {
-    return await postgresStore.getDisputeById(id);
+  async getDisputeById(id: string, client?: any): Promise<Dispute | undefined> {
+    return await postgresStore.getDisputeById(id, client);
   }
 
-  async getDisputeByOrderId(orderId: string): Promise<Dispute | undefined> {
-    return await postgresStore.getDisputeByOrderId(orderId);
+  async getDisputeByOrderId(orderId: string, client?: any): Promise<Dispute | undefined> {
+    return await postgresStore.getDisputeByOrderId(orderId, client);
   }
 
-  async saveDispute(dispute: Dispute): Promise<void> {
-    await postgresStore.saveDispute(dispute);
+  async saveDispute(dispute: Dispute, client?: any): Promise<void> {
+    await postgresStore.saveDispute(dispute, client);
   }
 
   // Support Tickets
@@ -1441,21 +1475,21 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   // Clearing Earnings
-  async saveClearingEarning(e: ClearingEarning): Promise<void> {
-    await postgresStore.saveClearingEarning(e);
+  async saveClearingEarning(e: ClearingEarning, client?: any): Promise<void> {
+    await postgresStore.saveClearingEarning(e, client);
   }
 
-  async listUnclearedEarningsForUser(sellerId: string): Promise<ClearingEarning[]> {
-    return await postgresStore.listUnclearedEarningsForUser(sellerId);
+  async listUnclearedEarningsForUser(sellerId: string, client?: any): Promise<ClearingEarning[]> {
+    return await postgresStore.listUnclearedEarningsForUser(sellerId, client);
   }
 
-  async getUnclearedEarningsAmount(sellerId: string): Promise<number> {
-    return await postgresStore.getUnclearedEarningsAmount(sellerId);
+  async getUnclearedEarningsAmount(sellerId: string, client?: any): Promise<number> {
+    return await postgresStore.getUnclearedEarningsAmount(sellerId, client);
   }
 
   // Audit Logs
-  async addAuditLog(l: AuditLog): Promise<void> {
-    await postgresStore.addAuditLog(l);
+  async addAuditLog(l: AuditLog, client?: any): Promise<void> {
+    await postgresStore.addAuditLog(l, client);
   }
 
   async listAuditLogs(): Promise<AuditLog[]> {

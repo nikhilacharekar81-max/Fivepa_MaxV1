@@ -265,15 +265,40 @@ export function resolveAuthenticatedUserId(req: Request): string | null {
 }
 
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+const MAX_RATE_BUCKETS = 10_000;
+let lastRateBucketSweep = 0;
+
+function sweepExpiredRateBuckets(now: number) {
+  if (now - lastRateBucketSweep < 60_000 && rateBuckets.size < MAX_RATE_BUCKETS) {
+    return;
+  }
+  lastRateBucketSweep = now;
+  for (const [k, v] of rateBuckets.entries()) {
+    if (now > v.resetAt) {
+      rateBuckets.delete(k);
+    }
+  }
+  if (rateBuckets.size >= MAX_RATE_BUCKETS) {
+    const excess = rateBuckets.size - MAX_RATE_BUCKETS + 1000;
+    let removed = 0;
+    for (const k of rateBuckets.keys()) {
+      rateBuckets.delete(k);
+      removed++;
+      if (removed >= excess) break;
+    }
+  }
+}
+
 export function rateLimit(max: number, windowMs: number, prefix: string = '') {
   return (req: Request, res: Response, next: NextFunction) => {
     if (process.env.NODE_ENV === 'test') {
       return next();
     }
+    const now = Date.now();
+    sweepExpiredRateBuckets(now);
     const identity = (req as any).authenticatedUserId || req.ip || req.socket?.remoteAddress || 'anon';
     const route = prefix || req.route?.path || req.path;
     const key = `${route}:${identity}`;
-    const now = Date.now();
     const record = rateBuckets.get(key) || { count: 0, resetAt: now + windowMs };
     if (now > record.resetAt) {
       record.count = 0;

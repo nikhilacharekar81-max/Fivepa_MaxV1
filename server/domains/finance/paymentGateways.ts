@@ -287,6 +287,15 @@ export class PaymentGatewayManager {
       const sig = String(params.headers['x-razorpay-signature'] || '').trim();
       if (!sig || !/^[0-9a-fA-F]+$/.test(sig)) return false;
 
+      const rzpTsHeader = params.headers['x-razorpay-timestamp'];
+      if (rzpTsHeader !== undefined && rzpTsHeader !== null && String(rzpTsHeader).trim() !== '') {
+        const tsNum = Number(rzpTsHeader);
+        const nowSec = Math.floor(Date.now() / 1000);
+        if (!Number.isFinite(tsNum) || Math.abs(nowSec - tsNum) > 300) {
+          return false;
+        }
+      }
+
       const expectedSig = crypto.createHmac('sha256', webhookSecret).update(bodyStr).digest('hex');
       if (sig.length !== expectedSig.length) return false;
       const sigBuf = Buffer.from(sig, 'hex');
@@ -304,6 +313,11 @@ export class PaymentGatewayManager {
           const transmissionTime = params.headers['paypal-transmission-time'];
 
           if (!transmissionId || !transmissionSig || !certUrl || !authAlgo || !transmissionTime) {
+            return false;
+          }
+
+          const parsedTransmissionMs = Date.parse(String(transmissionTime));
+          if (!Number.isFinite(parsedTransmissionMs) || Math.abs(Date.now() - parsedTransmissionMs) > 5 * 60 * 1000) {
             return false;
           }
 

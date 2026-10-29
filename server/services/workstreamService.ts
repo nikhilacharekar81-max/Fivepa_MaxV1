@@ -39,7 +39,7 @@ export const WORKSTREAM_ALLOWED_EXTENSIONS = new Set([
   '.py', '.java', '.cpp', '.c', '.cs', '.php', '.rb', '.go', '.rs', '.sql', '.sh', '.xml', '.vue', '.svelte', '.yaml', '.yml'
 ]);
 
-export const WORKSTREAM_INLINE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.svg', '.txt']);
+export const WORKSTREAM_INLINE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.txt']);
 
 export const OFFER_LABEL: Record<WorkstreamOfferKind, string> = { proposal: 'proposal', invoice: 'invoice', deposit: 'deposit request' };
 export const OFFER_PREFIX: Record<WorkstreamOfferKind, string> = { proposal: 'PRP', invoice: 'INV', deposit: 'DEP' };
@@ -52,10 +52,10 @@ export function generateCollisionSafeOfferNumber(kind: WorkstreamOfferKind): str
   return `${prefix}-${tsPart}-${rndPart}`;
 }
 
-export async function cancelPendingOffersForOrder(orderId: string, actorId?: string): Promise<void> {
+export async function cancelPendingOffersForOrder(orderId: string, actorId?: string, client?: any): Promise<void> {
   try {
-    const pool = postgresStore.getPool();
-    await pool.query(
+    const dbRunner = client || postgresStore.getPool();
+    await dbRunner.query(
       `UPDATE workstream_offers
        SET status = 'cancelled', resolved_at = NOW(), resolved_by = COALESCE($2, created_by)
        WHERE order_id = $1 AND status = 'pending'`,
@@ -71,32 +71,32 @@ export async function orderHasEscrow(orderId: string, client?: any): Promise<boo
   return Boolean(esc && esc.status === 'held' && esc.remaining > 0);
 }
 
-export async function hasPaidInvoiceOrReleasedEscrow(order: Order): Promise<boolean> {
-  const esc = await financialRepository.getEscrow(order.id);
+export async function hasPaidInvoiceOrReleasedEscrow(order: Order, client?: any): Promise<boolean> {
+  const esc = await financialRepository.getEscrow(order.id, client);
   if (order.status === 'completed' || (esc && esc.releasedGross > 0)) return true;
   try {
-    const offers = await store.listOffersForOrder(order.id);
+    const offers = await store.listOffersForOrder(order.id, client);
     return offers.some(o => o.kind === 'invoice' && o.status === 'paid');
   } catch {
     return false;
   }
 }
 
-export async function findLinkedProposalForOffer(offer: WorkstreamOffer, order: Order): Promise<Proposal | undefined> {
+export async function findLinkedProposalForOffer(offer: WorkstreamOffer, order: Order, client?: any): Promise<Proposal | undefined> {
   try {
-    const pool = postgresStore.getPool();
+    const dbRunner = client || postgresStore.getPool();
     if (offer.proposalId) {
-      const res = await pool.query('SELECT * FROM proposals WHERE id = $1', [offer.proposalId]);
+      const res = await dbRunner.query('SELECT * FROM proposals WHERE id = $1', [offer.proposalId]);
       if (res.rows.length > 0) return mapProposalRow(res.rows[0]);
     }
-    const offerRes = await pool.query('SELECT * FROM proposals WHERE offer_id = $1', [offer.id]);
+    const offerRes = await dbRunner.query('SELECT * FROM proposals WHERE offer_id = $1', [offer.id]);
     if (offerRes.rows.length > 0) return mapProposalRow(offerRes.rows[0]);
 
     if (order.projectId && order.sellerId) {
-      const fallbackRes = await pool.query(
+      const fallbackRes = await dbRunner.query(
         `SELECT * FROM proposals 
          WHERE project_id = $1 AND freelancer_id = $2 AND status IN ('accepted', 'accepting', 'pending')
-         ORDER BY updated_at DESC, created_at DESC LIMIT 1`,
+         ORDER BY created_at DESC LIMIT 1`,
         [order.projectId, order.sellerId]
       );
       if (fallbackRes.rows.length > 0) return mapProposalRow(fallbackRes.rows[0]);
@@ -134,7 +134,7 @@ export async function viewOffer(o: WorkstreamOffer) {
   };
 }
 
-export async function postOfferMessage(order: Order, offer: WorkstreamOffer, sender: { id: string; name: string } | null, text: string, action: string) {
+export async function postOfferMessage(order: Order, offer: WorkstreamOffer, sender: { id: string; name: string } | null, text: string, action: string, client?: any) {
   const msg: Message = {
     id: `msg_${randomUUID()}`,
     orderId: order.id,
@@ -145,7 +145,7 @@ export async function postOfferMessage(order: Order, offer: WorkstreamOffer, sen
     type: sender ? 'message' : 'system',
     metadata: { action, offerId: offer.id, offerKind: offer.kind }
   };
-  await recordMessage(msg);
+  await recordMessage(msg, client);
 
   const recipientIds: string[] = [];
   if (sender?.id) {
@@ -156,15 +156,16 @@ export async function postOfferMessage(order: Order, offer: WorkstreamOffer, sen
     if (order.sellerId && order.sellerId !== order.buyerId) recipientIds.push(order.sellerId);
   }
   for (const userId of recipientIds) {
-    createNotification({
+    await createNotification({
       userId,
       type: 'offer',
       title: 'New Offer Activity',
       message: text,
       link: `/messages/${order.id}`,
-      dedupKey: `offer_${action}_${msg.id}`,
-      actorId: sender?.id
-    });
+      dedupKey: `offer_${action}_${msg.id}_${userId}`,
+      actorId: sender?.id,
+      client
+    }, client);
   }
 }
 

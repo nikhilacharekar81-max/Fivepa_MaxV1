@@ -50,72 +50,90 @@ export async function processPendingOutboxEvents(): Promise<number> {
 
   try {
     const pool = postgresStore.getPool();
-    const res = await pool.query(
-      `SELECT id, event_type, aggregate_type, aggregate_id, payload, retry_count
+    const candidateRes = await pool.query(
+      `SELECT id
        FROM outbox_events
        WHERE status = 'pending' AND retry_count < 5
        ORDER BY created_at ASC
        LIMIT 20`
     );
 
-    for (const row of res.rows) {
-      const { id, event_type, aggregate_type, aggregate_id, payload: rawPayload, retry_count } = row;
-      const payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload;
+    for (const candidate of candidateRes.rows) {
+      await postgresStore.executeInTransaction(async (client) => {
+        const lockRes = await client.query(
+          `SELECT id, event_type, aggregate_type, aggregate_id, payload, retry_count
+           FROM outbox_events
+           WHERE id = $1 AND status = 'pending' AND retry_count < 5
+           FOR UPDATE SKIP LOCKED`,
+          [candidate.id]
+        );
+        if (lockRes.rows.length === 0) return;
 
-      try {
-        if (event_type === 'ORDER_ESCROW_FUNDED' || event_type === 'ORDER_CREATED') {
-          if (payload.sellerId) {
-            await createNotification({
-              userId: payload.sellerId,
-              type: 'order',
-              title: event_type === 'ORDER_ESCROW_FUNDED' ? 'Order Funded in Escrow' : 'New Order Received',
-              message: payload.title ? `Order #${aggregate_id}: "${payload.title}" is active.` : `Order #${aggregate_id} update.`,
-              link: `/messages/${aggregate_id}`,
-              dedupKey: `outbox_${id}_${payload.sellerId}`
-            });
+        const row = lockRes.rows[0];
+        const { id, event_type, aggregate_id, payload: rawPayload, retry_count } = row;
+        const payload = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload;
+
+        try {
+          if (event_type === 'ORDER_ESCROW_FUNDED' || event_type === 'ORDER_CREATED') {
+            if (payload.sellerId) {
+              const canonicalDedupKey = event_type === 'ORDER_ESCROW_FUNDED'
+                ? `order_funded_${aggregate_id}_${payload.sellerId}`
+                : `order_created_${aggregate_id}`;
+              await createNotification({
+                userId: payload.sellerId,
+                type: 'order',
+                title: event_type === 'ORDER_ESCROW_FUNDED' ? 'Order Funded in Escrow' : 'New Order Received',
+                message: payload.title ? `Order #${aggregate_id}: "${payload.title}" is active.` : `Order #${aggregate_id} update.`,
+                link: `/messages/${aggregate_id}`,
+                dedupKey: canonicalDedupKey,
+                client
+              }, client);
+            }
+          } else if (event_type === 'ESCROW_RELEASED') {
+            if (payload.sellerId) {
+              await createNotification({
+                userId: payload.sellerId,
+                type: 'finance',
+                title: 'Escrow Payment Released',
+                message: `Payment of $${Number(payload.amount || 0).toFixed(2)} for order #${aggregate_id} has been released to your balance.`,
+                link: `/messages/${aggregate_id}`,
+                dedupKey: `escrow_released_${aggregate_id}_${payload.sellerId}`,
+                client
+              }, client);
+            }
+          } else if (event_type === 'ESCROW_REFUNDED') {
+            if (payload.buyerId) {
+              await createNotification({
+                userId: payload.buyerId,
+                type: 'finance',
+                title: 'Escrow Refund Issued',
+                message: `Refund of $${Number(payload.amount || 0).toFixed(2)} for order #${aggregate_id} has been credited to your wallet.`,
+                link: `/messages/${aggregate_id}`,
+                dedupKey: `escrow_refunded_${aggregate_id}_${payload.buyerId}`,
+                client
+              }, client);
+            }
           }
-        } else if (event_type === 'ESCROW_RELEASED') {
-          if (payload.sellerId) {
-            await createNotification({
-              userId: payload.sellerId,
-              type: 'finance',
-              title: 'Escrow Payment Released',
-              message: `Payment of $${Number(payload.amount || 0).toFixed(2)} for order #${aggregate_id} has been released to your balance.`,
-              link: `/messages/${aggregate_id}`,
-              dedupKey: `outbox_${id}_${payload.sellerId}`
-            });
-          }
-        } else if (event_type === 'ESCROW_REFUNDED') {
-          if (payload.buyerId) {
-            await createNotification({
-              userId: payload.buyerId,
-              type: 'finance',
-              title: 'Escrow Refund Issued',
-              message: `Refund of $${Number(payload.amount || 0).toFixed(2)} for order #${aggregate_id} has been credited to your wallet.`,
-              link: `/messages/${aggregate_id}`,
-              dedupKey: `outbox_${id}_${payload.buyerId}`
-            });
-          }
+
+          await client.query(
+            `UPDATE outbox_events
+             SET status = 'processed', processed_at = NOW()
+             WHERE id = $1`,
+            [id]
+          );
+          processedCount++;
+        } catch (evtErr: any) {
+          const nextRetry = (Number(retry_count) || 0) + 1;
+          const newStatus = nextRetry >= 5 ? 'failed' : 'pending';
+          await client.query(
+            `UPDATE outbox_events
+             SET retry_count = $1, status = $2, error_message = $3
+             WHERE id = $4`,
+            [nextRetry, newStatus, String(evtErr?.message || evtErr), id]
+          );
+          diagnosticService.log('warning', 'outbox', 'processPendingOutboxEvents', 'outboxService.ts', 'process_event', 'FAILED', { eventId: id, eventType: event_type }, evtErr);
         }
-
-        await pool.query(
-          `UPDATE outbox_events
-           SET status = 'processed', processed_at = NOW()
-           WHERE id = $1`,
-          [id]
-        );
-        processedCount++;
-      } catch (evtErr: any) {
-        const nextRetry = (Number(retry_count) || 0) + 1;
-        const newStatus = nextRetry >= 5 ? 'failed' : 'pending';
-        await pool.query(
-          `UPDATE outbox_events
-           SET retry_count = $1, status = $2, error_message = $3
-           WHERE id = $4`,
-          [nextRetry, newStatus, String(evtErr?.message || evtErr), id]
-        );
-        diagnosticService.log('warning', 'outbox', 'processPendingOutboxEvents', 'outboxService.ts', 'process_event', 'FAILED', { eventId: id, eventType: event_type }, evtErr);
-      }
+      });
     }
   } catch (err) {
     diagnosticService.log('warning', 'outbox', 'processPendingOutboxEvents', 'outboxService.ts', 'batch_fetch', 'FAILED', {}, err);

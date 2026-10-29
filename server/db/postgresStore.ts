@@ -63,11 +63,12 @@ export function createPgPool(databaseName?: string): pkg.Pool {
   const isSslEnabled = process.env.PGSSL === 'true' || process.env.PGSSLMODE === 'require';
   const rejectUnauthorized = process.env.NODE_ENV === 'production' ? (process.env.PGSSLREJECTUNAUTHORIZED !== 'false') : false;
   const sslMode = isSslEnabled ? { rejectUnauthorized } : false;
+  const poolMax = Math.max(2, Number(process.env.PG_POOL_MAX || 20) || 20);
   if (connectionString) {
     return new Pool({
       connectionString,
       ssl: sslMode,
-      max: 20,
+      max: poolMax,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
     });
@@ -80,7 +81,7 @@ export function createPgPool(databaseName?: string): pkg.Pool {
     password: process.env.SQL_PASSWORD || process.env.PGPASSWORD || '',
     database: process.env.SQL_DB_NAME || process.env.PGDATABASE || db,
     ssl: sslMode,
-    max: 20,
+    max: poolMax,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
   });
@@ -118,7 +119,44 @@ declare global {
   var _appMockPool: any | undefined;
 }
 
-const txAsyncStorage = new AsyncLocalStorage<{ client: any; depth: number }>();
+interface ActiveTxContext {
+  client: any;
+  depth: number;
+  postCommitCallbacks: Array<() => void | Promise<void>>;
+}
+
+const txAsyncStorage = new AsyncLocalStorage<ActiveTxContext>();
+
+function createNestedSavepointClient(activeTx: ActiveTxContext) {
+  const spName = `sp_nested_${++activeTx.depth}`;
+  return {
+    query: async (text: string, params?: any[]) => {
+      const upper = text.trim().toUpperCase();
+      if (upper === 'BEGIN') return activeTx.client.query(`SAVEPOINT ${spName}`);
+      if (upper === 'COMMIT') return activeTx.client.query(`RELEASE SAVEPOINT ${spName}`);
+      if (upper === 'ROLLBACK') return activeTx.client.query(`ROLLBACK TO SAVEPOINT ${spName}`);
+      return activeTx.client.query(text, params);
+    },
+    release: () => {}
+  };
+}
+
+function wrapPoolWithActiveTx(rawPool: any): pkg.Pool {
+  const activeTx = txAsyncStorage.getStore();
+  if (!activeTx) return rawPool as pkg.Pool;
+  return new Proxy(rawPool, {
+    get(target, prop, receiver) {
+      if (prop === 'query') {
+        return (text: string, params?: any[]) => activeTx.client.query(text, params);
+      }
+      if (prop === 'connect') {
+        return async () => createNestedSavepointClient(activeTx);
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  }) as pkg.Pool;
+}
 
 class PGlitePool {
   private pglite: PGlite;
@@ -150,7 +188,7 @@ class PGlitePool {
     await this.pglite.waitReady;
   }
 
-  async query(text: string, params?: any[]) {
+  private async _rawQuery(text: string, params?: any[]) {
     await this.isReadyPromise;
     const trimmed = text.trim();
     if ((!params || params.length === 0) && trimmed.includes(';') && trimmed.indexOf(';') < trimmed.length - 1) {
@@ -170,21 +208,31 @@ class PGlitePool {
     };
   }
 
+  async query(text: string, params?: any[]) {
+    await this.isReadyPromise;
+    const activeTx = txAsyncStorage.getStore();
+    if (activeTx) {
+      return this._rawQuery(text, params);
+    }
+
+    let releaseLock!: () => void;
+    const prevLock = this.txLock;
+    this.txLock = new Promise<void>(resolve => {
+      releaseLock = resolve;
+    });
+    await prevLock;
+    try {
+      return await this._rawQuery(text, params);
+    } finally {
+      releaseLock();
+    }
+  }
+
   async connect() {
     await this.isReadyPromise;
     const activeTx = txAsyncStorage.getStore();
     if (activeTx) {
-      const spName = `sp_nested_${++activeTx.depth}`;
-      return {
-        query: async (text: string, params?: any[]) => {
-          const upper = text.trim().toUpperCase();
-          if (upper === 'BEGIN') return this.query(`SAVEPOINT ${spName}`);
-          if (upper === 'COMMIT') return this.query(`RELEASE SAVEPOINT ${spName}`);
-          if (upper === 'ROLLBACK') return this.query(`ROLLBACK TO SAVEPOINT ${spName}`);
-          return this.query(text, params);
-        },
-        release: () => {}
-      };
+      return createNestedSavepointClient(activeTx);
     }
 
     let releaseLock!: () => void;
@@ -206,7 +254,7 @@ class PGlitePool {
     }
 
     return {
-      query: async (text: string, params?: any[]) => this.query(text, params),
+      query: async (text: string, params?: any[]) => this._rawQuery(text, params),
       release: () => {
         if (!released) {
           released = true;
@@ -223,7 +271,7 @@ class PGlitePool {
   }
 }
 
-export function getPool(): pkg.Pool {
+export function getRawPool(): pkg.Pool {
   if (!isRemotePostgresConfigured()) {
     if (process.env.NODE_ENV === 'production' && !global._appMockPool) {
       throw new Error('FATAL: Production environment requires a configured PostgreSQL database (DATABASE_URL or SQL_HOST). Fallback to local PGlite is disabled in production.');
@@ -245,6 +293,10 @@ export function getPool(): pkg.Pool {
     global._appPostgresPool = createPgPool();
   }
   return global._appPostgresPool;
+}
+
+export function getPool(): pkg.Pool {
+  return wrapPoolWithActiveTx(getRawPool());
 }
 
 export class PostgresStore {
@@ -275,9 +327,29 @@ export class PostgresStore {
     this.adminRepo = new AdminRepo(this);
   }
 
-  getPool(): pkg.Pool {
+  getRawPool(): pkg.Pool {
     if ((this as any)._customPool) return (this as any)._customPool;
+    return getRawPool();
+  }
+
+  getPool(): pkg.Pool {
+    if ((this as any)._customPool) return wrapPoolWithActiveTx((this as any)._customPool);
     return getPool();
+  }
+
+  public isActiveTransaction(): boolean {
+    return Boolean(txAsyncStorage.getStore());
+  }
+
+  public onCommit(cb: () => void | Promise<void>): void {
+    const activeTx = txAsyncStorage.getStore();
+    if (activeTx) {
+      activeTx.postCommitCallbacks.push(cb);
+    } else {
+      Promise.resolve().then(cb).catch(err => {
+        console.error('[PostgresStore] Post-commit callback error:', err);
+      });
+    }
   }
 
   public isEnabled(): boolean {
@@ -302,29 +374,49 @@ export class PostgresStore {
     const existingTx = txAsyncStorage.getStore();
     if (existingTx) {
       const spName = `sp_tx_${++existingTx.depth}`;
+      const callbackCheckpoint = existingTx.postCommitCallbacks.length;
       await existingTx.client.query(`SAVEPOINT ${spName}`);
       try {
         const result = await fn(existingTx.client);
         await existingTx.client.query(`RELEASE SAVEPOINT ${spName}`);
         return result;
       } catch (err) {
+        existingTx.postCommitCallbacks.length = callbackCheckpoint;
         try { await existingTx.client.query(`ROLLBACK TO SAVEPOINT ${spName}`); } catch {}
         throw err;
       }
     }
 
-    const client = await this.getPool().connect();
+    const client = await this.getRawPool().connect();
+    const txContext: ActiveTxContext = { client, depth: 0, postCommitCallbacks: [] };
+    let committed = false;
+    let result!: T;
     try {
       await client.query('BEGIN');
-      const result = await txAsyncStorage.run({ client, depth: 0 }, () => fn(client));
-      await client.query('COMMIT');
-      return result;
+      result = await txAsyncStorage.run(txContext, () => fn(client));
+      const commitRes = await client.query('COMMIT');
+      if (commitRes && (commitRes as any).command === 'ROLLBACK') {
+        throw new Error('Transaction was aborted and rolled back during COMMIT');
+      }
+      committed = true;
     } catch (err) {
-      try { await client.query('ROLLBACK'); } catch {}
+      if (!committed) {
+        try { await client.query('ROLLBACK'); } catch {}
+      }
       throw err;
     } finally {
       client.release();
     }
+
+    for (const cb of txContext.postCommitCallbacks) {
+      try {
+        await cb();
+      } catch (cbErr) {
+        console.error('[PostgresStore] Error executing post-commit callback:', cbErr);
+      }
+    }
+
+    return result;
   }
 
   async flushAll(): Promise<void> {
@@ -358,12 +450,15 @@ export class PostgresStore {
     try {
       await adminPool.query(sql);
       const appUser = process.env.SQL_USER || 'ai_studio_app_user';
+      if (!/^[a-zA-Z_][a-zA-Z0-9_$]*$/.test(appUser)) {
+        throw new Error(`Invalid SQL_USER identifier: ${appUser}`);
+      }
       await adminPool.query(`
-        GRANT ALL ON SCHEMA public TO ${appUser};
-        GRANT ALL ON ALL TABLES IN SCHEMA public TO ${appUser};
-        GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO ${appUser};
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO ${appUser};
-        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO ${appUser};
+        GRANT ALL ON SCHEMA public TO "${appUser}";
+        GRANT ALL ON ALL TABLES IN SCHEMA public TO "${appUser}";
+        GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO "${appUser}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "${appUser}";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "${appUser}";
       `);
       console.log(`[PostgresStore] Migrations executed successfully on ${getDatabaseName()}.`);
     } finally {
@@ -425,9 +520,10 @@ export class PostgresStore {
     return this.ordersRepo.listReviews();
   }
 
-  async saveClearingEarning(e: ClearingEarning): Promise<void> {
+  async saveClearingEarning(e: ClearingEarning, client?: any): Promise<void> {
     const id = (e as any).id || ('clr_' + (e.orderId || Math.random().toString(36).substring(2)));
-    await this.getPool().query(
+    const dbRunner = client || this.getPool();
+    await dbRunner.query(
       `INSERT INTO earnings_clearing (id, order_id, seller_id, amount, clearance_end, status, payout_eligible)
        VALUES ($1, $2, $3, $4, $5, 'clearing', FALSE)
        ON CONFLICT (id) DO NOTHING`,
@@ -444,12 +540,12 @@ export class PostgresStore {
     );
   }
 
-  async listUnclearedEarningsForUser(sellerId: string): Promise<ClearingEarning[]> {
-    return this.ordersRepo.listUnclearedEarningsForUser(sellerId);
+  async listUnclearedEarningsForUser(sellerId: string, client?: any): Promise<ClearingEarning[]> {
+    return this.ordersRepo.listUnclearedEarningsForUser(sellerId, client);
   }
 
-  async getUnclearedEarningsAmount(sellerId: string): Promise<number> {
-    return this.ordersRepo.getUnclearedEarningsAmount(sellerId);
+  async getUnclearedEarningsAmount(sellerId: string, client?: any): Promise<number> {
+    return this.ordersRepo.getUnclearedEarningsAmount(sellerId, client);
   }
 
   // --- IDENTITY & USERS (Delegated to IdentityRepo) ---
@@ -551,16 +647,16 @@ export class PostgresStore {
     return this.workspaceRepo.listOffers();
   }
 
-  async getOfferById(id: string): Promise<WorkstreamOffer | undefined> {
-    return this.workspaceRepo.getOfferById(id);
+  async getOfferById(id: string, client?: any): Promise<WorkstreamOffer | undefined> {
+    return this.workspaceRepo.getOfferById(id, client);
   }
 
-  async listOffersForOrder(orderId: string): Promise<WorkstreamOffer[]> {
-    return this.workspaceRepo.listOffersForOrder(orderId);
+  async listOffersForOrder(orderId: string, client?: any): Promise<WorkstreamOffer[]> {
+    return this.workspaceRepo.listOffersForOrder(orderId, client);
   }
 
-  async saveOffer(o: WorkstreamOffer): Promise<void> {
-    return this.workspaceRepo.saveOffer(o);
+  async saveOffer(o: WorkstreamOffer, client?: any): Promise<void> {
+    return this.workspaceRepo.saveOffer(o, client);
   }
 
   async saveCustomInvoices(invoices: CustomInvoice[]): Promise<void> {
@@ -608,16 +704,16 @@ export class PostgresStore {
     return this.trustSafetyRepo.listDisputes();
   }
 
-  async getDisputeById(id: string): Promise<Dispute | undefined> {
-    return this.trustSafetyRepo.getDisputeById(id);
+  async getDisputeById(id: string, client?: any): Promise<Dispute | undefined> {
+    return this.trustSafetyRepo.getDisputeById(id, client);
   }
 
-  async getDisputeByOrderId(orderId: string): Promise<Dispute | undefined> {
-    return this.trustSafetyRepo.getDisputeByOrderId(orderId);
+  async getDisputeByOrderId(orderId: string, client?: any): Promise<Dispute | undefined> {
+    return this.trustSafetyRepo.getDisputeByOrderId(orderId, client);
   }
 
-  async saveDispute(d: Dispute): Promise<void> {
-    return this.trustSafetyRepo.saveDispute(d);
+  async saveDispute(d: Dispute, client?: any): Promise<void> {
+    return this.trustSafetyRepo.saveDispute(d, client);
   }
 
   async saveSupportTickets(tickets: SupportTicket[]): Promise<void> {
@@ -727,8 +823,8 @@ export class PostgresStore {
   }
 
   // --- ADMIN: AUDIT LOGS, SITE SETTINGS, CATEGORIES (Delegated to AdminRepo) ---
-  async addAuditLog(l: AuditLog): Promise<void> {
-    return this.adminRepo.addAuditLog(l);
+  async addAuditLog(l: AuditLog, client?: any): Promise<void> {
+    return this.adminRepo.addAuditLog(l, client);
   }
 
   async saveAuditLogs(logs: AuditLog[]): Promise<void> {

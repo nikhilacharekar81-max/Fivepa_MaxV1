@@ -10,7 +10,8 @@ import {
   resolveEffectiveFeePolicy,
   quoteOrderWithLiveSettings,
   DEFAULT_FEE_CONFIG,
-  toCents
+  toCents,
+  percentOfCents
 } from './fees.js';
 
 function assertPostgresAvailable(): void {
@@ -965,16 +966,19 @@ export class FinancialTransactionService {
         }
       }
 
-      const buyerRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [params.buyerId]);
-      if (buyerRes.rows.length === 0) throw new Error('Buyer wallet not found');
-      const buyer = buyerRes.rows[0];
+      const walletIdsToLock = Array.from(new Set([params.buyerId, params.sellerId])).sort();
+      const lockedWalletsRes = await client.query(
+        'SELECT * FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE',
+        [walletIdsToLock]
+      );
+      const buyer = lockedWalletsRes.rows.find((w: any) => w.user_id === params.buyerId);
+      if (!buyer) throw new Error('Buyer wallet not found');
       if (buyer.status === 'frozen' || buyer.status === 'suspended') {
         throw new Error(`Buyer wallet is ${buyer.status}`);
       }
 
-      const sellerRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [params.sellerId]);
-      if (sellerRes.rows.length === 0) throw new Error('Seller wallet not found');
-      const seller = sellerRes.rows[0];
+      const seller = lockedWalletsRes.rows.find((w: any) => w.user_id === params.sellerId);
+      if (!seller) throw new Error('Seller wallet not found');
       if (seller.status === 'frozen' || seller.status === 'suspended') {
         throw new Error(`Seller wallet is ${seller.status}`);
       }
@@ -1111,9 +1115,11 @@ export class FinancialTransactionService {
       const rawComm = escrow.commission_percent !== null && escrow.commission_percent !== undefined
         ? Number(escrow.commission_percent)
         : 20;
-      const commRate = rawComm / 100;
-      const platformFee = Number((gross * commRate).toFixed(2));
-      const freelancerNet = Number((gross - platformFee).toFixed(2));
+      const grossCents = toCents(gross);
+      const platformFeeCents = percentOfCents(grossCents, rawComm);
+      const freelancerNetCents = grossCents - platformFeeCents;
+      const platformFee = Number((platformFeeCents / 100).toFixed(2));
+      const freelancerNet = Number((freelancerNetCents / 100).toFixed(2));
 
       // Update Escrow
       const nextReleaseSeq = Number(escrow.release_seq || 0) + 1;
@@ -1167,7 +1173,11 @@ export class FinancialTransactionService {
       await this.assertJournalBalanced(client, entries);
       for (const e of entries) await client.query('INSERT INTO ledger_entries (id, journal_id, account_code, debit, credit, description, order_id, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [randomUUID(), journalId, e.account_code, e.debit, e.credit, e.description, e.order_id || null, e.user_id || null]);
 
-      recordRecentClearingSync(escrow.seller_id, freelancerNet, clearanceEnd);
+      if (postgresStore.isActiveTransaction()) {
+        postgresStore.onCommit(() => recordRecentClearingSync(escrow.seller_id, freelancerNet, clearanceEnd));
+      } else {
+        recordRecentClearingSync(escrow.seller_id, freelancerNet, clearanceEnd);
+      }
 
       const result = { success: true, freelancerNet, platformFee, gross };
       await recordIdempotencyResult(client, idempKey, 'releaseOrderFunds', result, payloadFingerprint);
@@ -1179,13 +1189,14 @@ export class FinancialTransactionService {
     return postgresStore.executeInTransaction(run);
   }
 
-  async refundOrderFunds(params: { orderId: string; amount?: number; reason: string; actor: string; idempotencyKey?: string; allowDisputeResolution?: boolean; }, externalClient?: any) {
+  async refundOrderFunds(params: { orderId: string; amount?: number; reason: string; actor: string; idempotencyKey?: string; allowDisputeResolution?: boolean; existingRefundId?: string; }, externalClient?: any) {
     if (params.amount !== undefined) {
       assertValidMoneyAmount(params.amount, 'amount');
     }
 
     assertPostgresAvailable();
     const run = async (client: any) => {
+      const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [params.orderId]);
       const escRes = await client.query('SELECT * FROM escrows WHERE order_id = $1 FOR UPDATE', [params.orderId]);
       if (escRes.rows.length === 0) {
         throw new Error(`Escrow record not found in PostgreSQL for order ${params.orderId}`);
@@ -1211,7 +1222,6 @@ export class FinancialTransactionService {
       const check = await checkOrRecordIdempotency(client, idempKey, 'refundOrderFunds', payloadFingerprint);
       if (check.replayed) return check.result;
 
-      const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [params.orderId]);
       if (orderRes.rows.length > 0 && (orderRes.rows[0].status === 'completed' || orderRes.rows[0].status === 'cancelled')) {
         throw new Error(`Cannot refund escrow: Order is already ${orderRes.rows[0].status}.`);
       }
@@ -1281,13 +1291,20 @@ export class FinancialTransactionService {
         await client.query('UPDATE orders SET status = $1 WHERE id = $2 AND status NOT IN (\'completed\', \'cancelled\')', ['cancelled', params.orderId]);
       }
 
-      // Record refund in authoritative refunds table inside the same transaction (immutable INSERT)
-      const refundRecordId = 'ref_' + params.orderId + '_' + nextSeq;
-      await client.query(
-        `INSERT INTO refunds (id, order_id, buyer_id, amount, reason, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'approved', $6)`,
-        [refundRecordId, params.orderId, escrow.buyer_id, refundAmount, params.reason, new Date().toISOString().substring(0, 10)]
-      );
+      // Record refund in authoritative refunds table inside the same transaction
+      if (params.existingRefundId) {
+        await client.query(
+          `UPDATE refunds SET status = 'approved', amount = $1, reason = $2 WHERE id = $3`,
+          [refundAmount, params.reason, params.existingRefundId]
+        );
+      } else {
+        const refundRecordId = 'ref_' + params.orderId + '_' + nextSeq;
+        await client.query(
+          `INSERT INTO refunds (id, order_id, buyer_id, amount, reason, status, created_at)
+           VALUES ($1, $2, $3, $4, $5, 'approved', $6)`,
+          [refundRecordId, params.orderId, escrow.buyer_id, refundAmount, params.reason, new Date().toISOString().substring(0, 10)]
+        );
+      }
 
       // Balanced Journal
       const journalId = 'jnl_' + randomUUID().slice(0, 12);
@@ -1371,16 +1388,19 @@ export class FinancialTransactionService {
         }
       }
 
-      const buyerRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [params.buyerId]);
-      if (buyerRes.rows.length === 0) throw new Error('Buyer wallet not found');
-      const buyer = buyerRes.rows[0];
+      const walletIdsToLock = Array.from(new Set([params.buyerId, params.sellerId])).sort();
+      const lockedWalletsRes = await client.query(
+        'SELECT * FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE',
+        [walletIdsToLock]
+      );
+      const buyer = lockedWalletsRes.rows.find((w: any) => w.user_id === params.buyerId);
+      if (!buyer) throw new Error('Buyer wallet not found');
       if (buyer.status === 'frozen' || buyer.status === 'suspended') {
         throw new Error(`Buyer wallet is ${buyer.status}`);
       }
 
-      const sellerRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [params.sellerId]);
-      if (sellerRes.rows.length === 0) throw new Error('Seller wallet not found');
-      const seller = sellerRes.rows[0];
+      const seller = lockedWalletsRes.rows.find((w: any) => w.user_id === params.sellerId);
+      if (!seller) throw new Error('Seller wallet not found');
       if (seller.status === 'frozen' || seller.status === 'suspended') {
         throw new Error(`Seller wallet is ${seller.status}`);
       }
@@ -1454,10 +1474,11 @@ export class FinancialTransactionService {
     return postgresStore.executeInTransaction(run);
   }
 
-  async resolveEscrowSplit(params: { orderId: string; refundAmount: number; reason: string; actor: string; idempotencyKey?: string }, externalClient?: any) {
+  async resolveEscrowSplit(params: { orderId: string; refundAmount: number; reason: string; actor: string; idempotencyKey?: string; allowDisputeResolution?: boolean }, externalClient?: any) {
     assertValidMoneyAmount(params.refundAmount, 'split refund amount');
     assertPostgresAvailable();
     const run = async (client: any) => {
+      await client.query('SELECT id FROM orders WHERE id = $1 FOR UPDATE', [params.orderId]);
       const escRes = await client.query('SELECT remaining FROM escrows WHERE order_id = $1 FOR UPDATE', [params.orderId]);
       if (escRes.rows.length === 0) {
         throw new Error(`Escrow record not found in PostgreSQL for order ${params.orderId}`);
@@ -1467,12 +1488,14 @@ export class FinancialTransactionService {
         throw new Error(`Split refund amount ($${params.refundAmount.toFixed(2)}) must be strictly greater than $0.00 and less than remaining escrow ($${availableRemaining.toFixed(2)}).`);
       }
 
+      const allowDispute = params.allowDisputeResolution ?? true;
       const refund = await this.refundOrderFunds({
         orderId: params.orderId,
         amount: params.refundAmount,
         reason: params.reason,
         actor: params.actor,
-        idempotencyKey: params.idempotencyKey ? `${params.idempotencyKey}-REF` : undefined
+        idempotencyKey: params.idempotencyKey ? `${params.idempotencyKey}-REF` : undefined,
+        allowDisputeResolution: allowDispute
       }, client);
 
       const release = await this.releaseOrderFunds({
@@ -1480,7 +1503,7 @@ export class FinancialTransactionService {
         actor: params.actor,
         reason: `Remaining balance released after split refund: ${params.reason}`,
         idempotencyKey: params.idempotencyKey ? `${params.idempotencyKey}-REL` : undefined,
-        allowDisputeResolution: true
+        allowDisputeResolution: allowDispute
       }, client);
 
       return { refund, release };
@@ -1708,8 +1731,7 @@ export class FinancialTransactionService {
     assertValidMoneyAmount(params.feeAmount, 'featured gig fee');
 
     const run = async (client: any) => {
-      const today = new Date().toISOString().substring(0, 10);
-      const idempKey = params.idempotencyKey || `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${today}`;
+      const idempKey = params.idempotencyKey || `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${randomUUID()}`;
       const payloadFingerprint = {
         gigId: params.gigId,
         sellerId: params.sellerId,
@@ -1869,8 +1891,29 @@ export class FinancialTransactionService {
     return postgresStore.executeInTransaction(run);
   }
 
-  async settlePayout(params: { payoutId: string; actor: string; providerReference?: string; idempotencyKey?: string }, externalClient?: any) {
+  async settlePayout(params: { payoutId: string; actor: string; providerReference?: string; idempotencyKey?: string; preVerified?: boolean }, externalClient?: any) {
     assertPostgresAvailable();
+    let verifiedOutsideTx = Boolean(params.preVerified);
+    if (!verifiedOutsideTx && !externalClient) {
+      const preCheckRes = await postgresStore.getPool().query('SELECT method, amount, status FROM payouts WHERE id = $1', [params.payoutId]);
+      if (preCheckRes.rows.length > 0) {
+        const preRow = preCheckRes.rows[0];
+        if ((preRow.status === 'pending' || preRow.status === 'approved') && (Number(preRow.amount) < 500 || preRow.status === 'approved')) {
+          if (process.env.NODE_ENV === 'test' || params.providerReference) {
+            const preVerify = await paymentGatewayManager.verifyPayoutSettlement({
+              method: preRow.method,
+              providerReference: params.providerReference || `MOCK-${params.payoutId}`,
+              amount: Number(preRow.amount),
+              payoutId: params.payoutId
+            });
+            if (!preVerify || !preVerify.verified) {
+              throw new Error(`Payout settlement could not be verified with payment provider for payout ${params.payoutId}`);
+            }
+            verifiedOutsideTx = true;
+          }
+        }
+      }
+    }
     const run = async (client: any) => {
       const idempKey = params.idempotencyKey || `IDEMP-PAY-SETTLE-${params.payoutId}`;
       const payloadFingerprint = {
@@ -1897,15 +1940,19 @@ export class FinancialTransactionService {
         throw new Error('Provider reference is required to settle payout.');
       }
 
-      const verification = await paymentGatewayManager.verifyPayoutSettlement({
-        method: payout.method,
-        providerReference: params.providerReference || `MOCK-${params.payoutId}`,
-        amount: Number(payout.amount),
-        payoutId: params.payoutId
-      });
+      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
 
-      if (!verification || !verification.verified) {
-        throw new Error(`Payout settlement could not be verified with payment provider for payout ${params.payoutId}`);
+      if (!verifiedOutsideTx) {
+        const verification = await paymentGatewayManager.verifyPayoutSettlement({
+          method: payout.method,
+          providerReference: params.providerReference || `MOCK-${params.payoutId}`,
+          amount: Number(payout.amount),
+          payoutId: params.payoutId
+        });
+
+        if (!verification || !verification.verified) {
+          throw new Error(`Payout settlement could not be verified with payment provider for payout ${params.payoutId}`);
+        }
       }
 
       const amount = Number(payout.amount);
@@ -1953,6 +2000,7 @@ export class FinancialTransactionService {
         throw new Error(`Cannot cancel payout in status "${payout.status}".`);
       }
 
+      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
       const amount = Number(payout.amount);
       await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
@@ -2012,6 +2060,7 @@ export class FinancialTransactionService {
         throw new Error(`Cannot fail payout in status "${payout.status}".`);
       }
 
+      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
       const amount = Number(payout.amount);
       await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
@@ -2331,14 +2380,18 @@ export class FinancialTransactionService {
       }
 
       const LIFECYCLE_JOURNAL_TYPES = [
+        'WALLET_DEPOSIT_CREDITED',
         'ORDER_ESCROW_FUNDED',
+        'ESCROW_TOPUP',
+        'ORDER_ESCROW_TOPUP',
         'ESCROW_RELEASED_TO_FREELANCER',
         'ESCROW_REFUNDED_TO_BUYER',
         'PAYOUT_REQUESTED',
         'PAYOUT_SETTLED',
         'PAYOUT_FAILED',
         'PAYOUT_CANCELLED',
-        'EARNINGS_CLEARED'
+        'EARNINGS_CLEARED',
+        'CLEARING_RELEASED'
       ];
       if (LIFECYCLE_JOURNAL_TYPES.includes(origJournal.event_type)) {
         throw new Error(`Cannot directly reverse lifecycle journal (${origJournal.event_type}); use the dedicated refund, payout-fail, or dispute resolution workflow.`);
@@ -2745,6 +2798,41 @@ export class FinancialTransactionService {
 
       if (Math.abs(totalDebits - totalCredits) > 0.01) {
         discrepancies.push(`Ledger journal equation unbalanced: Total Debits ($${totalDebits.toFixed(2)}) != Total Credits ($${totalCredits.toFixed(2)}).`);
+      }
+
+      const perEscrowInvariantRes = await client.query(
+        `SELECT order_id, amount, COALESCE(released_gross, 0) as released_gross, COALESCE(refunded_total, 0) as refunded_total, remaining
+         FROM escrows
+         WHERE ABS((amount - COALESCE(released_gross, 0) - COALESCE(refunded_total, 0)) - remaining) > 0.01`
+      );
+      for (const r of perEscrowInvariantRes.rows) {
+        discrepancies.push(
+          `Escrow math mismatch on order #${r.order_id}: amount ($${Number(r.amount).toFixed(2)}) - released ($${Number(r.released_gross).toFixed(2)}) - refunded ($${Number(r.refunded_total).toFixed(2)}) != remaining ($${Number(r.remaining).toFixed(2)}).`
+        );
+      }
+
+      const terminalOrderEscrowRes = await client.query(
+        `SELECT e.order_id, o.status AS order_status, e.status AS escrow_status, e.remaining
+         FROM escrows e
+         JOIN orders o ON o.id = e.order_id
+         WHERE o.status IN ('completed', 'cancelled', 'refunded') AND e.remaining > 0.01`
+      );
+      for (const r of terminalOrderEscrowRes.rows) {
+        discrepancies.push(
+          `Order #${r.order_id} is in terminal status "${r.order_status}" but still has $${Number(r.remaining).toFixed(2)} remaining in escrow (escrow status: "${r.escrow_status}").`
+        );
+      }
+
+      const userWalletDriftRes = await client.query(
+        `SELECT u.id, COALESCE(u.wallet_balance, 0) AS user_bal, COALESCE(w.available_balance, 0) AS wallet_bal
+         FROM users u
+         JOIN wallets w ON u.id = w.user_id
+         WHERE ABS(COALESCE(u.wallet_balance, 0) - COALESCE(w.available_balance, 0)) > 0.01`
+      );
+      for (const r of userWalletDriftRes.rows) {
+        discrepancies.push(
+          `User #${r.id} users.wallet_balance ($${Number(r.user_bal).toFixed(2)}) differs from authoritative wallets.available_balance ($${Number(r.wallet_bal).toFixed(2)}).`
+        );
       }
 
       const exRes = await client.query('SELECT * FROM reconciliation_exceptions ORDER BY detected_at DESC, created_at DESC');

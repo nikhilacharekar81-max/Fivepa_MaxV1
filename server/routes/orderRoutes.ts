@@ -1205,7 +1205,7 @@ const handleOpenDispute = async (req: Request, res: Response) => {
     const reason = escapeHtml(rawReason);
 
     const existingDispute = await store.getDisputeByOrderId(order.id);
-    if (existingDispute && (existingDispute.status === 'open' || existingDispute.status === 'under_investigation')) {
+    if (existingDispute && (existingDispute.status === 'open' || existingDispute.status === 'under_investigation' || (existingDispute.status as string) === 'under_review')) {
       return res.status(400).json({ error: 'An active dispute already exists for this order.' });
     }
 
@@ -1264,7 +1264,7 @@ const handleOpenDispute = async (req: Request, res: Response) => {
 
       // Re-verify existing active dispute under FOR UPDATE lock
       const dispCheck = await client.query(
-        "SELECT id FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_investigation') FOR UPDATE",
+        "SELECT id FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_investigation', 'under_review') FOR UPDATE",
         [order.id]
       );
       if (dispCheck.rows.length > 0) {
@@ -1408,22 +1408,37 @@ const handleOrderForceComplete = async (req: Request, res: Response) => {
   if (!tryAcquireOrderLock(orderId, res)) return;
 
   try {
-    const order = await store.getOrder(orderId);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (order.status === 'completed') {
-      return res.status(400).json({ error: 'Order is already completed; funds were already released.' });
-    }
-    if (order.status === 'cancelled') {
-      return res.status(400).json({ error: 'Cannot force-complete a cancelled/refunded order.' });
-    }
-
     const reason = String(req.body.reason || 'Admin administrative force-release in seller favor.');
-    const result = await releaseOrderFunds(order, adminActor(req), reason, false, req.body.requestKey, true);
-    await closeActiveDispute(order.id, 'resolved_release', reason);
+    const actor = adminActor(req);
 
-    res.json({ success: true, order: enrichOrderWithServiceInfo(order), result });
+    const txResult = await postgresStore.executeInTransaction(async (client) => {
+      const orderLockRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+      if (orderLockRes.rows.length === 0) {
+        const err: any = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const order = (store as any).mapOrderRow ? (store as any).mapOrderRow(orderLockRes.rows[0]) : await store.getOrder(orderId, client);
+      if (!order) {
+        const err: any = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      if (order.status === 'completed') {
+        throw new Error('Order is already completed; funds were already released.');
+      }
+      if (order.status === 'cancelled') {
+        throw new Error('Cannot force-complete a cancelled/refunded order.');
+      }
+
+      const result = await releaseOrderFunds(order, actor, reason, false, req.body.requestKey, true, client);
+      await closeActiveDispute(order.id, 'resolved_release', reason, client);
+      return { order, result };
+    });
+
+    res.json({ success: true, order: enrichOrderWithServiceInfo(txResult.order), result: txResult.result });
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    res.status(err?.statusCode || 400).json({ error: err.message });
   } finally {
     releaseOrderLock(orderId);
   }
@@ -1437,34 +1452,46 @@ const handleOrderForceCancel = async (req: Request, res: Response) => {
   if (!tryAcquireOrderLock(orderId, res)) return;
 
   try {
-    const order = await store.getOrder(orderId);
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (order.status === 'completed') {
-      return res.status(400).json({ error: 'Cannot force-cancel an already completed order.' });
-    }
-    if (order.status === 'cancelled') {
-      return res.status(400).json({ error: 'Order is already cancelled/refunded.' });
-    }
-
     const reason = String(req.body.reason || 'Admin cancelled order and refunded buyer wallet');
     const isPartial = req.body.refundType === 'partial';
-    let result: any;
-    let refundAmount: number;
+    const actor = adminActor(req);
 
-    if (isPartial) {
-      refundAmount = Number(req.body.customAmount);
-      result = await splitOrderFunds(order, refundAmount, adminActor(req), reason);
-      await closeActiveDispute(order.id, 'resolved_partial', reason);
-      await pushSystemMessage(order.id, `⚖️ Order resolved by Administration. $${refundAmount} refunded to buyer; the remainder was released to the freelancer. Reason: ${reason}`, 'dispute_resolved');
-    } else {
-      result = await refundOrderFunds(order, undefined, adminActor(req), reason, req.body.requestKey, undefined, true);
-      refundAmount = result.refunded;
-      await closeActiveDispute(order.id, 'resolved_refund', reason);
-    }
+    const txResult = await postgresStore.executeInTransaction(async (client) => {
+      const orderLockRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+      if (orderLockRes.rows.length === 0) {
+        const err: any = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      const order = (store as any).mapOrderRow ? (store as any).mapOrderRow(orderLockRes.rows[0]) : await store.getOrder(orderId, client);
+      if (!order) {
+        const err: any = new Error('Order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+      if (order.status === 'completed') {
+        throw new Error('Cannot force-cancel an already completed order.');
+      }
+      if (order.status === 'cancelled') {
+        throw new Error('Order is already cancelled/refunded.');
+      }
 
-    res.json({ success: true, order: enrichOrderWithServiceInfo(order), result });
+      let result: any;
+      if (isPartial) {
+        const refundAmount = Number(req.body.customAmount);
+        result = await splitOrderFunds(order, refundAmount, actor, reason, req.body.requestKey, client);
+        await closeActiveDispute(order.id, 'resolved_partial', reason, client);
+        await pushSystemMessage(order.id, `⚖️ Order resolved by Administration. $${refundAmount} refunded to buyer; the remainder was released to the freelancer. Reason: ${reason}`, 'dispute_resolved', client);
+      } else {
+        result = await refundOrderFunds(order, undefined, actor, reason, req.body.requestKey, undefined, true, client);
+        await closeActiveDispute(order.id, 'resolved_refund', reason, client);
+      }
+      return { order, result };
+    });
+
+    res.json({ success: true, order: enrichOrderWithServiceInfo(txResult.order), result: txResult.result });
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    res.status(err?.statusCode || 400).json({ error: err.message });
   } finally {
     releaseOrderLock(orderId);
   }
@@ -1822,7 +1849,7 @@ const handleOrderCancel = async (req: Request, res: Response) => {
       }
 
       const dispRes = await client.query(
-        "SELECT 1 FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_review') LIMIT 1",
+        "SELECT 1 FROM disputes WHERE order_id = $1 AND status IN ('open', 'under_investigation', 'under_review') LIMIT 1",
         [order.id]
       );
       if (!isStaff && dispRes.rows.length > 0) {
@@ -1867,12 +1894,19 @@ const handleOrderCancel = async (req: Request, res: Response) => {
       }
 
       const actor = caller?.name || `user:${authUserId}`;
+      const effectiveCancelType = order.cancellationType || 'direct';
+      order.cancellationType = effectiveCancelType;
       if (hasFundedEscrow) {
         await refundOrderFunds(order, undefined, actor, reason, undefined, undefined, false, client);
+        await client.query(
+          `UPDATE orders SET cancellation_type = COALESCE(cancellation_type, $1), updated_at = NOW() WHERE id = $2`,
+          [effectiveCancelType, order.id]
+        );
+        order.status = 'cancelled';
       } else {
         const updateRes = await client.query(
-          `UPDATE orders SET status = 'cancelled', cancellation_type = $1 WHERE id = $2 AND status NOT IN ('completed', 'cancelled')`,
-          [order.cancellationType || null, order.id]
+          `UPDATE orders SET status = 'cancelled', cancellation_type = $1, updated_at = NOW() WHERE id = $2 AND status NOT IN ('completed', 'cancelled')`,
+          [effectiveCancelType, order.id]
         );
         if (updateRes.rowCount === 0) {
           const err: any = new Error('Order status changed concurrently; cannot cancel order.');
@@ -1881,12 +1915,15 @@ const handleOrderCancel = async (req: Request, res: Response) => {
         }
         order.status = 'cancelled';
       }
+      (order as any).cancellationReason = reason;
+      (order as any).cancelledBy = caller?.id || 'system';
+      (order as any).cancelledAt = new Date().toISOString();
+      await cancelPendingOffersForOrder(order.id, caller?.id, client);
 
       return { order };
     });
 
     const { order } = txResult;
-    await cancelPendingOffersForOrder(order.id, caller?.id);
     await emitSystemEvent(order.id, 'order_cancelled', `Order was cancelled. Reason: ${reason}`);
     res.json({ success: true, order: enrichOrderWithServiceInfo(order) });
   } catch (err: any) {
@@ -1903,6 +1940,11 @@ router.post('/orders/:id/review', requireAuth, handleSubmitReview);
 router.put('/orders/:id', requireAuth, rateLimit(20, 60_000), async (req: Request, res: Response) => {
   if (req.body?.status === 'cancelled') {
     return handleOrderCancel(req, res);
+  }
+  if (req.body?.status === 'completed' || req.body?.status === 'refunded') {
+    return res.status(400).json({
+      error: `Cannot set order status to "${req.body.status}" directly without settling escrow. Use the escrow release or refund endpoint instead.`
+    });
   }
   const orderId = req.params.id;
   const order = await store.getOrder(orderId);

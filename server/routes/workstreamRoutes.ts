@@ -77,8 +77,8 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
-async function saveOfferToDb(offer: WorkstreamOffer): Promise<void> {
-  await store.saveOffer(offer);
+async function saveOfferToDb(offer: WorkstreamOffer, client?: any): Promise<void> {
+  await store.saveOffer(offer, client);
 }
 
 const router = Router();
@@ -337,7 +337,7 @@ router.get(['/workstream/files/:filename', '/uploads/workstream/:filename'], req
     res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox");
   }
 
-  const forceDownload = req.query.download === '1' || !WORKSTREAM_INLINE_EXTENSIONS.has(ext) || ext === '.html' || ext === '.htm';
+  const forceDownload = req.query.download === '1' || !WORKSTREAM_INLINE_EXTENSIONS.has(ext) || ext === '.html' || ext === '.htm' || ext === '.svg';
   if (!localExists) {
     if (forceDownload) res.attachment(originalName); else res.type(ext);
     const stream = openCloudFileStream(filename);
@@ -923,56 +923,70 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
         return res.status(400).json({ error: `Final invoice amount ($${invoiceAmount}) cannot be less than the current order escrow ($${currentEscrow}).` });
       }
 
-      if (additionalAmount > 0) {
-        await topUpOrderEscrowWithEvent({
-          orderId: order.id,
-          orderTitle: `Invoice Top-up: ${offer.title}`,
-          amount: additionalAmount,
-          buyerId: order.buyerId,
-          sellerId: order.sellerId,
-          actor: `user:${order.buyerId}`,
-          idempotencyKey: `${idempotencyKey}-topup`
-        });
-        order.amount = invoiceAmount;
-      }
+      await postgresStore.executeInTransaction(async (client) => {
+        const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [offer.id]);
+        if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+          throw new Error(`This ${OFFER_LABEL[offer.kind]} is already ${offerLockRes.rows[0].status}.`);
+        }
 
-      let invoiceRevisionsResolved = false;
-      if (Array.isArray(order.revisions)) {
-        for (const rev of order.revisions) {
-          if (rev.status === 'requested') {
-            rev.status = 'resolved';
-            invoiceRevisionsResolved = true;
+        if (additionalAmount > 0) {
+          const topUpRes = await topUpOrderEscrowWithEvent({
+            orderId: order.id,
+            orderTitle: `Invoice Top-up: ${offer.title}`,
+            amount: additionalAmount,
+            buyerId: order.buyerId,
+            sellerId: order.sellerId,
+            actor: `user:${order.buyerId}`,
+            idempotencyKey: `${idempotencyKey}-topup`
+          }, client);
+          order.amount = invoiceAmount;
+          if (topUpRes?.diff?.next) {
+            order.feeBreakdown = topUpRes.diff.next;
+            (order as any).serviceFee = topUpRes.diff.next.serviceFee ?? 0;
+            (order as any).smallOrderFee = topUpRes.diff.next.smallOrderFee ?? 0;
           }
         }
-      }
-      if (invoiceRevisionsResolved) {
-        await emitSystemEvent(order.id, 'revision_resolved', `📝 Revision resolved via accepted invoice ${offer.number}.`);
-      }
 
-      await releaseOrderFunds(order, caller.name, `Final invoice ${offer.number} accepted by buyer and escrow released`, false);
+        let invoiceRevisionsResolved = false;
+        if (Array.isArray(order.revisions)) {
+          for (const rev of order.revisions) {
+            if (rev.status === 'requested') {
+              rev.status = 'resolved';
+              invoiceRevisionsResolved = true;
+            }
+          }
+        }
+        if (invoiceRevisionsResolved) {
+          await emitSystemEvent(order.id, 'revision_resolved', `📝 Revision resolved via accepted invoice ${offer.number}.`, {}, client);
+        }
 
-      offer.status = 'paid';
-      offer.resolvedAt = now;
-      offer.resolvedBy = caller.id;
+        await releaseOrderFunds(order, caller.name, `Final invoice ${offer.number} accepted by buyer and escrow released`, false, `${idempotencyKey}-release`, false, client);
 
-      if (order.orderType === 'project') {
-        createNotification({
-          userId: order.sellerId,
-          type: 'invoice_paid',
-          title: 'Invoice paid',
-          message: `Invoice ${offer.number} for "${order.title}" ($${invoiceAmount}) was approved and paid.`,
-          link: `/workstream/${order.id}`,
-          metadata: { orderId: order.id, offerId: offer.id, amount: invoiceAmount }
-        });
-      }
+        offer.status = 'paid';
+        offer.resolvedAt = now;
+        offer.resolvedBy = caller.id;
 
-      await syncUserBalances();
-      await saveOfferToDb(offer);
-      await store.saveOrder(order);
-      const completionNote = additionalAmount > 0
-        ? `${offer.number} ($${invoiceAmount.toLocaleString()}) was paid (+$${additionalAmount.toLocaleString()} funded from wallet) and full escrow ($${invoiceAmount.toLocaleString()}) was released to the seller. Order completed!`
-        : `${offer.number} was accepted and escrow funds ($${invoiceAmount.toLocaleString()}) were released to the seller. Order completed!`;
-      await postOfferMessage(order, offer, null, completionNote, 'offer_paid');
+        if (order.orderType === 'project') {
+          await createNotification({
+            userId: order.sellerId,
+            type: 'invoice_paid',
+            title: 'Invoice paid',
+            message: `Invoice ${offer.number} for "${order.title}" ($${invoiceAmount}) was approved and paid.`,
+            link: `/workstream/${order.id}`,
+            metadata: { orderId: order.id, offerId: offer.id, amount: invoiceAmount },
+            client
+          }, client);
+        }
+
+        await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean), client);
+        await saveOfferToDb(offer, client);
+        await store.saveOrder(order, client);
+        const completionNote = additionalAmount > 0
+          ? `${offer.number} ($${invoiceAmount.toLocaleString()}) was paid (+$${additionalAmount.toLocaleString()} funded from wallet) and full escrow ($${invoiceAmount.toLocaleString()}) was released to the seller. Order completed!`
+          : `${offer.number} was accepted and escrow funds ($${invoiceAmount.toLocaleString()}) were released to the seller. Order completed!`;
+        await postOfferMessage(order, offer, null, completionNote, 'offer_paid', client);
+      });
+
       return res.json({ offer: await viewOffer(offer), order: enrichOrderWithServiceInfo(order) });
 
     } else if (isInitialFunding) {
@@ -984,57 +998,67 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
       }
       const newTitle = offer.kind === 'proposal' && (/^inquiry:/i.test(order.title) || !order.amount) ? offer.title : order.title;
       const prevStatus = order.status;
-      order.previousStatus = prevStatus;
-      order.status = 'payment_pending';
-      await store.saveOrder(order);
 
-      let escrowFunded = false;
       try {
-        await fundOrderEscrowWithEvent({
-          orderId: order.id,
-          orderTitle: newTitle,
-          amount: offer.amount,
-          buyerId: order.buyerId,
-          sellerId: order.sellerId,
-          actor: `user:${order.buyerId}`,
-          idempotencyKey
-        });
-        escrowFunded = true;
-        order.title = newTitle;
-        order.amount = offer.amount;
-        order.status = 'funded_in_escrow';
-        order.escrowProtectionStartDate = today;
-        order.escrowProtectionEndDate = protectionEnd;
-        if (offer.kind === 'proposal' && offer.deliveryDays) {
-          order.dueDate = new Date(Date.now() + offer.deliveryDays * 86400000).toISOString();
-        }
-        offer.orderId = order.id;
-        offer.status = 'accepted';
-        if (offer.kind === 'proposal') {
-          const linkedProp = await findLinkedProposalForOffer(offer, order);
-          if (linkedProp) {
-            linkedProp.status = 'accepted';
-            linkedProp.workstreamOrderId = order.id;
-            linkedProp.offerId = offer.id;
-            order.proposalId = linkedProp.id;
-            await store.saveProposal(linkedProp);
+        await postgresStore.executeInTransaction(async (client) => {
+          const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [offer.id]);
+          if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+            throw new Error(`This ${OFFER_LABEL[offer.kind]} is already ${offerLockRes.rows[0].status}.`);
           }
-        }
-        await store.saveOrder(order);
-        await saveOfferToDb(offer);
-        await postOfferMessage(order, offer, null, `${offer.number} was accepted and escrow was funded ($${offer.amount}).`, 'offer_accepted');
+
+          order.previousStatus = prevStatus;
+          order.status = 'payment_pending';
+          await store.saveOrder(order, client);
+
+          await fundOrderEscrowWithEvent({
+            orderId: order.id,
+            orderTitle: newTitle,
+            amount: offer.amount,
+            buyerId: order.buyerId,
+            sellerId: order.sellerId,
+            actor: `user:${order.buyerId}`,
+            idempotencyKey
+          }, client);
+
+          const fundedOrderRow = await store.getOrder(order.id, client);
+          if (fundedOrderRow?.feeBreakdown) {
+            order.feeBreakdown = fundedOrderRow.feeBreakdown;
+            (order as any).serviceFee = (fundedOrderRow as any).serviceFee;
+            (order as any).smallOrderFee = (fundedOrderRow as any).smallOrderFee;
+          }
+
+          order.title = newTitle;
+          order.amount = offer.amount;
+          order.status = 'funded_in_escrow';
+          order.escrowProtectionStartDate = today;
+          order.escrowProtectionEndDate = protectionEnd;
+          if (offer.kind === 'proposal' && offer.deliveryDays) {
+            order.dueDate = new Date(Date.now() + offer.deliveryDays * 86400000).toISOString();
+          }
+          offer.orderId = order.id;
+          offer.status = 'accepted';
+          offer.resolvedAt = now;
+          offer.resolvedBy = caller.id;
+          if (offer.kind === 'proposal') {
+            const linkedProp = await findLinkedProposalForOffer(offer, order, client);
+            if (linkedProp) {
+              linkedProp.status = 'accepted';
+              linkedProp.workstreamOrderId = order.id;
+              linkedProp.offerId = offer.id;
+              order.proposalId = linkedProp.id;
+              await store.saveProposal(linkedProp, client);
+            }
+          }
+          await store.saveOrder(order, client);
+          await saveOfferToDb(offer, client);
+          await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean), client);
+          await postOfferMessage(order, offer, null, `${offer.number} was accepted and escrow was funded ($${offer.amount}).`, 'offer_accepted', client);
+        });
       } catch (fundingErr: any) {
-        if (!escrowFunded) {
-          order.status = prevStatus;
-          await store.saveOrder(order);
-          return res.status(400).json({ error: fundingErr.message || 'Failed to fund escrow for offer.' });
-        }
-        order.status = 'in_progress';
-        offer.status = 'accepted';
-        await store.saveOrder(order);
-        await saveOfferToDb(offer);
-        return res.json({ offer: await viewOffer(offer), order: enrichOrderWithServiceInfo(order) });
+        order.status = prevStatus;
+        return res.status(400).json({ error: fundingErr.message || 'Failed to fund escrow for offer.' });
       }
+      return res.json({ offer: await viewOffer(offer), order: enrichOrderWithServiceInfo(order) });
     } else if (isFollowOnAfterCompletion || isCancelledGigFollowOn || (order.orderType === 'project' && (order.status === 'completed' || order.status === 'cancelled') && offer.kind === 'proposal')) {
       const newOrderId = 'ord_' + randomUUID().slice(0, 12);
       const isGigFollowOn = order.orderType === 'gig' || (Boolean(order.gigId) && !order.projectId);
@@ -1066,93 +1090,110 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
 
       const enrichedOrder = enrichOrderWithServiceInfo(newOrder);
       await recordOrder(enrichedOrder);
-      await store.saveOrder(enrichedOrder);
 
-      let followOnEscrowFunded = false;
       try {
-        await fundOrderEscrowWithEvent({
-          orderId: newOrder.id,
-          orderTitle: newOrder.title,
-          amount: newOrder.amount,
-          buyerId: newOrder.buyerId,
-          sellerId: newOrder.sellerId,
-          actor: `user:${newOrder.buyerId}`,
-          idempotencyKey
-        });
-        followOnEscrowFunded = true;
-        
-        enrichedOrder.status = 'funded_in_escrow';
-        await store.saveOrder(enrichedOrder);
-        await syncUserBalances();
-      } catch (fundingErr: any) {
-        if (!followOnEscrowFunded) {
-          const pool = postgresStore.getPool();
-          const escCheck = await pool.query('SELECT 1 FROM escrows WHERE order_id = $1', [newOrder.id]);
-          if (escCheck.rows.length === 0) {
-            await pool.query('DELETE FROM orders WHERE id = $1', [newOrder.id]);
-          } else {
-            enrichedOrder.status = 'payment_pending';
-            await store.saveOrder(enrichedOrder);
+        await postgresStore.executeInTransaction(async (client) => {
+          const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [offer.id]);
+          if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+            throw new Error(`This ${OFFER_LABEL[offer.kind]} is already ${offerLockRes.rows[0].status}.`);
           }
-          return res.status(400).json({ error: fundingErr.message || 'Failed to fund escrow for follow-on order.' });
-        }
-        enrichedOrder.status = 'in_progress';
-        await store.saveOrder(enrichedOrder);
-        return res.json({ offer: await viewOffer(offer), order: enrichOrderWithServiceInfo(enrichedOrder) });
-      }
 
-      await emitSystemEvent(newOrder.id, 'order_created', `Order placed: ${newOrder.title}. Payment is held in escrow until the work is approved.`);
+          await store.saveOrder(enrichedOrder, client);
 
-      offer.orderId = newOrder.id;
-      offer.status = 'accepted';
+          await fundOrderEscrowWithEvent({
+            orderId: newOrder.id,
+            orderTitle: newOrder.title,
+            amount: newOrder.amount,
+            buyerId: newOrder.buyerId,
+            sellerId: newOrder.sellerId,
+            actor: `user:${newOrder.buyerId}`,
+            idempotencyKey
+          }, client);
 
-      if (orderType === 'project') {
-        createNotification({
-          userId: newOrder.sellerId,
-          type: 'proposal_accepted',
-          title: 'Follow-on proposal accepted',
-          message: `Your follow-on proposal "${offer.title}" was accepted and escrow has been funded.`,
-          link: `/workstream/${newOrderId}`,
-          metadata: { orderId: newOrderId, offerId: offer.id }
+          const fundedRow = await store.getOrder(newOrder.id, client);
+          if (fundedRow?.feeBreakdown) {
+            enrichedOrder.feeBreakdown = fundedRow.feeBreakdown;
+            (enrichedOrder as any).serviceFee = (fundedRow as any).serviceFee;
+            (enrichedOrder as any).smallOrderFee = (fundedRow as any).smallOrderFee;
+          }
+
+          enrichedOrder.status = 'funded_in_escrow';
+          await store.saveOrder(enrichedOrder, client);
+          await syncUserBalances([newOrder.buyerId, newOrder.sellerId].filter(Boolean), client);
+
+          await emitSystemEvent(newOrder.id, 'order_created', `Order placed: ${newOrder.title}. Payment is held in escrow until the work is approved.`, {}, client);
+
+          offer.orderId = newOrder.id;
+          offer.status = 'accepted';
+          offer.resolvedAt = now;
+          offer.resolvedBy = caller.id;
+
+          if (orderType === 'project') {
+            await createNotification({
+              userId: newOrder.sellerId,
+              type: 'proposal_accepted',
+              title: 'Follow-on proposal accepted',
+              message: `Your follow-on proposal "${offer.title}" was accepted and escrow has been funded.`,
+              link: `/workstream/${newOrderId}`,
+              metadata: { orderId: newOrderId, offerId: offer.id },
+              client
+            }, client);
+          }
+
+          await saveOfferToDb(offer, client);
+          await postOfferMessage(enrichedOrder, offer, null, `Follow-on ${OFFER_LABEL[offer.kind]} ${offer.number} ("${offer.title}") was accepted and $${offer.amount.toLocaleString()} was funded into escrow in a new Order (#${newOrderId}).`, 'offer_accepted', client);
         });
+      } catch (fundingErr: any) {
+        return res.status(400).json({ error: fundingErr.message || 'Failed to fund escrow for follow-on order.' });
       }
 
-      await saveOfferToDb(offer);
-      await postOfferMessage(enrichedOrder, offer, null, `Follow-on ${OFFER_LABEL[offer.kind]} ${offer.number} ("${offer.title}") was accepted and $${offer.amount.toLocaleString()} was funded into escrow in a new Order (#${newOrderId}).`, 'offer_accepted');
       return res.json({ offer: await viewOffer(offer), order: enrichOrderWithServiceInfo(enrichedOrder) });
     } else {
-      await topUpOrderEscrowWithEvent({
-        orderId: order.id,
-        orderTitle: offer.title,
-        amount: offer.amount,
-        buyerId: order.buyerId,
-        sellerId: order.sellerId,
-        actor: `user:${order.buyerId}`,
-        idempotencyKey
-      });
-      order.amount = Math.round((Number(order.amount || 0) + offer.amount) * 100) / 100;
-      if (offer.kind === 'proposal' && offer.deliveryDays) {
-        order.dueDate = new Date(Date.now() + offer.deliveryDays * 86400000).toISOString();
-      }
-      offer.orderId = order.id;
-      offer.status = 'accepted';
-      if (offer.kind === 'proposal') {
-        const linkedProp = await findLinkedProposalForOffer(offer, order);
-        if (linkedProp) {
-          linkedProp.status = 'accepted';
-          linkedProp.workstreamOrderId = order.id;
-          linkedProp.offerId = offer.id;
-          await store.saveProposal(linkedProp);
+      await postgresStore.executeInTransaction(async (client) => {
+        const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [offer.id]);
+        if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+          throw new Error(`This ${OFFER_LABEL[offer.kind]} is already ${offerLockRes.rows[0].status}.`);
         }
-      }
-      await postOfferMessage(order, offer, null, `${offer.number} was accepted and escrow was topped up with $${offer.amount}. All funds and milestones remain unified under Order #${order.id}.`, 'offer_accepted');
+
+        const topUpRes = await topUpOrderEscrowWithEvent({
+          orderId: order.id,
+          orderTitle: offer.title,
+          amount: offer.amount,
+          buyerId: order.buyerId,
+          sellerId: order.sellerId,
+          actor: `user:${order.buyerId}`,
+          idempotencyKey
+        }, client);
+
+        order.amount = Math.round((Number(order.amount || 0) + offer.amount) * 100) / 100;
+        if (topUpRes?.diff?.next) {
+          order.feeBreakdown = topUpRes.diff.next;
+          (order as any).serviceFee = topUpRes.diff.next.serviceFee ?? 0;
+          (order as any).smallOrderFee = topUpRes.diff.next.smallOrderFee ?? 0;
+        }
+        if (offer.kind === 'proposal' && offer.deliveryDays) {
+          order.dueDate = new Date(Date.now() + offer.deliveryDays * 86400000).toISOString();
+        }
+        offer.orderId = order.id;
+        offer.status = 'accepted';
+        offer.resolvedAt = now;
+        offer.resolvedBy = caller.id;
+        if (offer.kind === 'proposal') {
+          const linkedProp = await findLinkedProposalForOffer(offer, order, client);
+          if (linkedProp) {
+            linkedProp.status = 'accepted';
+            linkedProp.workstreamOrderId = order.id;
+            linkedProp.offerId = offer.id;
+            await store.saveProposal(linkedProp, client);
+          }
+        }
+        await syncUserBalances([order.buyerId, order.sellerId].filter(Boolean), client);
+        await store.saveOrder(order, client);
+        await saveOfferToDb(offer, client);
+        await postOfferMessage(order, offer, null, `${offer.number} was accepted and escrow was topped up with $${offer.amount}. All funds and milestones remain unified under Order #${order.id}.`, 'offer_accepted', client);
+      });
     }
 
-    offer.resolvedAt = now;
-    offer.resolvedBy = caller.id;
-    await syncUserBalances();
-    await store.saveOrder(order);
-    await saveOfferToDb(offer);
     res.json({ offer: await viewOffer(offer), order: enrichOrderWithServiceInfo(order) });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -1214,78 +1255,82 @@ router.post(
       }
 
       if (!order) {
-        const clientId = caller.id;
-        const sellerId = offer.createdBy;
-        const offerAmount = Number(offer.amount);
-        const offerTitle = offer.title || 'Custom Offer';
-
-        if (!sellerId || !Number.isFinite(offerAmount) || offerAmount <= 0) {
-          return res.status(400).json({ error: 'Invalid custom offer details.' });
-        }
-
-        await ensureWallet(clientId);
-        await ensureWallet(sellerId);
-
-        const newOrderId = 'ord_' + randomUUID().slice(0, 12);
-        const today = new Date().toISOString().split('T')[0];
-        const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays || 14;
-
-        const newOrder: Order = {
-          id: newOrderId,
-          workspaceId: newOrderId,
-          title: offerTitle,
-          buyerId: clientId,
-          sellerId: sellerId,
-          amount: offerAmount,
-          status: 'payment_pending',
-          createdAt: today,
-          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
-          escrowProtectionStartDate: today,
-          escrowProtectionEndDate: new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0],
-          feeBreakdown: calculateOrderFees(offerAmount)
-        };
-
-        await workspaceService.ensureWorkspaceForOrderAsync(newOrder);
-        await store.saveOrder(newOrder);
-
-        let customOfferEscrowFunded = false;
+        if (!tryAcquireOrderLock(offer.id, res)) return;
         try {
-          await fundOrderEscrowWithEvent({
-            orderId: newOrder.id,
-            orderTitle: newOrder.title,
-            amount: newOrder.amount,
-            buyerId: newOrder.buyerId,
-            sellerId: newOrder.sellerId,
-            actor: `user:${caller.id}`,
-            idempotencyKey
+          const clientId = caller.id;
+          const sellerId = offer.createdBy;
+          const offerAmount = Number(offer.amount);
+          const offerTitle = offer.title || 'Custom Offer';
+
+          if (!sellerId || !Number.isFinite(offerAmount) || offerAmount <= 0) {
+            return res.status(400).json({ error: 'Invalid custom offer details.' });
+          }
+
+          await ensureWallet(clientId);
+          await ensureWallet(sellerId);
+
+          const newOrderId = 'ord_' + randomUUID().slice(0, 12);
+          const today = new Date().toISOString().split('T')[0];
+          const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays || 14;
+
+          const newOrder: Order = {
+            id: newOrderId,
+            workspaceId: newOrderId,
+            title: offerTitle,
+            buyerId: clientId,
+            sellerId: sellerId,
+            amount: offerAmount,
+            status: 'payment_pending',
+            createdAt: today,
+            dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
+            escrowProtectionStartDate: today,
+            escrowProtectionEndDate: new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0],
+            feeBreakdown: calculateOrderFees(offerAmount)
+          };
+
+          await workspaceService.ensureWorkspaceForOrderAsync(newOrder);
+
+          await postgresStore.executeInTransaction(async (client) => {
+            const offerLockRes = await client.query('SELECT status, order_id FROM workstream_offers WHERE id = $1 FOR UPDATE', [offer.id]);
+            if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+              throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
+            }
+
+            await store.saveOrder(newOrder, client);
+
+            await fundOrderEscrowWithEvent({
+              orderId: newOrder.id,
+              orderTitle: newOrder.title,
+              amount: newOrder.amount,
+              buyerId: newOrder.buyerId,
+              sellerId: newOrder.sellerId,
+              actor: `user:${caller.id}`,
+              idempotencyKey
+            }, client);
+
+            const fundedRow = await store.getOrder(newOrder.id, client);
+            if (fundedRow?.feeBreakdown) {
+              newOrder.feeBreakdown = fundedRow.feeBreakdown;
+              (newOrder as any).serviceFee = (fundedRow as any).serviceFee;
+              (newOrder as any).smallOrderFee = (fundedRow as any).smallOrderFee;
+            }
+
+            newOrder.status = 'in_progress';
+            await store.saveOrder(newOrder, client);
+            await syncUserBalances([newOrder.buyerId, newOrder.sellerId].filter(Boolean), client);
+
+            offer.status = 'accepted';
+            offer.orderId = newOrder.id;
+            offer.resolvedAt = new Date().toISOString();
+            offer.resolvedBy = caller.id;
+            await saveOfferToDb(offer, client);
           });
-          customOfferEscrowFunded = true;
-
-          newOrder.status = 'in_progress';
-          await store.saveOrder(newOrder);
-          await syncUserBalances();
-
-          offer.status = 'accepted';
-          offer.orderId = newOrder.id;
-          offer.resolvedAt = new Date().toISOString();
-          offer.resolvedBy = caller.id;
-          await saveOfferToDb(offer);
 
           return res.json({ success: true, order: enrichOrderWithServiceInfo(newOrder), offer: await viewOffer(offer) });
         } catch (err: any) {
-          if (!customOfferEscrowFunded) {
-            const escCheck = await pool.query("SELECT 1 FROM escrows WHERE order_id = $1", [newOrder.id]);
-            if (escCheck.rows.length === 0) {
-              await pool.query("DELETE FROM orders WHERE id = $1", [newOrder.id]);
-            } else {
-              newOrder.status = 'payment_pending';
-              await store.saveOrder(newOrder);
-            }
-            return res.status(400).json({ error: err.message || 'Failed to fund escrow for custom offer' });
-          }
-          newOrder.status = 'in_progress';
-          await store.saveOrder(newOrder);
-          return res.json({ success: true, order: enrichOrderWithServiceInfo(newOrder), offer: await viewOffer(offer) });
+          return res.status(400).json({ error: err.message || 'Failed to fund escrow for custom offer' });
+        } finally {
+          releaseOrderLock(offer.id);
         }
       }
 
@@ -1330,44 +1375,58 @@ router.post(
           await ensureWallet(freshOrder.buyerId);
           await ensureWallet(freshOrder.sellerId);
 
-          if (additionalAmount > 0) {
-            await topUpOrderEscrowWithEvent({
-              orderId: freshOrder.id,
-              orderTitle: `Invoice Top-up: ${targetOffer.title}`,
-              amount: additionalAmount,
-              buyerId: freshOrder.buyerId,
-              sellerId: freshOrder.sellerId,
-              actor: `user:${caller.id}`,
-              idempotencyKey: `${idempotencyKey}-topup`
-            });
-            freshOrder.amount = invoiceAmount;
-          }
+          await postgresStore.executeInTransaction(async (client) => {
+            const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [targetOffer.id]);
+            if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+              throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
+            }
 
-          let invoiceRevisionsResolved = false;
-          if (Array.isArray(freshOrder.revisions)) {
-            for (const rev of freshOrder.revisions) {
-              if (rev.status === 'requested') {
-                rev.status = 'resolved';
-                invoiceRevisionsResolved = true;
+            if (additionalAmount > 0) {
+              const topUpRes = await topUpOrderEscrowWithEvent({
+                orderId: freshOrder.id,
+                orderTitle: `Invoice Top-up: ${targetOffer.title}`,
+                amount: additionalAmount,
+                buyerId: freshOrder.buyerId,
+                sellerId: freshOrder.sellerId,
+                actor: `user:${caller.id}`,
+                idempotencyKey: `${idempotencyKey}-topup`
+              }, client);
+              freshOrder.amount = invoiceAmount;
+              if (topUpRes?.diff?.next) {
+                freshOrder.feeBreakdown = topUpRes.diff.next;
+                (freshOrder as any).serviceFee = topUpRes.diff.next.serviceFee ?? 0;
+                (freshOrder as any).smallOrderFee = topUpRes.diff.next.smallOrderFee ?? 0;
               }
             }
-          }
-          if (invoiceRevisionsResolved) {
-            await emitSystemEvent(freshOrder.id, 'revision_resolved', `📝 Revision resolved via accepted invoice ${targetOffer.number || targetOffer.id}.`);
-          }
 
-          await releaseOrderFunds(freshOrder, caller.name, `Final invoice ${targetOffer.number || targetOffer.id} accepted by buyer and escrow released`, false);
+            let invoiceRevisionsResolved = false;
+            if (Array.isArray(freshOrder.revisions)) {
+              for (const rev of freshOrder.revisions) {
+                if (rev.status === 'requested') {
+                  rev.status = 'resolved';
+                  invoiceRevisionsResolved = true;
+                }
+              }
+            }
+            if (invoiceRevisionsResolved) {
+              await emitSystemEvent(freshOrder.id, 'revision_resolved', `📝 Revision resolved via accepted invoice ${targetOffer.number || targetOffer.id}.`, {}, client);
+            }
 
-          targetOffer.status = 'paid';
-          targetOffer.resolvedAt = new Date().toISOString();
-          targetOffer.resolvedBy = caller.id;
-          await saveOfferToDb(targetOffer);
+            await releaseOrderFunds(freshOrder, caller.name, `Final invoice ${targetOffer.number || targetOffer.id} accepted by buyer and escrow released`, false, `${idempotencyKey}-release`, false, client);
 
-          freshOrder.status = 'completed';
-          freshOrder.completedAt = new Date().toISOString();
-          freshOrder.escrowReleased = true;
-          await store.saveOrder(freshOrder);
-          await syncUserBalances();
+            targetOffer.status = 'paid';
+            targetOffer.resolvedAt = new Date().toISOString();
+            targetOffer.resolvedBy = caller.id;
+            await saveOfferToDb(targetOffer, client);
+
+            freshOrder.status = 'completed';
+            if (!freshOrder.completedAt) {
+              freshOrder.completedAt = new Date().toISOString();
+            }
+            freshOrder.escrowReleased = true;
+            await store.saveOrder(freshOrder, client);
+            await syncUserBalances([freshOrder.buyerId, freshOrder.sellerId].filter(Boolean), client);
+          });
 
           return res.json({ success: true, order: enrichOrderWithServiceInfo(freshOrder), offer: await viewOffer(targetOffer) });
         } else {
@@ -1379,25 +1438,37 @@ router.post(
           await ensureWallet(freshOrder.buyerId);
           await ensureWallet(freshOrder.sellerId);
 
-          await topUpOrderEscrowWithEvent({
-            orderId: freshOrder.id,
-            orderTitle: targetOffer.title || freshOrder.title,
-            amount: amountToFund,
-            buyerId: freshOrder.buyerId,
-            sellerId: freshOrder.sellerId,
-            actor: `user:${caller.id}`,
-            idempotencyKey
+          await postgresStore.executeInTransaction(async (client) => {
+            const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [targetOffer.id]);
+            if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
+              throw new Error(`This offer is already ${offerLockRes.rows[0].status}.`);
+            }
+
+            const topUpRes = await topUpOrderEscrowWithEvent({
+              orderId: freshOrder.id,
+              orderTitle: targetOffer.title || freshOrder.title,
+              amount: amountToFund,
+              buyerId: freshOrder.buyerId,
+              sellerId: freshOrder.sellerId,
+              actor: `user:${caller.id}`,
+              idempotencyKey
+            }, client);
+
+            targetOffer.status = 'accepted';
+            targetOffer.resolvedAt = new Date().toISOString();
+            targetOffer.resolvedBy = caller.id;
+            await saveOfferToDb(targetOffer, client);
+
+            freshOrder.amount = Math.round((Number(freshOrder.amount || 0) + amountToFund) * 100) / 100;
+            if (topUpRes?.diff?.next) {
+              freshOrder.feeBreakdown = topUpRes.diff.next;
+              (freshOrder as any).serviceFee = topUpRes.diff.next.serviceFee ?? 0;
+              (freshOrder as any).smallOrderFee = topUpRes.diff.next.smallOrderFee ?? 0;
+            }
+            freshOrder.status = 'in_progress';
+            await store.saveOrder(freshOrder, client);
+            await syncUserBalances([freshOrder.buyerId, freshOrder.sellerId].filter(Boolean), client);
           });
-
-          targetOffer.status = 'accepted';
-          targetOffer.resolvedAt = new Date().toISOString();
-          targetOffer.resolvedBy = caller.id;
-          await saveOfferToDb(targetOffer);
-
-          freshOrder.amount = Math.round((Number(freshOrder.amount || 0) + amountToFund) * 100) / 100;
-          freshOrder.status = 'in_progress';
-          await store.saveOrder(freshOrder);
-          await syncUserBalances();
 
           return res.json({ success: true, order: enrichOrderWithServiceInfo(freshOrder), offer: await viewOffer(targetOffer) });
         }

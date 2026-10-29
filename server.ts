@@ -199,13 +199,48 @@ if (process.env.NODE_ENV !== 'test' && !server.listening) {
     process.exit(1);
   }
 
-  await setupSSR(app, IS_PROD, __dirname, async () => {
+  await setupSSR(app, IS_PROD, __dirname, async (pathname?: string) => {
     try {
       const pool = postgresStore.getPool();
+      const pathParts = (pathname || '').split('/').filter(Boolean).map(p => decodeURIComponent(p));
+      const candidateTokens = Array.from(new Set(pathParts.filter(p => p.length > 0 && p.length <= 120)));
+
       const [gigsRes, usersRes, projectsRes] = await Promise.all([
-        pool.query("SELECT * FROM gigs WHERE status IN ('active', 'published') LIMIT 50"),
-        pool.query("SELECT * FROM users WHERE status = 'active' LIMIT 50"),
-        pool.query("SELECT * FROM projects WHERE status = 'open' LIMIT 50")
+        candidateTokens.length > 0
+          ? pool.query(
+              `SELECT * FROM gigs
+               WHERE status IN ('active', 'published')
+                 AND (id = ANY($1::text[]) OR LOWER(COALESCE(slug, '')) = ANY($2::text[]))
+               UNION
+               (SELECT * FROM gigs WHERE status IN ('active', 'published') ORDER BY created_at DESC NULLS LAST LIMIT 50)`,
+              [candidateTokens, candidateTokens.map(t => t.toLowerCase())]
+            )
+          : pool.query("SELECT * FROM gigs WHERE status IN ('active', 'published') ORDER BY created_at DESC NULLS LAST LIMIT 50"),
+        candidateTokens.length > 0
+          ? pool.query(
+              `SELECT id, name, username, role, avatar, title, rating, reviews_count, hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, mobile_verified, created_at, is_flagged, is_available_now
+               FROM users
+               WHERE status = 'active'
+                 AND (id = ANY($1::text[]) OR LOWER(COALESCE(username, '')) = ANY($2::text[]))
+               UNION
+               (SELECT id, name, username, role, avatar, title, rating, reviews_count, hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, mobile_verified, created_at, is_flagged, is_available_now
+                FROM users WHERE status = 'active' ORDER BY created_at DESC NULLS LAST LIMIT 50)`,
+              [candidateTokens, candidateTokens.map(t => t.toLowerCase())]
+            )
+          : pool.query(
+              `SELECT id, name, username, role, avatar, title, rating, reviews_count, hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, mobile_verified, created_at, is_flagged, is_available_now
+               FROM users WHERE status = 'active' ORDER BY created_at DESC NULLS LAST LIMIT 50`
+            ),
+        candidateTokens.length > 0
+          ? pool.query(
+              `SELECT * FROM projects
+               WHERE status = 'open'
+                 AND (id = ANY($1::text[]) OR LOWER(COALESCE(slug, '')) = ANY($2::text[]))
+               UNION
+               (SELECT * FROM projects WHERE status = 'open' ORDER BY created_at DESC NULLS LAST LIMIT 50)`,
+              [candidateTokens, candidateTokens.map(t => t.toLowerCase())]
+            )
+          : pool.query("SELECT * FROM projects WHERE status = 'open' ORDER BY created_at DESC NULLS LAST LIMIT 50")
       ]);
       
       const gigs = gigsRes.rows.map(r => ({
@@ -238,8 +273,6 @@ if (process.env.NODE_ENV !== 'test' && !server.listening) {
           id: r.id,
           name: r.name,
           username: r.username,
-          email: r.email,
-          mobile: r.mobile,
           role: r.role,
           avatar: r.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
           title: r.title || '',
@@ -254,14 +287,9 @@ if (process.env.NODE_ENV !== 'test' && !server.listening) {
           verified: Boolean(r.verified),
           emailVerified: Boolean(r.email_verified),
           mobileVerified: Boolean(r.mobile_verified),
-          walletBalance: Number(r.wallet_balance || 0),
           createdAt: r.created_at,
           isFlagged: Boolean(r.is_flagged),
-          flagReason: r.flag_reason,
-          sessionVersion: Number(r.session_version || 1),
-          knownDevices: r.known_devices || [],
-          isAvailableNow: Boolean(r.is_available_now),
-          notificationPreferences: r.notification_preferences
+          isAvailableNow: Boolean(r.is_available_now)
         }));
 
       const projects = projectsRes.rows.map(r => ({

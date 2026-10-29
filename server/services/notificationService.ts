@@ -51,11 +51,17 @@ export function sendEmail(to: string, subject: string, text: string) {
     .catch(err => console.error('[email] send failed:', err?.message || err));
 }
 
-export async function sendOrderEmail(userId: string, subject: string, body: string, path?: string) {
-  const user = await store.getUser(userId);
+export async function sendOrderEmail(userId: string, subject: string, body: string, path?: string, client?: any) {
+  const user = await store.getUser(userId, client);
   if (!user || !user.email) return;
   const link = path && APP_URL ? `\n\nOpen the order: ${APP_URL}${path}` : '';
-  sendEmail(user.email, subject, `${body}${link}\n\n- WorkPerHour`);
+  const targetEmail = user.email;
+  const fullText = `${body}${link}\n\n- WorkPerHour`;
+  if (client || postgresStore.isActiveTransaction()) {
+    postgresStore.onCommit(() => sendEmail(targetEmail, subject, fullText));
+  } else {
+    sendEmail(targetEmail, subject, fullText);
+  }
 }
 
 export async function recordUserEmail(email: UserEmail): Promise<void> {
@@ -117,7 +123,11 @@ export async function createNotification({
     throw err;
   }
 
-  broadcastNotificationToUser(userId, newNotif);
+  if (dbClient || postgresStore.isActiveTransaction()) {
+    postgresStore.onCommit(() => broadcastNotificationToUser(userId, newNotif));
+  } else {
+    broadcastNotificationToUser(userId, newNotif);
+  }
 }
 
 export function notifyUser(message: Message, targetUserId: string) {

@@ -201,13 +201,13 @@ export const handleSubmitReview = async (req: Request, res: Response) => {
       await postgresStore.getPool().query('UPDATE orders SET seller_review = $1 WHERE id = $2', [JSON.stringify(newReview), order.id]);
     }
 
-    recalculateUserRating(resolvedTargetUserId);
+    await recalculateUserRating(resolvedTargetUserId);
     const targetGigId = order.gigId || newReview.gigId;
     if (targetGigId) {
       await recalculateGigRating(targetGigId);
     }
 
-    createNotification({
+    await createNotification({
       userId: resolvedTargetUserId,
       type: 'review',
       title: 'New Review Received',
@@ -232,9 +232,7 @@ export const handleSubmitReview = async (req: Request, res: Response) => {
         isCancelledOrder: false
       }
     };
-    recordMessage(sysMsg);
-    await store.addMessage(sysMsg);
-    broadcastMessage(sysMsg, order.id);
+    await recordMessage(sysMsg);
 
     res.status(201).json({ success: true, review: newReview, order: enrichOrderWithServiceInfo(order) });
   } catch (err: any) {

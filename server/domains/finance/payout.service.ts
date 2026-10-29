@@ -12,6 +12,7 @@ import {
 } from '../../middleware/auth.js';
 import { verifyAndConsumeWithdrawalCode } from '../../services/authService.js';
 import { syncUserBalances, registerAuditLog } from '../../services/orderService.js';
+import { paymentGatewayManager } from './paymentGateways.js';
 
 export const ALLOWED_METHODS: Record<string, keyof typeof DEFAULT_SITE_SETTINGS.wallets.allowedPayoutMethods> = {
   'UPI': 'upi',
@@ -250,24 +251,20 @@ export async function handlePayoutRequest(req: Request, res: Response) {
       });
     }
 
-    let record = await store.getPayoutById(activePayoutId);
-    if (!record) {
-      record = {
-        id: activePayoutId,
-        freelancerId,
-        amount: payoutResult.amount ?? numAmount,
-        method: rawMethod as Payout['method'],
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        accountDetails: payoutResult.accountDetails || accountDetails
-      };
-      await store.savePayout(record);
-    }
+    const record: Payout = (await store.getPayoutById(activePayoutId)) || {
+      id: activePayoutId,
+      freelancerId,
+      amount: payoutResult.amount ?? numAmount,
+      method: rawMethod as Payout['method'],
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      accountDetails: payoutResult.accountDetails || accountDetails
+    };
 
     await syncUserBalances([freelancerId]);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: user.name,
       role: user.role,
       action: 'PAYOUT_REQUESTED',
@@ -328,6 +325,29 @@ export const processPayout = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Explicit providerReference is required in production to process a payout.' });
     }
 
+    const preLookup = await postgresStore.getPool().query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
+    if (preLookup.rows.length === 0) {
+      return res.status(404).json({ error: 'Payout not found' });
+    }
+    const candidatePayout = preLookup.rows[0];
+    if (candidatePayout.status !== 'pending' && candidatePayout.status !== 'approved') {
+      return res.status(400).json({ error: `Cannot process payout in status "${candidatePayout.status}"` });
+    }
+    if (Number(candidatePayout.amount) >= 500 && candidatePayout.status !== 'approved') {
+      return res.status(400).json({ error: 'Payouts of $500.00 or more require explicit administrative approval before processing.' });
+    }
+
+    const effectiveProviderRef = providerReference || `GW-SETTLE-${payoutId}`;
+    const preVerification = await paymentGatewayManager.verifyPayoutSettlement({
+      method: candidatePayout.method,
+      providerReference: effectiveProviderRef,
+      amount: Number(candidatePayout.amount),
+      payoutId
+    });
+    if (!preVerification || !preVerification.verified) {
+      return res.status(400).json({ error: `Payout settlement could not be verified with payment provider for payout ${payoutId}` });
+    }
+
     const { journal, freelancerId } = await postgresStore.executeInTransaction(async (client) => {
       const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
       if (pCheck.rows.length === 0) throw { status: 404, message: 'Payout not found' };
@@ -338,11 +358,15 @@ export const processPayout = async (req: Request, res: Response) => {
       if (Number(preRow.amount) >= 500 && preRow.status !== 'approved') {
         throw { status: 400, message: 'Payouts of $500.00 or more require explicit administrative approval before processing.' };
       }
+      if (Number(preRow.amount) !== Number(candidatePayout.amount) || preRow.method !== candidatePayout.method) {
+        throw { status: 409, message: 'Payout details changed concurrently during verification.' };
+      }
       await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [preRow.freelancer_id]);
       const settled = await financialTransactionService.settlePayout({
         payoutId,
         actor: adminActor(req),
-        providerReference: providerReference || `GW-SETTLE-${payoutId}`
+        providerReference: effectiveProviderRef,
+        preVerified: true
       }, client);
       return { journal: settled.journal, freelancerId: preRow.freelancer_id };
     });

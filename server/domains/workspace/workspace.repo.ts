@@ -238,7 +238,47 @@ export class WorkspaceRepo {
     });
   }
 
-  async saveOffer(offer: WorkstreamOffer): Promise<void> {
+  async saveOffer(offer: WorkstreamOffer, client?: any): Promise<void> {
+    if (client) {
+      if (!offer?.id) return;
+      const mergedMetadata = {
+        ...(offer.metadata || {}),
+        ...(offer.note !== undefined ? { note: offer.note } : {}),
+        ...(offer.files !== undefined ? { files: offer.files } : {}),
+        ...(offer.reference !== undefined ? { reference: offer.reference } : {}),
+        ...(offer.responseDeadline !== undefined ? { responseDeadline: offer.responseDeadline } : {}),
+        ...(offer.rejectionReason !== undefined ? { rejectionReason: offer.rejectionReason } : {}),
+        ...(offer.rejectedBy !== undefined ? { rejectedBy: offer.rejectedBy } : {}),
+        ...(offer.rejectedAt !== undefined ? { rejectedAt: offer.rejectedAt } : {}),
+        ...(offer.proposalId !== undefined ? { proposalId: offer.proposalId } : {})
+      };
+      await client.query(
+        `INSERT INTO workstream_offers (
+          id, number, order_id, workspace_id, kind, title, amount, delivery_days, status, 
+          created_by, created_at, resolved_at, resolved_by, metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ON CONFLICT (id) DO UPDATE SET
+          number = EXCLUDED.number,
+          order_id = EXCLUDED.order_id,
+          workspace_id = EXCLUDED.workspace_id,
+          kind = EXCLUDED.kind,
+          title = EXCLUDED.title,
+          amount = EXCLUDED.amount,
+          delivery_days = EXCLUDED.delivery_days,
+          status = EXCLUDED.status,
+          created_by = EXCLUDED.created_by,
+          created_at = EXCLUDED.created_at,
+          resolved_at = EXCLUDED.resolved_at,
+          resolved_by = EXCLUDED.resolved_by,
+          metadata = EXCLUDED.metadata`,
+        [
+          offer.id, offer.number, offer.orderId, offer.workspaceId || null, offer.kind, offer.title, offer.amount,
+          offer.deliveryDays ?? null, offer.status, offer.createdBy, offer.createdAt,
+          offer.resolvedAt || null, offer.resolvedBy || null, JSON.stringify(mergedMetadata)
+        ]
+      );
+      return;
+    }
     return this.saveOffers([offer]);
   }
 
@@ -247,14 +287,16 @@ export class WorkspaceRepo {
     return res.rows.map(mapOfferRow);
   }
 
-  async getOfferById(id: string): Promise<WorkstreamOffer | undefined> {
-    const res = await this.ctx.getPool().query('SELECT * FROM workstream_offers WHERE id = $1', [id]);
+  async getOfferById(id: string, client?: any): Promise<WorkstreamOffer | undefined> {
+    const dbRunner = client || this.ctx.getPool();
+    const res = await dbRunner.query('SELECT * FROM workstream_offers WHERE id = $1', [id]);
     if (res.rows.length === 0) return undefined;
     return mapOfferRow(res.rows[0]);
   }
 
-  async listOffersForOrder(orderId: string): Promise<WorkstreamOffer[]> {
-    const res = await this.ctx.getPool().query(
+  async listOffersForOrder(orderId: string, client?: any): Promise<WorkstreamOffer[]> {
+    const dbRunner = client || this.ctx.getPool();
+    const res = await dbRunner.query(
       'SELECT * FROM workstream_offers WHERE order_id = $1 ORDER BY created_at DESC',
       [orderId]
     );

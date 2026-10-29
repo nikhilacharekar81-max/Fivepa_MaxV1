@@ -709,7 +709,17 @@ router.patch('/admin/users/:id', requireAdmin, async (req: Request, res: Respons
       if (u.role === 'admin' && caller?.role !== 'super_admin' && caller?.id !== u.id) {
         return res.status(403).json({ error: 'Forbidden: Only super_admin can change another administrator’s email.' });
       }
-      u.email = escapeHtml(String(req.body.email));
+      const nextEmail = escapeHtml(String(req.body.email).trim());
+      if (nextEmail) {
+        const conflictRes = await postgresStore.getPool().query(
+          'SELECT id FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2 LIMIT 1',
+          [nextEmail, u.id]
+        );
+        if (conflictRes.rows.length > 0) {
+          return res.status(409).json({ error: 'Email address is already registered to another user.' });
+        }
+      }
+      u.email = nextEmail;
     }
 
     if (req.body.name !== undefined) u.name = escapeHtml(String(req.body.name));
@@ -737,8 +747,8 @@ router.patch('/admin/users/:id', requireAdmin, async (req: Request, res: Respons
 
     await store.saveUser(u);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: caller?.name || adminActor(req),
       role: caller?.role || 'admin',
       action: 'USER_PROFILE_EDITED',
@@ -773,8 +783,8 @@ router.patch('/admin/users/:id/status', requireAdmin, async (req: Request, res: 
     u.status = newStatus as any;
     await store.saveUser(u);
 
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: admin?.name || adminActor(req),
       role: admin?.role || 'admin',
       action: `USER_STATUS_${newStatus.toUpperCase()}`,
@@ -803,8 +813,8 @@ router.post('/admin/users/:id/impersonate', requireAdmin, async (req: Request, r
     if (!u) return res.status(404).json({ error: 'User not found' });
 
     const admin = (req as any).authenticatedUser;
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: admin?.name || 'Admin',
       role: admin?.role || 'admin',
       action: 'USER_IMPERSONATED',
@@ -826,8 +836,8 @@ router.post('/admin/users/:id/stop-impersonate', requireAdmin, async (req: Reque
     if (!u) return res.status(404).json({ error: 'User not found' });
 
     const admin = (req as any).authenticatedUser;
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: admin?.name || 'Admin',
       role: admin?.role || 'admin',
       action: 'USER_IMPERSONATION_ENDED',
@@ -850,8 +860,8 @@ router.patch('/admin/users/:id/verify', requireAdmin, async (req: Request, res: 
     await store.saveUser(u);
 
     const admin = (req as any).authenticatedUser;
-    registerAuditLog({
-      id: 'log_' + Date.now(),
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
       actor: admin?.name || 'Admin',
       role: admin?.role || 'admin',
       action: u.verified ? 'USER_VERIFIED' : 'USER_UNVERIFIED',
@@ -961,46 +971,61 @@ router.patch('/admin/disputes/:id/resolve', requireAdmin, async (req: Request, r
       try {
         acquireOrderLock(lockedOrderId);
       } catch (err: any) {
+        lockedOrderId = null;
         return res.status(409).json({ error: err.message });
       }
-      if (status === 'resolved_release') await releaseOrderFunds(order, adminActor(req), reason, false, undefined, true);
-      else if (status === 'resolved_refund') await refundOrderFunds(order, undefined, adminActor(req), reason);
-      else await splitOrderFunds(order, Number(req.body.refundAmount), adminActor(req), reason);
-    }
-    d.status = status;
-    d.resolutionNotes = notes;
-
-    await store.saveDispute(d);
-
-    if (order) {
-      const sysMsg: Message = {
-        id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
-        orderId: order.id,
-        senderId: 'system',
-        senderName: 'Dispute Resolution Desk',
-        text: `⚖️ Dispute resolved by administrator: ${status}. Notes: ${notes || 'No notes provided'}`,
-        timestamp: new Date().toISOString(),
-        type: 'system',
-        metadata: { action: 'dispute_resolved', status, notes }
-      };
-      recordMessage(sysMsg);
-      await store.addMessage(sysMsg);
-      broadcastMessage(sysMsg, order.id);
     }
 
-    registerAuditLog({
-      id: 'log_' + randomUUID().slice(0, 12),
-      actor: adminActor(req),
-      role: 'super_admin',
-      action: 'DISPUTE_RESOLVED',
-      target: `Dispute #${d.id}`,
-      details: `Resolved dispute with status ${status}. Notes: ${notes}`,
-      timestamp: new Date().toLocaleString()
+    const actor = adminActor(req);
+    await postgresStore.executeInTransaction(async (client) => {
+      const dispLockRes = await client.query('SELECT status FROM disputes WHERE id = $1 FOR UPDATE', [d.id]);
+      if (dispLockRes.rows.length > 0 && String(dispLockRes.rows[0].status || '').startsWith('resolved')) {
+        throw new Error(`Dispute is already ${dispLockRes.rows[0].status}.`);
+      }
+
+      if (status.startsWith('resolved') && order) {
+        if (status === 'resolved_release') {
+          await releaseOrderFunds(order, actor, reason, false, undefined, true, client);
+        } else if (status === 'resolved_refund') {
+          await refundOrderFunds(order, undefined, actor, reason, undefined, undefined, true, client);
+        } else {
+          await splitOrderFunds(order, Number(req.body.refundAmount), actor, reason, undefined, client);
+        }
+      }
+
+      d.status = status;
+      d.resolutionNotes = notes;
+      await store.saveDispute(d, client);
+
+      if (order) {
+        const sysMsg: Message = {
+          id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+          orderId: order.id,
+          senderId: 'system',
+          senderName: 'Dispute Resolution Desk',
+          text: `⚖️ Dispute resolved by administrator: ${status}. Notes: ${notes || 'No notes provided'}`,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          metadata: { action: 'dispute_resolved', status, notes }
+        };
+        await recordMessage(sysMsg, client);
+      }
+
+      await registerAuditLog({
+        id: 'log_' + randomUUID().slice(0, 12),
+        actor,
+        role: 'super_admin',
+        action: 'DISPUTE_RESOLVED',
+        target: `Dispute #${d.id}`,
+        details: `Resolved dispute with status ${status}. Notes: ${notes}`,
+        timestamp: new Date().toLocaleString()
+      }, client);
     });
 
     res.json(d);
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    const code = String(err.message || '').includes('already resolved') ? 409 : 400;
+    res.status(code).json({ error: err.message });
   } finally {
     if (lockedOrderId) releaseOrderLock(lockedOrderId);
   }
@@ -1267,13 +1292,10 @@ router.post('/admin/refunds/:id/approve', requireAdmin, async (req: Request, res
         orderId: r.order_id,
         amount: immutableAmount,
         reason: r.reason || 'Admin approved refund',
-        actor: adminActor(req)
+        actor: adminActor(req),
+        allowDisputeResolution: true,
+        existingRefundId: r.id
       }, client);
-
-      await client.query(
-        "UPDATE refunds SET status = 'approved' WHERE id = $1",
-        [r.id]
-      );
 
       await client.query(
         `INSERT INTO audit_logs (id, actor, role, action, target, details, timestamp)

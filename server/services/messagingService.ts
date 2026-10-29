@@ -21,28 +21,26 @@ export function registerMessage(m: Message) {
 export async function recordMessage(m: Message, client?: any): Promise<Message> {
   await store.addMessage(m, client);
   if (m.orderId) {
-    if (client) {
-      try {
+    const dbRunner = client || postgresStore.getPool();
+    try {
+      if (client) {
         await client.query('SAVEPOINT sp_record_msg_touch');
-        await client.query(
-          "UPDATE orders SET updated_at = NOW() WHERE id = $1",
-          [m.orderId]
-        );
+        await client.query('UPDATE orders SET updated_at = NOW() WHERE id = $1', [m.orderId]);
         await client.query('RELEASE SAVEPOINT sp_record_msg_touch');
-      } catch {
+      } else {
+        await dbRunner.query('UPDATE orders SET updated_at = NOW() WHERE id = $1', [m.orderId]);
+      }
+    } catch {
+      if (client) {
         try { await client.query('ROLLBACK TO SAVEPOINT sp_record_msg_touch'); } catch {}
       }
-    } else {
-      try {
-        await postgresStore.getPool().query(
-          "UPDATE orders SET updated_at = NOW() WHERE id = $1",
-          [m.orderId]
-        );
-      } catch {
-        // Ignore timestamp touch failure
-      }
     }
-    broadcastMessage(m, m.orderId);
+    const targetOrderId = m.orderId;
+    if (client || postgresStore.isActiveTransaction()) {
+      postgresStore.onCommit(() => broadcastMessage(m, targetOrderId));
+    } else {
+      broadcastMessage(m, targetOrderId);
+    }
   }
   return m;
 }
