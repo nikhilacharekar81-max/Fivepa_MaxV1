@@ -385,14 +385,35 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     setNewGigExtras(prev => prev.filter(e => e.id !== id));
   };
 
+  const [newProjectTitle, setNewProjectTitle] = useState('');
+  const [newProjectCategory, setNewProjectCategory] = useState('Technology & Programming');
+  const [newProjectDesc, setNewProjectDesc] = useState('');
+  const [newProjectBudgetMin, setNewProjectBudgetMin] = useState(50);
+  const [newProjectBudgetMax, setNewProjectBudgetMax] = useState(250);
+  const [newProjectMaxHires, setNewProjectMaxHires] = useState(1);
+  const [postProjectError, setPostProjectError] = useState<string | null>(null);
+  const [isSubmittingProject, setIsSubmittingProject] = useState(false);
+
   const handlePublishGig = async (e: React.FormEvent) => {
     e.preventDefault();
-    const token = getAuthToken();
-    if (!token || !activeUser) {
+    if (!activeUser) {
       setIsLoginModalOpen(true);
       return;
     }
     try {
+      let token = getAuthToken();
+      const isPrivileged = ['admin', 'super_admin', 'support'].includes(activeUser.role || '');
+      if (!token && !isPrivileged) {
+        const session = await requestDemoSession(activeUser.id);
+        if (session?.token) {
+          token = session.token;
+          setAuthToken(token);
+        }
+      }
+      if (!token) {
+        setIsLoginModalOpen(true);
+        return;
+      }
       const res = await fetch('/api/gigs', {
         method: 'POST',
         headers: {
@@ -416,6 +437,59 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       }
     } catch (err) {
       console.error('Publish gig failed:', err);
+    }
+  };
+
+  const handlePostProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeUser) {
+      setIsLoginModalOpen(true);
+      return;
+    }
+    setPostProjectError(null);
+    setIsSubmittingProject(true);
+    try {
+      let token = getAuthToken();
+      const isPrivileged = ['admin', 'super_admin', 'support'].includes(activeUser.role || '');
+      if (!token && !isPrivileged) {
+        const session = await requestDemoSession(activeUser.id);
+        if (session?.token) {
+          token = session.token;
+          setAuthToken(token);
+        }
+      }
+      if (!token) {
+        setIsLoginModalOpen(true);
+        return;
+      }
+      const res = await fetch('/api/projects', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          title: newProjectTitle,
+          category: newProjectCategory,
+          description: newProjectDesc,
+          budgetMin: Number(newProjectBudgetMin),
+          budgetMax: Number(newProjectBudgetMax),
+          maxHires: Number(newProjectMaxHires) || 1
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setPostProjectError(data.error || 'Failed to post project.');
+        return;
+      }
+      setNewProjectTitle('');
+      setNewProjectDesc('');
+      await refresh();
+      navigate(`/projects/${data.id}`);
+    } catch (err: any) {
+      setPostProjectError(err?.message || 'Failed to post project.');
+    } finally {
+      setIsSubmittingProject(false);
     }
   };
 
@@ -1007,6 +1081,134 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         />
       </div>
     );
+  } else if (cleanPath === '/post-project') {
+    mainContent = (
+      <div className="max-w-3xl mx-auto py-8 px-4">
+        <div className="bg-white rounded-3xl border border-slate-200 p-8 shadow-xs">
+          <div className="mb-8">
+            <h1 className="text-2xl font-bold tracking-tight text-slate-900">Post a Custom Project Request</h1>
+            <p className="text-sm text-slate-500 mt-1">
+              Describe your project requirements and budget to receive proposals from vetted freelancers.
+            </p>
+          </div>
+          {postProjectError && (
+            <div className="mb-6 p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs font-bold text-rose-800">
+              {postProjectError}
+            </div>
+          )}
+          <form onSubmit={handlePostProject} className="space-y-6">
+            <div>
+              <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">
+                Project Title
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. Build a responsive SaaS analytics dashboard..."
+                value={newProjectTitle}
+                onChange={(e) => setNewProjectTitle(e.target.value)}
+                required
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">
+                Category
+              </label>
+              <select
+                value={newProjectCategory}
+                onChange={(e) => setNewProjectCategory(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none bg-white"
+              >
+                <option value="Technology & Programming">Technology & Programming</option>
+                <option value="Design & Creative">Design & Creative</option>
+                <option value="Digital Marketing">Digital Marketing</option>
+                <option value="Writing & Translation">Writing & Translation</option>
+                <option value="Video & Animation">Video & Animation</option>
+                <option value="AI & Data">AI & Data</option>
+                <option value="Business">Business</option>
+              </select>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">
+                  Min Budget ($ USD)
+                </label>
+                <input
+                  type="number"
+                  min={5}
+                  step="1"
+                  value={newProjectBudgetMin}
+                  onChange={(e) => setNewProjectBudgetMin(Number(e.target.value))}
+                  required
+                  className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">
+                  Max Budget ($ USD)
+                </label>
+                <input
+                  type="number"
+                  min={5}
+                  step="1"
+                  value={newProjectBudgetMax}
+                  onChange={(e) => setNewProjectBudgetMax(Number(e.target.value))}
+                  required
+                  className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">
+                  Freelancers Needed
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={newProjectMaxHires}
+                  onChange={(e) => setNewProjectMaxHires(Number(e.target.value))}
+                  required
+                  className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-2">
+                Project Description & Deliverables
+              </label>
+              <textarea
+                rows={5}
+                placeholder="Describe the project scope, deliverables, and timeline expectations..."
+                value={newProjectDesc}
+                onChange={(e) => setNewProjectDesc(e.target.value)}
+                required
+                className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={(e) => navigate('/projects', e)}
+                className="px-5 py-3 rounded-xl border border-slate-200 text-slate-700 font-bold text-xs hover:bg-slate-50 transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSubmittingProject}
+                className="px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs uppercase tracking-wider transition shadow-sm cursor-pointer"
+              >
+                {isSubmittingProject ? 'Posting Project...' : 'Post Project'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
   } else if (cleanPath === '/buyer-activity') {
     mainContent = (
       <BuyerActivityView
@@ -1292,6 +1494,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
             gigs={gigs}
             reviews={reviews}
             onNavigate={navigate}
+            onEditProfile={() => navigate('/edit-profile')}
             onContact={(targetId) => handleContactSeller(targetId || matchedUser.id, matchedUser.name, `Consultation with ${matchedUser.name}`)}
           />
         </div>

@@ -647,3 +647,32 @@ export interface SiteFeeSettings {
   updatedAt?: string;
   updatedBy?: string;
 }
+
+export const STAFF_ROLES = [
+  'admin',
+  'super_admin',
+  'support',
+  'moderator',
+  'finance_manager',
+  'staff',
+  'internal'
+] as const;
+
+export function isStaffRole(role?: string | null): boolean {
+  if (!role || typeof role !== 'string') return false;
+  return (STAFF_ROLES as readonly string[]).includes(role.trim().toLowerCase());
+}
+
+/**
+ * Returns the global account identity label for UI presentation.
+ * Ordinary marketplace accounts can act as both buyers and sellers, so they
+ * display 'Buyer & Seller' rather than a single permanent 'buyer' or 'freelancer' role.
+ * Administrative/staff roles preserve their administrative role label.
+ */
+export function getAccountIdentityLabel(role?: string | null): string {
+  if (isStaffRole(role)) {
+    return String(role).trim();
+  }
+  return 'Buyer & Seller';
+}
+

@@ -24,7 +24,7 @@ import {
   ExternalLink,
   MessageSquare
 } from 'lucide-react';
-import { UserAccount, Gig } from '../../types';
+import { UserAccount, Gig, isStaffRole } from '../../types';
 import { PPH_CATEGORIES } from '../HeaderCategoriesNav';
 import { getGigUrl } from '../../utils/slugify';
 import { DEFAULT_AVATAR, DEFAULT_GIG_IMAGE } from '../../constants';
@@ -193,8 +193,8 @@ export const FreelancerSearchView: React.FC<FreelancerSearchViewProps> = ({
   // Filter Freelancers
   const filteredFreelancers = useMemo(() => {
     return usersList.filter(u => {
-      // Exclude admin accounts from search
-      if (u.role === 'admin' || u.role === 'super_admin') return false;
+      // Exclude staff/admin accounts from search; all ordinary accounts can act as freelancers
+      if (isStaffRole(u.role)) return false;
 
       // Text search match (name, username, title, bio, skills)
       if (searchQuery.trim()) {

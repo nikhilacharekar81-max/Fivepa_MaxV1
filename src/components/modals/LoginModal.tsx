@@ -1,6 +1,6 @@
 import React from 'react';
 import { ShieldCheck, AlertCircle, RefreshCw, Sparkles, CheckCircle2 } from 'lucide-react';
-import { UserAccount } from '../../types';
+import { UserAccount, getAccountIdentityLabel } from '../../types';
 import { setAuthToken, requestDemoSession } from '../../utils/authToken';
 import { DEFAULT_AVATAR } from '../../constants';
 
@@ -248,7 +248,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   />
                   <div className="min-w-0">
                     <p className="font-bold text-slate-800 truncate group-hover:text-emerald-700">{u.name}</p>
-                    <p className="text-[10px] text-slate-400 capitalize">{(u.role || 'freelancer').replace('_', ' ')}</p>
+                    <p className="text-[10px] text-slate-400 capitalize">{getAccountIdentityLabel(u.role)}</p>
                   </div>
                 </button>
               ))}

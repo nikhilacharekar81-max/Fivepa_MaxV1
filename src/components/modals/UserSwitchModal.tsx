@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { X, RefreshCw, CheckCircle2, Shield, Users } from 'lucide-react';
-import { UserAccount } from '../../types';
+import { UserAccount, getAccountIdentityLabel } from '../../types';
 import { setAuthToken, requestDemoSession } from '../../utils/authToken';
 import { DEFAULT_AVATAR } from '../../constants';
 
@@ -116,7 +116,7 @@ export const UserSwitchModal: React.FC<UserSwitchModalProps> = ({
                         )}
                       </div>
                       <span className="text-[11px] text-slate-400 uppercase font-mono block">
-                        {user.role || 'client'} · {user.hourlyRate ? `$${user.hourlyRate}/hr` : user.email}
+                        {getAccountIdentityLabel(user.role)} · {user.hourlyRate ? `$${user.hourlyRate}/hr` : user.email}
                       </span>
                     </div>
                   </div>

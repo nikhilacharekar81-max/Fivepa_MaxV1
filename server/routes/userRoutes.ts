@@ -93,7 +93,7 @@ userRouter.patch('/users/profile', requireAuth, async (req: Request, res: Respon
 
     await store.saveUser(user);
 
-    if (user.role === 'freelancer') {
+    if (isPostgresEnabled()) {
       await postgresStore.getPool().query(
         `UPDATE gigs SET 
           freelancer_name = $1, 
@@ -275,7 +275,7 @@ const handleUserUpdate = async (req: Request, res: Response) => {
       const allowedRoles = [
         'Format', 'Freelancer', 'Employer', 'Both',
         'admin', 'super_admin', 'support', 'moderator', 'finance_manager',
-        'buyer', 'freelancer'
+        'buyer', 'freelancer', 'member', 'user', 'both'
       ];
       if (!allowedRoles.includes(req.body.role)) {
         return res.status(400).json({ error: `Invalid role "${req.body.role}". Allowed roles: ${allowedRoles.join(', ')}` });
@@ -347,6 +347,18 @@ const handleUserUpdate = async (req: Request, res: Response) => {
     if (req.body.avatar) targetUser.avatar = String(req.body.avatar).trim();
 
     await store.saveUser(targetUser);
+
+    if (isPostgresEnabled() && (req.body.name !== undefined || req.body.avatar !== undefined || req.body.username !== undefined)) {
+      await postgresStore.getPool().query(
+        `UPDATE gigs SET 
+          freelancer_name = $1, 
+          freelancer_username = $2, 
+          freelancer_avatar = $3 
+         WHERE freelancer_id = $4`,
+        [targetUser.name, targetUser.username || null, targetUser.avatar || null, targetUser.id]
+      );
+    }
+
     const safeResult: any = safeUser(targetUser);
     if (newToken) {
       safeResult.token = newToken;

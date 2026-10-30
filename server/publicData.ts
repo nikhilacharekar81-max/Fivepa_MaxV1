@@ -5,7 +5,7 @@
 
 import type { UserAccount, Gig, Project } from '../src/types.js';
 
-const EXCLUDED_STAFF_ROLES = ['admin', 'super_admin', 'support', 'moderator', 'staff', 'internal'];
+const EXCLUDED_STAFF_ROLES = ['admin', 'super_admin', 'support', 'moderator', 'finance_manager', 'staff', 'internal'];
 
 export function isUserPublic(u: any): boolean {
   if (!u || typeof u !== 'object') return false;

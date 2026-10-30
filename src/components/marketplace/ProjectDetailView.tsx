@@ -210,12 +210,37 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
   };
 
   // Handle proposal submission
-  const handleSubmitProposalForm = (e: React.FormEvent) => {
+  const handleSubmitProposalForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!proposalCover.trim()) return;
+    setProposalActionError(null);
 
     if (onSubmitProposal) {
       onSubmitProposal(project.id, numericBid, Number(proposalDays), proposalCover);
+    } else {
+      try {
+        const res = await fetchWithRetry('/api/proposals', {
+          method: 'POST',
+          body: JSON.stringify({
+            projectId: project.id,
+            bidAmount: numericBid,
+            deliveryDays: Number(proposalDays),
+            coverLetter: proposalCover
+          })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setProposalActionError(data.error || 'Failed to submit proposal.');
+          return;
+        }
+        if (onRefresh) await onRefresh();
+        setSubmittedProposal(data);
+        setIsSubmitted(true);
+        return;
+      } catch (err: any) {
+        setProposalActionError(err?.message || 'Failed to submit proposal.');
+        return;
+      }
     }
 
     const newProp: Proposal = {
