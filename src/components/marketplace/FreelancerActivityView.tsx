@@ -164,7 +164,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       const fromList = Array.isArray(financialSnapshot?.freelancerOrdersSummary)
         ? financialSnapshot.freelancerOrdersSummary.find((r: any) => r.id === ord.id)
         : null;
-      const fin = fromMap || fromList || (ord as any);
+      const fin = fromMap || fromList || null;
       return {
         freelancerNetEarned:
           typeof fin?.freelancerNetEarned === 'number' && Number.isFinite(fin.freelancerNetEarned)
@@ -287,7 +287,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
 
       let displayAmount = orderContractAmount;
       let amountLabel = 'CONTRACT VALUE';
-      if (hasRecognizedEarnings || isCompleted) {
+      if (hasRecognizedEarnings) {
         displayAmount = fin.freelancerNetEarned;
         amountLabel = 'EARNINGS';
       } else if (isCancelled) {
@@ -366,7 +366,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       let amountLabel = 'PROPOSAL';
       let statusCategory: FreelancerProjectActivityItem['statusCategory'] = 'pending_proposals';
 
-      if (hasRecognizedEarnings || isCompleted) {
+      if (hasRecognizedEarnings) {
         displayAmount = fin.freelancerNetEarned;
         amountLabel = 'EARNINGS';
         statusCategory = 'completed';
@@ -380,6 +380,10 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
           amountLabel = 'PROPOSAL';
           statusCategory = 'pending_proposals';
         }
+      } else if (isCompleted) {
+        displayAmount = fin.inEscrow > 0 ? fin.inEscrow : contractAmount;
+        amountLabel = fin.inEscrow > 0 ? 'IN ESCROW' : 'CONTRACT VALUE';
+        statusCategory = 'completed';
       } else if (isAccepted) {
         displayAmount = fin.inEscrow > 0 ? fin.inEscrow : contractAmount;
         amountLabel = fin.inEscrow > 0 ? 'IN ESCROW' : 'CONTRACT VALUE';

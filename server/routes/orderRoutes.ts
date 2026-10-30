@@ -547,8 +547,9 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
     }
 
     if (!isInquiry) {
-      if (!Number.isFinite(rawAmount) || rawAmount < 10.00) {
-        return res.status(400).json({ error: 'Minimum order amount is $10.00.' });
+      const minOrderAmount = Math.max(10, Number(siteSettings.getSettings().commission?.minimumOrderAmount) || 10);
+      if (!Number.isFinite(rawAmount) || rawAmount < minOrderAmount) {
+        return res.status(400).json({ error: `Minimum order amount is $${minOrderAmount.toFixed(2)}.` });
       }
     }
 

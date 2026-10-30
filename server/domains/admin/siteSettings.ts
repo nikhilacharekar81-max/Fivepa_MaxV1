@@ -18,7 +18,7 @@ export interface PlatformCommissionSettings {
   smallOrderFeeAmount: number; // flat fee added when the gig price is strictly under the threshold (default 1.00)
   smallOrderFeeThreshold: number; // gig price below this triggers the small-order fee (default 200)
   refundClientFeesOnFullRefund: boolean; // return service + small-order fee when an order is fully refunded
-  minimumOrderAmount: number; // e.g. 1.00
+  minimumOrderAmount: number; // default 10.00
   escrowProtectionDays: number; // default 14
   commissionDeductionTiming: 'on_escrow_release' | 'on_order_checkout';
 }
@@ -147,7 +147,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsState = {
     smallOrderFeeAmount: DEFAULT_FEE_CONFIG.smallOrderFee, // $1.00 flat fee...
     smallOrderFeeThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold, // ...on orders under $200
     refundClientFeesOnFullRefund: true,
-    minimumOrderAmount: 1.0,
+    minimumOrderAmount: 10.0,
     escrowProtectionDays: 14, // 14-day mandatory vault
     commissionDeductionTiming: 'on_escrow_release'
   },
@@ -167,7 +167,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsState = {
     projectModerationRequired: false,
     minimumGigPrice: 5,
     maximumGigPrice: 10000,
-    minimumProjectBudget: 1,
+    minimumProjectBudget: 5,
     maximumProjectBudget: 50000,
     maxActiveOrdersPerFreelancer: 0, // 0 for unlimited (allows high-velocity sellers and buyers without artificial caps)
     autoCompleteDeliveredDays: 3,
@@ -231,6 +231,15 @@ export class SiteSettingsService {
     this.syncFeesToLedger();
   }
 
+  private normalizeCommissionSettings(commission: PlatformCommissionSettings): PlatformCommissionSettings {
+    const rawMinOrder = Number(commission.minimumOrderAmount);
+    const normalizedMinOrder = Number.isFinite(rawMinOrder) ? Math.max(10, rawMinOrder) : 10;
+    return {
+      ...commission,
+      minimumOrderAmount: normalizedMinOrder
+    };
+  }
+
   private normalizeMarketplaceGigLimits(marketplace: GigsProjectsOrdersSettings): GigsProjectsOrdersSettings {
     const rawMin = Number(marketplace.minimumGigPrice);
     const normalizedMin = Number.isFinite(rawMin) ? Math.min(10000, Math.max(5, rawMin)) : 5;
@@ -239,22 +248,37 @@ export class SiteSettingsService {
       Number.isFinite(rawMax) && rawMax > 0
         ? Math.min(10000, Math.max(normalizedMin, rawMax))
         : 10000;
+    const rawMinProjectBudget = Number(marketplace.minimumProjectBudget);
+    const normalizedMinProjectBudget = Number.isFinite(rawMinProjectBudget)
+      ? Math.max(5, rawMinProjectBudget)
+      : 5;
+    const rawMaxProjectBudget = Number(marketplace.maximumProjectBudget);
+    const normalizedMaxProjectBudget =
+      Number.isFinite(rawMaxProjectBudget) && rawMaxProjectBudget > 0
+        ? Math.max(normalizedMinProjectBudget, rawMaxProjectBudget)
+        : 50000;
     return {
       ...marketplace,
       minimumGigPrice: normalizedMin,
-      maximumGigPrice: normalizedMax
+      maximumGigPrice: normalizedMax,
+      minimumProjectBudget: normalizedMinProjectBudget,
+      maximumProjectBudget: normalizedMaxProjectBudget
     };
   }
 
   public loadFromState(parsed: any) {
     if (parsed && typeof parsed === 'object') {
+      const mergedCommission = this.normalizeCommissionSettings({
+        ...DEFAULT_SITE_SETTINGS.commission,
+        ...(parsed.commission || {})
+      });
       const mergedMarketplace = this.normalizeMarketplaceGigLimits({
         ...DEFAULT_SITE_SETTINGS.marketplace,
         ...(parsed.marketplace || {})
       });
       this.settings = {
         website: { ...DEFAULT_SITE_SETTINGS.website, ...(parsed.website || {}) },
-        commission: { ...DEFAULT_SITE_SETTINGS.commission, ...(parsed.commission || {}) },
+        commission: mergedCommission,
         memberships: { ...DEFAULT_SITE_SETTINGS.memberships, ...(parsed.memberships || {}) },
         marketplace: mergedMarketplace,
         wallets: { ...DEFAULT_SITE_SETTINGS.wallets, ...(parsed.wallets || {}) },
@@ -372,7 +396,9 @@ export class SiteSettingsService {
     this.settings[section] =
       section === 'marketplace'
         ? (this.normalizeMarketplaceGigLimits(mergedSection as GigsProjectsOrdersSettings) as SiteSettingsState[K])
-        : mergedSection;
+        : section === 'commission'
+          ? (this.normalizeCommissionSettings(mergedSection as PlatformCommissionSettings) as SiteSettingsState[K])
+          : mergedSection;
 
     // If any fee rule changed, sync immediately to the double-entry finance ledger
     if (section === 'commission') {

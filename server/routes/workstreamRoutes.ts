@@ -887,7 +887,7 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
     }
 
     const amount = Math.round(Number(req.body?.amount) * 100) / 100;
-    const minAmount = Number(siteSettings.getFlattenedSettings().minOrderAmount) || 0;
+    const minAmount = Math.max(10, Number(siteSettings.getFlattenedSettings().minOrderAmount) || 10);
     if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'Enter a valid amount.' });
     if (amount > 100000) return res.status(400).json({ error: 'Amount is too large.' });
     if (amount < minAmount) return res.status(400).json({ error: `Minimum amount is ${siteSettings.getFlattenedSettings().currencySymbol || '$'}${minAmount}.` });
@@ -1641,8 +1641,9 @@ async function executeWorkspaceInquiryOfferAccept(
   }
 
   const offerAmount = Math.round(Number(offer.amount) * 100) / 100;
-  if (!Number.isFinite(offerAmount) || offerAmount <= 0) {
-    return { status: 400, body: { error: 'Invalid proposal amount.' } };
+  const minOrderAmount = Math.max(10, Number(siteSettings.getSettings().commission?.minimumOrderAmount) || 10);
+  if (!Number.isFinite(offerAmount) || offerAmount < minOrderAmount) {
+    return { status: 400, body: { error: `Minimum order amount is $${minOrderAmount.toFixed(2)}.` } };
   }
 
   await ensureWallet(workspace.buyerId);

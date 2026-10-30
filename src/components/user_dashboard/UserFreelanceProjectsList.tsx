@@ -50,7 +50,7 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
 
     let earningsAmount = contractVal;
     let amountLabel = 'CONTRACT VALUE';
-    if (hasRecognizedEarnings || isOrdCompleted) {
+    if (hasRecognizedEarnings) {
       earningsAmount = netEarned;
       amountLabel = 'EARNINGS';
     } else if (isOrdCancelled) {
@@ -91,6 +91,7 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
   return (
     <div className="bg-white divide-y divide-slate-200/80 font-sans">
       {resolvedItems.map(item => {
+        const hasRecognizedEarnings = item.amountLabel === 'EARNINGS' && Number(item.earningsAmount) > 0;
         const isPendingProposal = item.statusCategory === 'pending_proposals';
         const isCancelledOrder =
           item.statusCategory === 'cancelled' ||
@@ -100,15 +101,15 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
           !isCancelledOrder && (item.statusCategory === 'completed' || item.order?.status === 'completed');
         const targetOrderId = item.workstreamOrderId || item.order?.id || '';
         const rightSideAmount = isPendingProposal ? item.proposalAmount : item.earningsAmount;
-        const rightSideLabel =
-          item.amountLabel ||
-          (item.statusCategory === 'completed'
-            ? 'EARNINGS'
+        const rightSideLabel = hasRecognizedEarnings
+          ? 'EARNINGS'
+          : item.amountLabel && item.amountLabel !== 'EARNINGS'
+            ? item.amountLabel
             : isPendingProposal
               ? 'PROPOSAL'
               : isCancelledOrder
                 ? 'CANCELLED'
-                : 'CONTRACT VALUE');
+                : 'CONTRACT VALUE';
 
         return (
           <div
