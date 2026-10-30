@@ -1,6 +1,6 @@
 import React from 'react';
 import { CheckCircle2 } from 'lucide-react';
-import { UserAccount, Gig, Project, Proposal, Order, Review, SupportTicket } from '../../types';
+import { UserAccount, Gig, Project, Proposal, Order, Review, SupportTicket, isStaffRole } from '../../types';
 
 interface InspectUserModalProps {
   inspectingUser: UserAccount | null;
@@ -50,7 +50,12 @@ export const InspectUserModal: React.FC<InspectUserModalProps> = ({
                   </span>
                 )}
               </div>
-              <p className="text-xs text-slate-500">{inspectingUser.email} · Role: <span className="text-emerald-700 uppercase font-bold">{inspectingUser.role}</span></p>
+              <p className="text-xs text-slate-500">
+                {inspectingUser.email}
+                {isStaffRole(inspectingUser.role) && (
+                  <> · Role: <span className="text-indigo-700 uppercase font-bold">{inspectingUser.role}</span></>
+                )}
+              </p>
               <p className="text-xs text-slate-800 font-medium mt-1">{inspectingUser.title}</p>
             </div>
           </div>

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Search, FolderKanban, Users, Shield, Star, Inbox, MessageSquare, Clock, CheckCircle2, Archive, PackageCheck } from 'lucide-react';
-import { UserAccount, Project } from '../../types';
+import { UserAccount, Project, isStaffRole } from '../../types';
 import { WorkstreamFilter, WorkstreamItem, WORKSTREAM_TAB_STATUSES } from './types';
 
 interface WorkstreamSidebarProps {
@@ -204,9 +204,11 @@ export const WorkstreamSidebar: React.FC<WorkstreamSidebarProps> = ({
                       <div className="text-xs font-bold text-fiverr-dark truncate">
                         {person.name}
                       </div>
-                      <span className="text-xs text-slate-400 font-semibold uppercase tracking-tight block truncate">
-                        {person.role || 'Member'}
-                      </span>
+                      {isStaffRole(person.role) && (
+                        <span className="text-[10px] text-indigo-600 font-semibold uppercase tracking-tight block truncate">
+                          {person.role}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded-full shrink-0 ${

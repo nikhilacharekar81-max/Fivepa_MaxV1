@@ -248,7 +248,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   />
                   <div className="min-w-0">
                     <p className="font-bold text-slate-800 truncate group-hover:text-emerald-700">{u.name}</p>
-                    <p className="text-[10px] text-slate-400 capitalize">{getAccountIdentityLabel(u.role)}</p>
+                    {getAccountIdentityLabel(u.role) ? (
+                      <p className="text-[10px] text-indigo-600 uppercase font-semibold">{getAccountIdentityLabel(u.role)}</p>
+                    ) : u.title ? (
+                      <p className="text-[10px] text-slate-400 truncate">{u.title}</p>
+                    ) : null}
                   </div>
                 </button>
               ))}

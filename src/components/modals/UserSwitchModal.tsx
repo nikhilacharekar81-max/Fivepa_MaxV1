@@ -67,7 +67,7 @@ export const UserSwitchModal: React.FC<UserSwitchModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-slate-900">Switch Demo Account</h2>
-              <p className="text-xs text-slate-500">Test client, seller, and workstream permissions</p>
+              <p className="text-xs text-slate-500">Test accounts, marketplace features, and workstream workflows</p>
             </div>
           </div>
           <button 
@@ -115,8 +115,11 @@ export const UserSwitchModal: React.FC<UserSwitchModalProps> = ({
                           </span>
                         )}
                       </div>
-                      <span className="text-[11px] text-slate-400 uppercase font-mono block">
-                        {getAccountIdentityLabel(user.role)} · {user.hourlyRate ? `$${user.hourlyRate}/hr` : user.email}
+                      <span className="text-[11px] text-slate-400 font-mono block">
+                        {getAccountIdentityLabel(user.role) && (
+                          <span className="uppercase font-bold text-indigo-600 mr-1.5">{getAccountIdentityLabel(user.role)} ·</span>
+                        )}
+                        {user.hourlyRate ? `$${user.hourlyRate}/hr · ${user.email}` : user.email}
                       </span>
                     </div>
                   </div>

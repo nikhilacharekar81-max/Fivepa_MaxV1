@@ -664,15 +664,15 @@ export function isStaffRole(role?: string | null): boolean {
 }
 
 /**
- * Returns the global account identity label for UI presentation.
- * Ordinary marketplace accounts can act as both buyers and sellers, so they
- * display 'Buyer & Seller' rather than a single permanent 'buyer' or 'freelancer' role.
+ * Returns the global account identity label for UI presentation if the account has an administrative or staff role.
+ * Ordinary marketplace accounts can act as both buyers and sellers, so they do NOT have a permanent role badge or label.
  * Administrative/staff roles preserve their administrative role label.
  */
-export function getAccountIdentityLabel(role?: string | null): string {
+export function getAccountIdentityLabel(role?: string | null): string | null {
   if (isStaffRole(role)) {
     return String(role).trim();
   }
-  return 'Buyer & Seller';
+  return null;
 }
+
 

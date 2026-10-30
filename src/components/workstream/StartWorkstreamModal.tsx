@@ -94,10 +94,10 @@ export const StartWorkstreamModal: React.FC<StartWorkstreamModalProps> = ({
               onChange={(e) => setPartnerId(e.target.value)}
               className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs text-fiverr-dark focus:outline-none focus:border-emerald-500 focus:bg-white"
             >
-              <option value="">Choose a freelancer or client...</option>
+              <option value="">Choose a participant...</option>
               {candidates.map((cand) => (
                 <option key={cand.id} value={cand.id}>
-                  {cand.name} ({cand.role}) - {cand.title || cand.email}
+                  {cand.name} - {cand.title || cand.email}
                 </option>
               ))}
             </select>

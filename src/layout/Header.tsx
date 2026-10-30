@@ -7,7 +7,7 @@ import {
 import { PPH_CATEGORIES } from '../components/HeaderCategoriesNav';
 import { slugify } from '../utils/slugify';
 import type { Order, UserAccount } from '../types';
-import { getAccountIdentityLabel } from '../types';
+import { isStaffRole } from '../types';
 import { clearAuthToken, getAuthToken } from '../utils/authToken';
 import { DEFAULT_AVATAR, getUserInitialsAvatar } from '../constants';
 
@@ -707,7 +707,9 @@ export function Header({
                 <div className="px-3 py-2.5 border-b border-slate-100 mb-2 flex items-center justify-between">
                   <div>
                     <span className="font-semibold text-fiverr-dark block">{currentUser.name}</span>
-                    <span className="text-xs text-slate-400 uppercase">{getAccountIdentityLabel(currentUser.role)}</span>
+                    {isStaffRole(currentUser.role) && (
+                      <span className="text-xs text-slate-400 uppercase">{currentUser.role}</span>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={`text-[10px] font-bold uppercase ${currentUser.isAvailableNow ? 'text-emerald-700' : 'text-fiverr-muted'}`}>
@@ -737,7 +739,7 @@ export function Header({
                   className="w-full text-left px-3 py-2 rounded-xl hover:bg-slate-50 text-fiverr-dark font-semibold flex items-center gap-2.5 transition cursor-pointer"
                 >
                   <PlusCircle className="w-4 h-4 text-emerald-600" />
-                  <span>Post Gig</span>
+                  <span className="text-[15px]">Post Gig</span>
                 </button>
 
 
@@ -967,7 +969,9 @@ export function Header({
                     />
                     <div className="min-w-0 flex-1">
                       <p className="font-bold text-sm text-slate-900 truncate">{currentUser.name}</p>
-                      <p className="text-xs text-emerald-600 uppercase font-semibold">{getAccountIdentityLabel(currentUser.role)}</p>
+                      {isStaffRole(currentUser.role) && (
+                        <p className="text-xs text-emerald-600 uppercase font-semibold">{currentUser.role}</p>
+                      )}
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
