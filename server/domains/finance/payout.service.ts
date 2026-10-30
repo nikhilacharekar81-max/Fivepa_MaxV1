@@ -161,12 +161,17 @@ export async function handlePayoutRequest(req: Request, res: Response) {
     }
 
     const walletConfig = liveSettings?.wallets || DEFAULT_SITE_SETTINGS.wallets;
-    const minPayout = walletConfig?.minimumWithdrawalAmount ?? 10.00;
+    const minPayout = Number(walletConfig?.minimumWithdrawalAmount ?? 3.00);
     if (numAmount < minPayout) {
       return res.status(400).json({ error: `Minimum payout withdrawal amount is $${minPayout.toFixed(2)}.` });
     }
 
-    const dailyLimit = walletConfig?.dailyWithdrawalLimit ?? 10000;
+    const maxPerTx = Number(walletConfig?.maximumWithdrawalPerTransaction ?? 5000.00);
+    if (numAmount > maxPerTx) {
+      return res.status(400).json({ error: `Maximum withdrawal per transaction is $${maxPerTx.toFixed(2)}.` });
+    }
+
+    const dailyLimit = Number(walletConfig?.dailyWithdrawalLimit ?? 10000);
 
     // Deterministic payoutId if idempotencyKey provided, else random
     const id = idempotencyKey

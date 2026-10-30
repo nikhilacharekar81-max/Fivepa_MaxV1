@@ -2,6 +2,7 @@ import React from 'react';
 import { Gig } from '../../types';
 import { ChevronDown, ThumbsUp, Heart } from 'lucide-react';
 import { DEFAULT_GIG_IMAGE } from '../../constants';
+import { formatCurrency } from '../../utils/formatters';
 
 interface UserFreelanceOffersListProps {
   gigs: Gig[];
@@ -141,7 +142,7 @@ export const UserFreelanceOffersList: React.FC<UserFreelanceOffersListProps> = (
                     <span className="text-slate-400">Not rated</span>
                   )}
                   <span>
-                    Price: <strong className="font-bold text-slate-900">${gig.price}</strong>
+                    Price: <strong className="font-bold text-slate-900">{formatCurrency(gig.price)}</strong>
                   </span>
                   <span className="inline-flex items-center gap-1 text-slate-500">
                     <Heart className="w-3.5 h-3.5 fill-slate-300 text-slate-400" />

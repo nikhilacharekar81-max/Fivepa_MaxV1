@@ -5,8 +5,9 @@ import { CheckCircle2, Clock, AlertCircle, ShieldCheck } from 'lucide-react';
  * Shared Currency Formatting Utility
  */
 export function formatCurrency(amount: number | undefined | null, decimals: number = 2): string {
-  const validAmount = Number.isFinite(amount as number) ? (amount as number) : 0;
-  return `$${validAmount.toFixed(decimals)}`;
+  const num = Number(amount ?? 0);
+  const validAmount = Number.isFinite(num) ? num : 0;
+  return `$${validAmount.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
 }
 
 

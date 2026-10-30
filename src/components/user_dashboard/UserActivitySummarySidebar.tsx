@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatCurrency } from '../../utils/formatters';
 
 interface UserActivitySummarySidebarProps {
   activeSection?: 'projects' | 'gigs';
@@ -50,7 +51,7 @@ export const UserActivitySummarySidebar: React.FC<UserActivitySummarySidebarProp
           </div>
           <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
             <span className="font-semibold text-slate-700">Earnings</span>
-            <span className="font-bold text-emerald-600 text-base">${projectEarnings.toLocaleString()}</span>
+            <span className="font-bold text-emerald-600 text-base">{formatCurrency(projectEarnings)}</span>
           </div>
         </div>
       ) : (
@@ -69,7 +70,7 @@ export const UserActivitySummarySidebar: React.FC<UserActivitySummarySidebarProp
           </div>
           <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
             <span className="font-semibold text-slate-700">Earnings</span>
-            <span className="font-bold text-emerald-600 text-base">${totalEarnings.toLocaleString()}</span>
+            <span className="font-bold text-emerald-600 text-base">{formatCurrency(totalEarnings)}</span>
           </div>
         </div>
       )}

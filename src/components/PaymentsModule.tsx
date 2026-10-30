@@ -26,6 +26,7 @@ import {
 import { Gig, Order, Project, Proposal, UserAccount, WorkstreamOffer } from '../types';
 import { getAuthToken, setAuthToken, requestDemoSession } from '../utils/authToken';
 import { getDeviceId } from '../utils/deviceId';
+import { calculateOrderFees, MAX_ORDER_AMOUNT } from '../shared/fees';
 
 interface PaymentsModuleProps {
   gigs?: Gig[];
@@ -54,6 +55,17 @@ interface EnrichedOrderFinancialRow extends Order {
   sellerName?: string;
   inEscrow?: number;
   escrowFunded?: number;
+  releasedGross?: number;
+  refundedGross?: number;
+  escrowStatus?: string;
+  buyerGrossFunded?: number;
+  buyerRefundedAmount?: number;
+  netPaidByBuyer?: number;
+  feesRefunded?: boolean;
+  feesRefundedAmount?: number;
+  freelancerNetEarned?: number;
+  freelancerPendingClearance?: number;
+  isDisputed?: boolean;
   depositRequests?: WorkstreamOffer[];
   pendingInvoices?: WorkstreamOffer[];
   paidInvoiceAmount?: number;
@@ -377,32 +389,76 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
   }, [activeSnapshot?.freelancerOrdersSummary, currentUser, orders, allOffers, userMap, activeEscrowStatuses]);
 
   const effectivePlatformFee = useMemo(() => {
-    if (typeof activeSnapshot?.commissionPercent === 'number' && activeSnapshot.commissionPercent > 0) {
+    if (
+      typeof activeSnapshot?.commissionPercent === 'number' &&
+      Number.isFinite(activeSnapshot.commissionPercent) &&
+      activeSnapshot.commissionPercent >= 0
+    ) {
       return activeSnapshot.commissionPercent;
     }
-    return platformFee > 0 ? platformFee : 20;
+    return typeof platformFee === 'number' && Number.isFinite(platformFee) && platformFee >= 0 ? platformFee : 20;
   }, [activeSnapshot?.commissionPercent, platformFee]);
 
   const effectiveClientServiceFee = useMemo(() => {
-    if (typeof activeSnapshot?.buyerFeePercent === 'number' && activeSnapshot.buyerFeePercent >= 0) {
+    if (
+      typeof activeSnapshot?.buyerFeePercent === 'number' &&
+      Number.isFinite(activeSnapshot.buyerFeePercent) &&
+      activeSnapshot.buyerFeePercent >= 0
+    ) {
       return activeSnapshot.buyerFeePercent;
     }
-    return clientServiceFee > 0 ? clientServiceFee : 1;
+    return typeof clientServiceFee === 'number' && Number.isFinite(clientServiceFee) && clientServiceFee >= 0
+      ? clientServiceFee
+      : 1;
   }, [activeSnapshot?.buyerFeePercent, clientServiceFee]);
 
   const effectiveSmallOrderThreshold = useMemo(() => {
-    if (typeof activeSnapshot?.smallOrderFeeThreshold === 'number' && activeSnapshot.smallOrderFeeThreshold >= 0) {
+    if (
+      typeof activeSnapshot?.smallOrderFeeThreshold === 'number' &&
+      Number.isFinite(activeSnapshot.smallOrderFeeThreshold) &&
+      activeSnapshot.smallOrderFeeThreshold >= 0
+    ) {
       return activeSnapshot.smallOrderFeeThreshold;
     }
-    return smallOrderFeeThreshold > 0 ? smallOrderFeeThreshold : 200;
+    return typeof smallOrderFeeThreshold === 'number' && Number.isFinite(smallOrderFeeThreshold) && smallOrderFeeThreshold >= 0
+      ? smallOrderFeeThreshold
+      : 200;
   }, [activeSnapshot?.smallOrderFeeThreshold, smallOrderFeeThreshold]);
 
   const effectiveSmallOrderFee = useMemo(() => {
-    if (typeof activeSnapshot?.smallOrderFeeAmount === 'number' && activeSnapshot.smallOrderFeeAmount >= 0) {
+    if (
+      typeof activeSnapshot?.smallOrderFeeAmount === 'number' &&
+      Number.isFinite(activeSnapshot.smallOrderFeeAmount) &&
+      activeSnapshot.smallOrderFeeAmount >= 0
+    ) {
       return activeSnapshot.smallOrderFeeAmount;
     }
-    return smallOrderFeeAmount > 0 ? smallOrderFeeAmount : 1;
+    return typeof smallOrderFeeAmount === 'number' && Number.isFinite(smallOrderFeeAmount) && smallOrderFeeAmount >= 0
+      ? smallOrderFeeAmount
+      : 1;
   }, [activeSnapshot?.smallOrderFeeAmount, smallOrderFeeAmount]);
+
+  const effectiveMinWithdrawal = useMemo(() => {
+    if (
+      typeof activeSnapshot?.minimumWithdrawalAmount === 'number' &&
+      Number.isFinite(activeSnapshot.minimumWithdrawalAmount) &&
+      activeSnapshot.minimumWithdrawalAmount > 0
+    ) {
+      return activeSnapshot.minimumWithdrawalAmount;
+    }
+    return 3;
+  }, [activeSnapshot?.minimumWithdrawalAmount]);
+
+  const effectiveMaxWithdrawalPerTx = useMemo(() => {
+    if (
+      typeof activeSnapshot?.maximumWithdrawalPerTransaction === 'number' &&
+      Number.isFinite(activeSnapshot.maximumWithdrawalPerTransaction) &&
+      activeSnapshot.maximumWithdrawalPerTransaction > 0
+    ) {
+      return activeSnapshot.maximumWithdrawalPerTransaction;
+    }
+    return 5000;
+  }, [activeSnapshot?.maximumWithdrawalPerTransaction]);
 
   // Live balances & metrics (strictly $ USD)
   const availableBalance = useMemo(() => {
@@ -427,38 +483,28 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
       .filter(o => {
         const actMonth = String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 7);
         const crtMonth = String(o.createdAt || '').slice(0, 7);
-        return (actMonth === ym || crtMonth === ym) && o.status !== 'payment_pending' && (o.status as string) !== 'pending';
+        return actMonth === ym || crtMonth === ym;
       })
-      .reduce((sum, o) => sum + Number(o.amount || 0), 0);
+      .reduce((sum, o) => sum + Number(o.netPaidByBuyer || 0), 0);
   }, [activeSnapshot?.paidThisMonth, buyerOrderRows]);
 
   const paidToDate = useMemo(() => {
     if (typeof activeSnapshot?.paidToDate === 'number') return activeSnapshot.paidToDate;
-    return buyerOrderRows
-      .filter(o => o.status !== 'payment_pending' && (o.status as string) !== 'pending')
-      .reduce((sum, o) => sum + Number(o.amount || 0), 0);
+    return buyerOrderRows.reduce((sum, o) => sum + Number(o.netPaidByBuyer || 0), 0);
   }, [activeSnapshot?.paidToDate, buyerOrderRows]);
 
-  const resolveRowNetEarnings = useCallback(
-    (o: EnrichedOrderFinancialRow) => {
-      if (typeof (o as any).freelancerNetEarned === 'number' && (o as any).freelancerNetEarned > 0) {
-        return (o as any).freelancerNetEarned;
-      }
-      if (typeof (o.feeBreakdown as any)?.freelancerNet === 'number') {
-        return Number((o.feeBreakdown as any).freelancerNet);
-      }
-      const netRate = (100 - effectivePlatformFee) / 100;
-      return Number((Number(o.amount || 0) * netRate).toFixed(2));
-    },
-    [effectivePlatformFee]
-  );
+  const resolveRowNetEarnings = useCallback((o: EnrichedOrderFinancialRow) => {
+    if (typeof o.freelancerNetEarned === 'number' && Number.isFinite(o.freelancerNetEarned) && o.freelancerNetEarned >= 0) {
+      return o.freelancerNetEarned;
+    }
+    return 0;
+  }, []);
 
   const earnedThisMonth = useMemo(() => {
     if (typeof activeSnapshot?.earnedThisMonth === 'number') return activeSnapshot.earnedThisMonth;
     const ym = new Date().toISOString().slice(0, 7);
     return freelancerOrderRows
       .filter(o => {
-        if (o.status !== 'completed') return false;
         const compMonth = String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 7);
         const crtMonth = String(o.createdAt || '').slice(0, 7);
         return compMonth === ym || crtMonth === ym;
@@ -468,16 +514,14 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
 
   const earnedToDate = useMemo(() => {
     if (typeof activeSnapshot?.earnedToDate === 'number') return activeSnapshot.earnedToDate;
-    return freelancerOrderRows
-      .filter(o => o.status === 'completed')
-      .reduce((sum, o) => sum + resolveRowNetEarnings(o), 0);
+    return freelancerOrderRows.reduce((sum, o) => sum + resolveRowNetEarnings(o), 0);
   }, [activeSnapshot?.earnedToDate, freelancerOrderRows, resolveRowNetEarnings]);
 
   const earnedPastTwoMonths = useMemo(() => {
     if (typeof activeSnapshot?.earnedPastTwoMonths === 'number') return activeSnapshot.earnedPastTwoMonths;
     const twoMonthsAgoDate = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
     return freelancerOrderRows
-      .filter(o => o.status === 'completed' && String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 10) >= twoMonthsAgoDate)
+      .filter(o => String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 10) >= twoMonthsAgoDate)
       .reduce((sum, o) => sum + resolveRowNetEarnings(o), 0);
   }, [activeSnapshot?.earnedPastTwoMonths, freelancerOrderRows, resolveRowNetEarnings]);
 
@@ -543,9 +587,10 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
   // Submit Escrow Deposit / Request Deposit / Wallet Deposit
   const handleSubmitEscrowModal = async (e: React.FormEvent) => {
     e.preventDefault();
-    const amt = parseFloat(escrowDepositAmount);
-    if (isNaN(amt) || amt <= 0) {
-      setEscrowModalError('Please enter a valid USD amount greater than $0.00.');
+    const rawTrimmed = String(escrowDepositAmount ?? '').trim();
+    const amt = Number(rawTrimmed);
+    if (!rawTrimmed || !Number.isFinite(amt) || amt <= 0 || Math.abs(Math.round(amt * 100) - amt * 100) > 1e-6) {
+      setEscrowModalError('Please enter a valid USD amount greater than $0.00 with at most 2 decimal places.');
       return;
     }
 
@@ -841,18 +886,49 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
     }
   };
 
+  // Withdrawal validation helper
+  const validateWithdrawalInput = useCallback(
+    (rawStr: string): { valid: true; amount: number } | { valid: false; error: string } => {
+      const trimmed = String(rawStr ?? '').trim();
+      const amt = Number(trimmed);
+      if (!trimmed || !Number.isFinite(amt) || amt <= 0) {
+        return { valid: false, error: 'Please enter a valid withdrawal amount greater than $0.00.' };
+      }
+      if (Math.abs(Math.round(amt * 100) - amt * 100) > 1e-6) {
+        return { valid: false, error: 'Withdrawal amount can have at most 2 decimal places.' };
+      }
+      if (amt < effectiveMinWithdrawal) {
+        return {
+          valid: false,
+          error: `Minimum payout withdrawal amount is ${formatUsd(effectiveMinWithdrawal)} USD.`
+        };
+      }
+      if (amt > effectiveMaxWithdrawalPerTx) {
+        return {
+          valid: false,
+          error: `Maximum withdrawal per transaction is ${formatUsd(effectiveMaxWithdrawalPerTx)} USD.`
+        };
+      }
+      if (amt > availableBalance) {
+        return {
+          valid: false,
+          error: `Withdrawal amount cannot exceed your available balance (${formatUsd(availableBalance)}).`
+        };
+      }
+      return { valid: true, amount: Math.round(amt * 100) / 100 };
+    },
+    [effectiveMinWithdrawal, effectiveMaxWithdrawalPerTx, availableBalance]
+  );
+
   // Withdrawal flow
   const handleInitiateWithdraw = async (e: React.FormEvent) => {
     e.preventDefault();
-    const amt = parseFloat(withdrawAmount);
-    if (isNaN(amt) || amt <= 0) {
-      setWithdrawError('Please enter a valid withdrawal amount.');
+    const check = validateWithdrawalInput(withdrawAmount);
+    if (!check.valid) {
+      setWithdrawError(check.error);
       return;
     }
-    if (amt > availableBalance) {
-      setWithdrawError(`Withdrawal amount cannot exceed your available balance (${formatUsd(availableBalance)}).`);
-      return;
-    }
+    const amt = check.amount;
 
     setIsWithdrawing(true);
     setWithdrawError(null);
@@ -863,7 +939,8 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
       };
       const res = await fetch('/api/auth/withdrawal/request-code', {
         method: 'POST',
-        headers
+        headers,
+        body: JSON.stringify({ amount: amt })
       });
       if (res.ok) {
         const data = await res.json();
@@ -874,6 +951,10 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
         setShowCodeModal(true);
         setVerificationCode('');
       } else {
+        const errPayload = await res.json().catch(() => ({}));
+        if (res.status === 400 || res.status === 403 || res.status === 429) {
+          throw new Error(errPayload.error || 'Failed to initiate withdrawal.');
+        }
         // Fallback to direct payout endpoint if verification code route isn't required for demo session
         const directRes = await fetch('/api/payments/withdraw', {
           method: 'POST',
@@ -908,7 +989,13 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
       return;
     }
 
-    const amt = parseFloat(withdrawAmount);
+    const check = validateWithdrawalInput(withdrawAmount);
+    if (!check.valid) {
+      setWithdrawError(check.error);
+      return;
+    }
+    const amt = check.amount;
+
     setIsWithdrawing(true);
     setWithdrawError(null);
 
@@ -1148,24 +1235,68 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
     });
   }, [transactions, statementPeriod]);
 
-  // Calculator breakdown
+  // Calculator breakdown using authoritative shared integer-cent fee engine
   const calculatorResult = useMemo(() => {
-    const raw = parseFloat(calcInputAmount);
-    const val = Number.isFinite(raw) && raw > 0 ? raw : 0;
-    const commRate = Math.max(0, Math.min(100, effectivePlatformFee)) / 100;
-    const gross = calcMode === 'gross_to_net' ? val : (1 - commRate > 0 ? val / (1 - commRate) : val);
-    const commission = Number((gross * commRate).toFixed(2));
-    const freelancerNet = Number((gross - commission).toFixed(2));
-    const buyerFee = Number((gross * (effectiveClientServiceFee / 100)).toFixed(2));
-    const smallFee = gross > 0 && gross < effectiveSmallOrderThreshold ? effectiveSmallOrderFee : 0;
-    const buyerTotal = Number((gross + buyerFee + smallFee).toFixed(2));
+    const raw = Number(calcInputAmount);
+    if (!Number.isFinite(raw) || raw <= 0) {
+      return {
+        gross: 0,
+        commission: 0,
+        freelancerNet: 0,
+        buyerFee: 0,
+        smallFee: 0,
+        buyerTotal: 0
+      };
+    }
+
+    const clampedInput = Math.min(raw, MAX_ORDER_AMOUNT);
+    const feeCfg = {
+      commissionPercent: effectivePlatformFee,
+      buyerFeePercent: effectiveClientServiceFee,
+      smallOrderFee: effectiveSmallOrderFee,
+      smallOrderThreshold: effectiveSmallOrderThreshold
+    };
+
+    let solvedGross = Math.round(clampedInput * 100) / 100;
+    if (calcMode === 'net_to_gross') {
+      const targetNetCents = Math.round(clampedInput * 100);
+      const commBps = Math.round(Math.max(0, Math.min(100, effectivePlatformFee)) * 100);
+      const netBps = 10000 - commBps;
+      if (netBps <= 0) {
+        solvedGross = Math.min(MAX_ORDER_AMOUNT, targetNetCents / 100);
+      } else {
+        const approxGrossCents = Math.floor((targetNetCents * 10000) / netBps);
+        let bestCents = Math.max(1, approxGrossCents);
+        for (let cand = Math.max(1, approxGrossCents - 5); cand <= approxGrossCents + 5; cand++) {
+          const candComm = Math.round((cand * commBps) / 10000);
+          if (cand - candComm >= targetNetCents) {
+            bestCents = cand;
+            break;
+          }
+        }
+        solvedGross = Math.min(MAX_ORDER_AMOUNT, bestCents / 100);
+      }
+    }
+
+    if (solvedGross <= 0) {
+      return {
+        gross: 0,
+        commission: 0,
+        freelancerNet: 0,
+        buyerFee: 0,
+        smallFee: 0,
+        buyerTotal: 0
+      };
+    }
+
+    const quote = calculateOrderFees(solvedGross, feeCfg);
     return {
-      gross: Number(gross.toFixed(2)),
-      commission,
-      freelancerNet,
-      buyerFee,
-      smallFee,
-      buyerTotal
+      gross: quote.gigPrice,
+      commission: quote.platformCommission,
+      freelancerNet: quote.freelancerNet,
+      buyerFee: quote.serviceFee,
+      smallFee: quote.smallOrderFee,
+      buyerTotal: quote.clientTotal
     };
   }, [calcInputAmount, calcMode, effectivePlatformFee, effectiveClientServiceFee, effectiveSmallOrderThreshold, effectiveSmallOrderFee]);
 
@@ -1505,7 +1636,8 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                         type="button"
                         onClick={() => {
                           setWithdrawError(null);
-                          setWithdrawAmount(availableBalance > 0 ? String(availableBalance.toFixed(2)) : '');
+                          const defaultWithdraw = Math.min(availableBalance, effectiveMaxWithdrawalPerTx);
+                          setWithdrawAmount(defaultWithdraw >= effectiveMinWithdrawal ? String(defaultWithdraw.toFixed(2)) : '');
                           setShowWithdrawModal(true);
                         }}
                         className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl transition cursor-pointer flex items-center gap-1.5 shadow-xs"
@@ -2489,8 +2621,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                   <input
                     type="number"
                     min="1"
-                    max="5000"
-                    step="any"
+                    step="0.01"
                     value={escrowDepositAmount}
                     onChange={e => setEscrowDepositAmount(e.target.value)}
                     placeholder="e.g. 50.00"
@@ -2749,7 +2880,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                 <input
                   type="number"
                   min="1"
-                  step="any"
+                  step="0.01"
                   value={calcInputAmount}
                   onChange={e => setCalcInputAmount(e.target.value)}
                   className="w-full pl-8 pr-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-base font-bold text-slate-900"
@@ -2763,16 +2894,26 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                 <span className="font-bold text-slate-900">{formatUsd(calculatorResult.gross)}</span>
               </div>
               <div className="flex items-center justify-between text-slate-600">
-                <span>Service Fee ({effectivePlatformFee}%)</span>
+                <span>Platform Commission ({effectivePlatformFee}%)</span>
                 <span className="font-semibold text-rose-600">-{formatUsd(calculatorResult.commission)}</span>
               </div>
               <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-sm">
                 <span className="font-bold text-slate-900">Your Net USD Earnings</span>
                 <span className="font-extrabold text-emerald-600">{formatUsd(calculatorResult.freelancerNet)}</span>
               </div>
-              <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
-                <span>Buyer Checkout Total (incl. processing fee)</span>
-                <span className="font-semibold text-slate-700">{formatUsd(calculatorResult.buyerTotal)}</span>
+              <div className="pt-2 border-t border-slate-200 space-y-1.5 text-[11px] text-slate-500">
+                <div className="flex items-center justify-between">
+                  <span>Buyer Service Fee ({effectiveClientServiceFee}%)</span>
+                  <span className="font-medium text-slate-700">+{formatUsd(calculatorResult.buyerFee)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span>Small-Order Fee (&lt; {formatUsd(effectiveSmallOrderThreshold)})</span>
+                  <span className="font-medium text-slate-700">+{formatUsd(calculatorResult.smallFee)}</span>
+                </div>
+                <div className="pt-1 border-t border-slate-200/70 flex items-center justify-between text-xs text-slate-700">
+                  <span className="font-semibold">Buyer Checkout Total</span>
+                  <span className="font-bold text-slate-900">{formatUsd(calculatorResult.buyerTotal)}</span>
+                </div>
               </div>
             </div>
 
@@ -2814,16 +2955,21 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
 
             <form onSubmit={handleInitiateWithdraw} className="space-y-4">
               <div>
-                <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Withdrawal Amount ($ USD)
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                    Withdrawal Amount ($ USD)
+                  </label>
+                  <span className="text-[10px] font-medium text-slate-500">
+                    Min: {formatUsd(effectiveMinWithdrawal)} • Max: {formatUsd(effectiveMaxWithdrawalPerTx)}
+                  </span>
+                </div>
                 <div className="relative">
                   <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
                   <input
                     type="number"
-                    min="1"
-                    max={availableBalance || 100000}
-                    step="any"
+                    min={effectiveMinWithdrawal}
+                    max={Math.max(effectiveMinWithdrawal, Math.min(availableBalance || effectiveMaxWithdrawalPerTx, effectiveMaxWithdrawalPerTx))}
+                    step="0.01"
                     required
                     value={withdrawAmount}
                     onChange={e => setWithdrawAmount(e.target.value)}

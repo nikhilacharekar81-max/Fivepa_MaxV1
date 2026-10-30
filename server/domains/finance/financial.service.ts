@@ -1709,8 +1709,12 @@ export class FinancialTransactionService {
         throw new Error('Only freelancers can request payouts.');
       }
 
+      if (!Number.isFinite(params.amount) || params.amount <= 0 || Math.abs(Math.round(params.amount * 100) - params.amount * 100) > 1e-6) {
+        throw new Error('Please enter a valid withdrawal amount greater than $0.00 with at most 2 decimal places.');
+      }
       const { siteSettings } = await import('../admin/siteSettings.js');
-      const walletConfig = siteSettings.getSettings().wallets;
+      const liveSettings = siteSettings.getSettings();
+      const walletConfig = liveSettings.wallets;
       if (walletConfig.allowedPayoutMethods) {
         const methodsObj = walletConfig.allowedPayoutMethods as any;
         if (typeof methodsObj === 'object' && !Array.isArray(methodsObj)) {
@@ -1723,11 +1727,15 @@ export class FinancialTransactionService {
           }
         }
       }
-      const minPayout = walletConfig.minimumWithdrawalAmount ?? 10.00;
+      const minPayout = Number(walletConfig.minimumWithdrawalAmount ?? 3.00);
       if (params.amount < minPayout) {
         throw new Error(`Minimum payout withdrawal amount is $${minPayout.toFixed(2)}.`);
       }
-      const dailyLimit = walletConfig.dailyWithdrawalLimit ?? 10000;
+      const maxPerTx = Number(walletConfig.maximumWithdrawalPerTransaction ?? 5000.00);
+      if (params.amount > maxPerTx) {
+        throw new Error(`Maximum withdrawal per transaction is $${maxPerTx.toFixed(2)}.`);
+      }
+      const dailyLimit = Number(walletConfig.dailyWithdrawalLimit ?? 10000);
       const dailyRes = await client.query(
         `SELECT COALESCE(SUM(amount), 0) as total_today FROM payouts 
          WHERE freelancer_id = $1 AND status IN ('pending', 'approved', 'processed') AND NULLIF(created_at::text, '')::timestamptz >= NOW() - INTERVAL '24 hours'`,

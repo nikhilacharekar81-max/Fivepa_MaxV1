@@ -12,7 +12,7 @@ import { EditGigModal } from '../gigs/EditGigModal';
 import { DeleteGigModal } from '../gigs/DeleteGigModal';
 import { ViewingGigModal } from '../gigs/ViewingGigModal';
 import { getGigUrl } from '../../utils/slugify';
-import { getAuthToken } from '../../utils/authToken';
+import { getAuthToken, setAuthToken, requestDemoSession } from '../../utils/authToken';
 import { getDeviceId } from '../../utils/deviceId';
 import { DEFAULT_AVATAR } from '../../constants';
 import { formatActivityDate, toNumericRef } from '../../utils/formatters';
@@ -67,7 +67,10 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
   // Modals state
   const [viewingGig, setViewingGig] = useState<Gig | null>(null);
   const [editingGig, setEditingGig] = useState<Gig | null>(null);
+  const [editGigError, setEditGigError] = useState<string | null>(null);
+  const [isSavingGigEdit, setIsSavingGigEdit] = useState(false);
   const [gigToDelete, setGigToDelete] = useState<{ id: string; title?: string } | null>(null);
+  const [financialSnapshot, setFinancialSnapshot] = useState<any | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
@@ -75,17 +78,55 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     setTimeout(() => setToastMessage(null), 3500);
   };
 
+  const ensureAuthHeaders = useCallback(async (): Promise<Record<string, string>> => {
+    let token = getAuthToken();
+    if (currentUser) {
+      let tokenUserId: string | null = null;
+      let tokenUserRole: string | null = null;
+      if (token) {
+        try {
+          const [b64] = token.split('.');
+          if (b64 && typeof atob === 'function') {
+            const payload = JSON.parse(atob(b64.replace(/-/g, '+').replace(/_/g, '/')));
+            if (payload?.id) tokenUserId = payload.id;
+            if (payload?.role) tokenUserRole = payload.role;
+          }
+        } catch {}
+      }
+      const isTokenAdmin = Boolean(tokenUserRole && ['admin', 'super_admin', 'support'].includes(tokenUserRole));
+      const isPrivileged = ['admin', 'super_admin', 'support'].includes(currentUser.role || '');
+      if ((!token || (!isTokenAdmin && tokenUserId !== currentUser.id)) && !isPrivileged) {
+        const session = await requestDemoSession(currentUser.id);
+        if (session?.token) {
+          token = session.token;
+          setAuthToken(token);
+        }
+      }
+    }
+    return {
+      'x-device-id': getDeviceId(),
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    };
+  }, [currentUser]);
+
   const fetchMyGigs = useCallback(async () => {
     if (!currentUser) return;
     setLoading(true);
     try {
-      const token = getAuthToken();
-      const headers: Record<string, string> = {
-        'x-device-id': getDeviceId(),
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
-      };
+      const headers = await ensureAuthHeaders();
 
-      const res = await fetch('/api/my/gigs', { headers });
+      const [res, snapRes] = await Promise.all([
+        fetch('/api/my/gigs', { headers }),
+        fetch(`/api/payments/user/${currentUser.id}`, { headers })
+      ]);
+
+      if (snapRes.ok) {
+        const snapData = await snapRes.json().catch(() => null);
+        if (snapData && typeof snapData === 'object') {
+          setFinancialSnapshot(snapData);
+        }
+      }
+
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
@@ -101,7 +142,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     const userGigs = allGigs.filter(g => g.freelancerId === currentUser.id);
     setMyGigs(userGigs);
     setLoading(false);
-  }, [currentUser, allGigs]);
+  }, [currentUser, allGigs, ensureAuthHeaders]);
 
   useEffect(() => {
     fetchMyGigs();
@@ -132,14 +173,38 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     });
   }, [mySellerOrders, myGigIds]);
 
+  const resolveSellerOrderFinancial = useCallback(
+    (ord?: Order) => {
+      if (!ord) {
+        return { freelancerNetEarned: 0, inEscrow: 0, releasedGross: 0 };
+      }
+      const fromMap = financialSnapshot?.orderFinancials?.[ord.id];
+      const fromList = Array.isArray(financialSnapshot?.freelancerOrdersSummary)
+        ? financialSnapshot.freelancerOrdersSummary.find((r: any) => r.id === ord.id)
+        : null;
+      const fin = fromMap || fromList || (ord as any);
+      return {
+        freelancerNetEarned:
+          typeof fin?.freelancerNetEarned === 'number' && Number.isFinite(fin.freelancerNetEarned)
+            ? Math.max(0, fin.freelancerNetEarned)
+            : 0,
+        inEscrow:
+          typeof fin?.inEscrow === 'number' && Number.isFinite(fin.inEscrow)
+            ? Math.max(0, fin.inEscrow)
+            : 0,
+        releasedGross:
+          typeof fin?.releasedGross === 'number' && Number.isFinite(fin.releasedGross)
+            ? Math.max(0, fin.releasedGross)
+            : 0
+      };
+    },
+    [financialSnapshot]
+  );
+
   const myProjectOrders = useMemo(() => {
-    const explicitProjectOrders = mySellerOrders.filter(
+    return mySellerOrders.filter(
       o => o.orderType === 'project' || o.type === 'project' || Boolean(o.projectId) || Boolean(o.proposalId) || !o.gigId
     );
-    if (explicitProjectOrders.length > 0) {
-      return explicitProjectOrders;
-    }
-    return mySellerOrders;
   }, [mySellerOrders]);
 
   // Per-gig sold counts and last activity
@@ -206,12 +271,24 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
 
       const buyer = users.find(u => u.id === order.buyerId);
       const isCompleted = order.status === 'completed';
-      const orderAmount =
+      const fin = resolveSellerOrderFinancial(order);
+      const orderContractAmount =
         Number(order.amount) ||
         linkedProposal?.bidAmount ||
         linkedProject?.budget ||
         linkedProject?.budgetMax ||
         0;
+
+      const displayAmount = isCompleted
+        ? fin.freelancerNetEarned
+        : fin.inEscrow > 0
+          ? fin.inEscrow
+          : orderContractAmount;
+      const amountLabel = isCompleted
+        ? 'EARNINGS'
+        : fin.inEscrow > 0
+          ? 'IN ESCROW'
+          : 'CONTRACT VALUE';
 
       items.push({
         id: `order-${order.id}`,
@@ -219,8 +296,9 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
         buyerName: buyer?.name || linkedProject?.buyerName || order.buyerUsername || 'Client',
         buyerAvatar: buyer?.avatar || linkedProject?.buyerAvatar || DEFAULT_AVATAR,
         awardedDate: formatActivityDate(order.createdAt || linkedProject?.createdAt),
-        proposalAmount: linkedProposal?.bidAmount || orderAmount,
-        earningsAmount: orderAmount,
+        proposalAmount: linkedProposal?.bidAmount || orderContractAmount,
+        earningsAmount: displayAmount,
+        amountLabel,
         location: linkedProject?.location || 'Remote',
         refNumber: toNumericRef(order.projectId || order.id, index),
         statusCategory: isCompleted ? 'completed' : 'in_progress',
@@ -246,19 +324,33 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
         o =>
           o.id === proposal.workstreamOrderId ||
           o.projectId === proposal.projectId ||
-          o.proposalId === proposal.id ||
-          (linkedProject && o.buyerId === linkedProject.buyerId)
+          o.proposalId === proposal.id
       );
 
       const isAccepted =
         proposal.status === 'accepted' ||
+        Boolean(matchingOrder) ||
         linkedProject?.status === 'in_progress' ||
         linkedProject?.status === 'in-progress' ||
         linkedProject?.status === 'completed';
-      const isCompleted =
-        linkedProject?.status === 'completed' || matchingOrder?.status === 'completed';
+      const isCompleted = matchingOrder?.status === 'completed';
 
       const bidAmount = Number(proposal.bidAmount) || linkedProject?.budget || linkedProject?.budgetMax || 0;
+      const fin = resolveSellerOrderFinancial(matchingOrder);
+      const contractAmount = Number(matchingOrder?.amount ?? bidAmount);
+
+      let displayAmount = 0;
+      let amountLabel = 'PROPOSAL';
+      if (isCompleted) {
+        displayAmount = fin.freelancerNetEarned;
+        amountLabel = 'EARNINGS';
+      } else if (isAccepted) {
+        displayAmount = fin.inEscrow > 0 ? fin.inEscrow : contractAmount;
+        amountLabel = fin.inEscrow > 0 ? 'IN ESCROW' : 'CONTRACT VALUE';
+      } else {
+        displayAmount = bidAmount;
+        amountLabel = 'PROPOSAL';
+      }
 
       items.push({
         id: `proposal-${proposal.id}`,
@@ -267,7 +359,8 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
         buyerAvatar: buyer?.avatar || linkedProject?.buyerAvatar || DEFAULT_AVATAR,
         awardedDate: formatActivityDate(proposal.createdAt || linkedProject?.createdAt),
         proposalAmount: bidAmount,
-        earningsAmount: isCompleted || isAccepted ? Number(matchingOrder?.amount ?? bidAmount) : 0,
+        earningsAmount: displayAmount,
+        amountLabel,
         location: linkedProject?.location || 'Remote',
         refNumber: toNumericRef(proposal.projectId || proposal.id, idx + 100),
         statusCategory: isCompleted ? 'completed' : isAccepted ? 'in_progress' : 'pending_proposals',
@@ -278,7 +371,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     });
 
     return items;
-  }, [currentUser, myProjectOrders, mySellerOrders, projects, proposals, users]);
+  }, [currentUser, myProjectOrders, mySellerOrders, projects, proposals, users, resolveSellerOrderFinancial]);
 
   const filteredProjectItems = useMemo(() => {
     return allProjectItems.filter(item => {
@@ -287,15 +380,23 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     });
   }, [allProjectItems, projectSubTab]);
 
-  // Separate Earnings & Summary Stats for Gigs vs Projects
+  // Separate Earnings & Summary Stats for Gigs vs Projects using authoritative clearing records
   const gigStats = useMemo(() => {
     const nonDeletedGigs = myGigs.filter(g => g.status !== 'deleted');
     const postedCount = nonDeletedGigs.length;
     const activeCount = nonDeletedGigs.filter(g => g.status === 'active').length;
     const soldCount = myGigOrders.filter(isOrderCompletedOrActive).length;
-    const earnings = myGigOrders
-      .filter(isOrderCompletedOrActive)
-      .reduce((sum, o) => sum + (Number(o.amount) || 0), 0);
+    const earnings =
+      typeof financialSnapshot?.gigEarnedToDate === 'number'
+        ? financialSnapshot.gigEarnedToDate
+        : Number(
+            (
+              myGigOrders.reduce(
+                (sumCents, o) => sumCents + Math.round(resolveSellerOrderFinancial(o).freelancerNetEarned * 100),
+                0
+              ) / 100
+            ).toFixed(2)
+          );
 
     return {
       postedCount,
@@ -303,7 +404,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       soldCount,
       earnings
     };
-  }, [myGigs, myGigOrders]);
+  }, [myGigs, myGigOrders, financialSnapshot?.gigEarnedToDate, resolveSellerOrderFinancial]);
 
   const projectStats = useMemo(() => {
     const pendingProposalsCount = allProjectItems.filter(i => i.statusCategory === 'pending_proposals').length;
@@ -311,9 +412,16 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       i => i.statusCategory === 'in_progress' || i.statusCategory === 'completed'
     ).length;
     const inProgressCount = allProjectItems.filter(i => i.statusCategory === 'in_progress').length;
-    const earnings = allProjectItems
-      .filter(i => i.statusCategory === 'completed' || i.statusCategory === 'in_progress')
-      .reduce((sum, i) => sum + (Number(i.earningsAmount) || 0), 0);
+    const earnings =
+      typeof financialSnapshot?.projectEarnedToDate === 'number'
+        ? financialSnapshot.projectEarnedToDate
+        : Number(
+            (
+              allProjectItems
+                .filter(i => i.statusCategory === 'completed')
+                .reduce((sumCents, i) => sumCents + Math.round(Number(i.earningsAmount || 0) * 100), 0) / 100
+            ).toFixed(2)
+          );
 
     return {
       pendingProposalsCount,
@@ -321,7 +429,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       inProgressCount,
       earnings
     };
-  }, [allProjectItems]);
+  }, [allProjectItems, financialSnapshot?.projectEarnedToDate]);
 
   if (!currentUser) {
     return (
@@ -424,13 +532,15 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       showToast('Deleted gigs cannot be edited.');
       return;
     }
+    setEditGigError(null);
     setEditingGig(gig);
     setActiveDropdownId(null);
   };
 
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingGig) return;
+    if (!editingGig || isSavingGigEdit) return;
+    setEditGigError(null);
 
     const form = e.currentTarget as HTMLFormElement;
     const formData = new FormData(form);
@@ -438,10 +548,39 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     const title = String(formData.get('title') || '').trim();
     const category = String(formData.get('category') || editingGig.category);
     const subcategory = String(formData.get('subcategory') || '');
-    const price = Number(formData.get('price')) || editingGig.price;
-    const deliveryDays = Number(formData.get('deliveryDays')) || editingGig.deliveryDays;
+    const rawPriceStr = String(formData.get('price') ?? '').trim();
+    const parsedPrice = Number(rawPriceStr);
+    const rawDeliveryDaysStr = String(formData.get('deliveryDays') ?? '').trim();
+    const deliveryDays = Number(rawDeliveryDaysStr);
     const description = String(formData.get('description') || '').trim();
     const featured = formData.get('featured') === 'on';
+
+    if (!title) {
+      setEditGigError('Gig title is required.');
+      return;
+    }
+
+    if (
+      !rawPriceStr ||
+      !Number.isFinite(parsedPrice) ||
+      parsedPrice <= 0 ||
+      Math.abs(Math.round(parsedPrice * 100) - parsedPrice * 100) > 1e-6
+    ) {
+      setEditGigError('Please enter a valid price with at most 2 decimal places.');
+      return;
+    }
+
+    if (parsedPrice < 5 || parsedPrice > 10000) {
+      setEditGigError('Gig price must be between $5.00 and $10,000.00 USD.');
+      return;
+    }
+
+    if (!rawDeliveryDaysStr || !Number.isInteger(deliveryDays) || deliveryDays < 1 || deliveryDays > 365) {
+      setEditGigError('Delivery time must be a whole number of days between 1 and 365.');
+      return;
+    }
+
+    const price = Math.round(parsedPrice * 100) / 100;
 
     const payload = {
       title,
@@ -453,18 +592,12 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       featured
     };
 
-    setMyGigs(prev =>
-      prev.map(g => (g.id === editingGig.id ? { ...g, ...payload } : g))
-    );
-    setEditingGig(null);
-    showToast('Gig details saved successfully.');
-
+    setIsSavingGigEdit(true);
     try {
-      const token = getAuthToken();
+      const authHeaders = await ensureAuthHeaders();
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
-        'x-device-id': getDeviceId(),
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
+        ...authHeaders
       };
 
       const res = await fetch(`/api/gigs/${editingGig.id}`, {
@@ -475,14 +608,28 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        showToast(err.error || 'Failed to save edits on server.');
-        await fetchMyGigs();
-      } else if (onRefresh) {
+        const errMsg = err.error || 'Failed to save edits on server.';
+        setEditGigError(errMsg);
+        showToast(errMsg);
+        return;
+      }
+
+      const savedGig = await res.json().catch(() => null);
+      setMyGigs(prev =>
+        prev.map(g => (g.id === editingGig.id ? { ...g, ...payload, ...(savedGig && typeof savedGig === 'object' ? savedGig : {}) } : g))
+      );
+      setEditingGig(null);
+      setEditGigError(null);
+      showToast('Gig details saved successfully.');
+      if (onRefresh) {
         onRefresh();
       }
     } catch (e) {
       console.warn('Network error updating gig:', e);
-      await fetchMyGigs();
+      setEditGigError('Network error while saving Gig details. Please try again.');
+      showToast('Network error while saving Gig details.');
+    } finally {
+      setIsSavingGigEdit(false);
     }
   };
 
@@ -755,10 +902,18 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       <EditGigModal
         editingGig={editingGig}
         categories={categories}
-        onClose={() => setEditingGig(null)}
+        errorMessage={editGigError}
+        isSaving={isSavingGigEdit}
+        minPrice={5}
+        maxPrice={10000}
+        onClose={() => {
+          setEditingGig(null);
+          setEditGigError(null);
+        }}
         onSave={handleSaveEdit}
         onDelete={id => {
           setEditingGig(null);
+          setEditGigError(null);
           handleOpenDelete(id, editingGig?.title);
         }}
       />

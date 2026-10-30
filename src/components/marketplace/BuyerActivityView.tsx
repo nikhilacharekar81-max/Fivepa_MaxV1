@@ -14,7 +14,7 @@ import { getAuthToken, setAuthToken, requestDemoSession } from '../../utils/auth
 import { getDeviceId } from '../../utils/deviceId';
 import { DEFAULT_AVATAR, DEFAULT_GIG_IMAGE } from '../../constants';
 import { getGigUrl } from '../../utils/slugify';
-import { formatActivityDate, toNumericRef, formatCompactAmount } from '../../utils/formatters';
+import { formatActivityDate, toNumericRef, formatCurrency } from '../../utils/formatters';
 
 interface BuyerActivityViewProps {
   projects: Project[];
@@ -48,6 +48,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
   const [gigSubTab, setGigSubTab] = useState<GigSubTab>('all');
   const [activeDropdownId, setActiveDropdownId] = useState<string | null>(null);
   const [fetchedOrders, setFetchedOrders] = useState<Order[]>([]);
+  const [financialSnapshot, setFinancialSnapshot] = useState<any | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
@@ -87,19 +88,31 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
         Authorization: `Bearer ${tok}`
       });
 
-      let res = await fetch('/api/orders', { headers: buildHeaders(token) });
-      if (res.status === 401 && !isPrivileged) {
+      let [res, snapRes] = await Promise.all([
+        fetch('/api/orders', { headers: buildHeaders(token) }),
+        fetch(`/api/payments/user/${currentUser.id}`, { headers: buildHeaders(token) })
+      ]);
+      if ((res.status === 401 || snapRes.status === 401) && !isPrivileged) {
         const recovered = await requestDemoSession(currentUser.id);
         if (recovered?.token) {
           token = recovered.token;
           setAuthToken(token);
-          res = await fetch('/api/orders', { headers: buildHeaders(token) });
+          [res, snapRes] = await Promise.all([
+            fetch('/api/orders', { headers: buildHeaders(token) }),
+            fetch(`/api/payments/user/${currentUser.id}`, { headers: buildHeaders(token) })
+          ]);
         }
       }
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data)) {
           setFetchedOrders(data);
+        }
+      }
+      if (snapRes.ok) {
+        const snapData = await snapRes.json();
+        if (snapData && typeof snapData === 'object') {
+          setFinancialSnapshot(snapData);
         }
       }
     } catch (e) {
@@ -313,6 +326,83 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
     });
   }, [myGigOrders, gigSubTab]);
 
+  const resolveOrderFinancial = useCallback(
+    (ord: Order) => {
+      const fromMap = financialSnapshot?.orderFinancials?.[ord.id];
+      const fromList = Array.isArray(financialSnapshot?.buyerOrdersSummary)
+        ? financialSnapshot.buyerOrdersSummary.find((r: any) => r.id === ord.id)
+        : null;
+      const fin = fromMap || fromList || (ord as any);
+      return {
+        inEscrow: Number(fin?.inEscrow ?? 0),
+        releasedGross: Number(fin?.releasedGross ?? 0),
+        refundedGross: Number(fin?.refundedGross ?? 0),
+        buyerGrossFunded: Number(fin?.buyerGrossFunded ?? 0),
+        buyerRefundedAmount: Number(fin?.buyerRefundedAmount ?? 0),
+        netPaidByBuyer: Number(fin?.netPaidByBuyer ?? 0),
+        feesRefunded: Boolean(fin?.feesRefunded),
+        escrowStatus: String(fin?.escrowStatus || 'not_funded'),
+        isDisputed: Boolean(fin?.isDisputed || ord.status === 'disputed')
+      };
+    },
+    [financialSnapshot]
+  );
+
+  const resolveBuyerOrderCardFinancialDisplay = useCallback(
+    (ord: Order): { label: string; amount: number } => {
+      const fin = resolveOrderFinancial(ord);
+      const st = (ord.status || '').toLowerCase();
+      const refundedAmt = fin.buyerRefundedAmount > 0 ? fin.buyerRefundedAmount : fin.refundedGross;
+
+      if (st === 'payment_pending' || st === 'pending') {
+        if (fin.inEscrow <= 0 && fin.releasedGross <= 0 && refundedAmt <= 0) {
+          return { label: 'AWAITING PAYMENT', amount: Number(ord.amount || 0) };
+        }
+      }
+
+      if (fin.isDisputed || st === 'disputed') {
+        return { label: 'DISPUTED', amount: fin.inEscrow };
+      }
+
+      if (
+        fin.escrowStatus === 'partially_refunded' ||
+        (fin.refundedGross > 0 && (fin.inEscrow > 0 || fin.releasedGross > 0))
+      ) {
+        return { label: 'PARTIALLY REFUNDED', amount: refundedAmt };
+      }
+
+      if (refundedAmt > 0 || fin.refundedGross > 0 || fin.escrowStatus === 'refunded') {
+        return { label: 'REFUNDED', amount: refundedAmt > 0 ? refundedAmt : fin.refundedGross };
+      }
+
+      if (st === 'completed' || fin.escrowStatus === 'released' || (fin.releasedGross > 0 && fin.inEscrow <= 0)) {
+        return { label: 'RELEASED', amount: fin.releasedGross };
+      }
+
+      if (
+        [
+          'funded_in_escrow',
+          'in_progress',
+          'work_in_progress',
+          'delivered',
+          'revision',
+          'revision_requested',
+          'draft_review'
+        ].includes(st) ||
+        fin.inEscrow > 0
+      ) {
+        return { label: 'ESCROW', amount: fin.inEscrow };
+      }
+
+      if (st === 'cancelled') {
+        return { label: 'CANCELLED', amount: 0 };
+      }
+
+      return { label: 'AWAITING PAYMENT', amount: Number(ord.amount || 0) };
+    },
+    [resolveOrderFinancial]
+  );
+
   // Sidebar Statistics matching PeoplePerHour Buyer Activity Sidebar from user image exactly
   const summary = useMemo(() => {
     const projectsIPosted = myProjects.length;
@@ -325,9 +415,17 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
       liveProposalCount,
       myProjects.reduce((sum, p) => sum + (p.proposalsCount || 0), 0)
     );
-    const paidOut = myWorkstreams
-      .filter(o => o.status === 'completed')
-      .reduce((sum, o) => sum + Number(o.amount || 0), 0);
+    const paidOut =
+      typeof financialSnapshot?.buyerReleasedGrossTotal === 'number'
+        ? financialSnapshot.buyerReleasedGrossTotal
+        : Number(
+            (
+              myWorkstreams.reduce(
+                (sumCents, o) => sumCents + Math.round(resolveOrderFinancial(o).releasedGross * 100),
+                0
+              ) / 100
+            ).toFixed(2)
+          );
 
     return {
       projectsIPosted,
@@ -336,7 +434,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
       pendingProposals,
       paidOut
     };
-  }, [myProjects, myWorkstreams, myProjectIds, proposals]);
+  }, [myProjects, myWorkstreams, myProjectIds, proposals, financialSnapshot?.buyerReleasedGrossTotal, resolveOrderFinancial]);
 
   const gigSummary = useMemo(() => {
     const orderedCount = myGigOrders.length;
@@ -346,9 +444,16 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
       )
     ).length;
     const completedCount = myGigOrders.filter(o => o.status === 'completed').length;
-    const totalSpent = myGigOrders
-      .filter(o => o.status !== 'cancelled' && (o.status as string) !== 'refunded')
-      .reduce((sum, o) => sum + Number(o.amount || 0), 0);
+    const totalSpent =
+      typeof financialSnapshot?.paidToDate === 'number'
+        ? financialSnapshot.paidToDate
+        : Number(
+            (
+              myGigOrders
+                .filter(o => o.status !== 'payment_pending' && (o.status as string) !== 'pending')
+                .reduce((sumCents, o) => sumCents + Math.round(resolveOrderFinancial(o).netPaidByBuyer * 100), 0) / 100
+            ).toFixed(2)
+          );
 
     return {
       orderedCount,
@@ -356,7 +461,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
       completedCount,
       totalSpent
     };
-  }, [myGigOrders]);
+  }, [myGigOrders, financialSnapshot?.paidToDate, resolveOrderFinancial]);
 
   const projectSubTabs: { id: ProjectSubTab; label: string }[] = [
     { id: 'all', label: 'All projects' },
@@ -559,7 +664,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
                             Posted: <strong className="font-semibold text-slate-700">{item.dateValue}</strong>
                           </span>
                           <span>
-                            Budget: <strong className="font-bold text-slate-900">${item.amountValue.toLocaleString()}</strong>
+                            {item.amountLabel} <strong className="font-bold text-slate-900">{formatCurrency(item.amountValue)}</strong>
                           </span>
                           <span className="text-slate-400 font-medium">#{item.refNumber}</span>
                         </div>
@@ -685,7 +790,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
                           <span>
                             Price:{' '}
                             <strong className="font-bold text-slate-900">
-                              ${Number(ord.amount || 0).toLocaleString()}
+                              {formatCurrency(Number(ord.amount || 0))}
                             </strong>
                           </span>
 
@@ -701,14 +806,19 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
 
                     {/* Right: Amount Counter + Split Button with Small Dropdown at the End */}
                     <div className="flex sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto shrink-0 self-stretch sm:min-w-[175px] gap-2.5">
-                      <div className="text-left sm:text-right leading-none">
-                        <span className="block text-xl font-bold text-slate-900 tracking-tight">
-                          ${formatCompactAmount(Number(ord.amount || 0))}
-                        </span>
-                        <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">
-                          ESCROW
-                        </span>
-                      </div>
+                      {(() => {
+                        const cardFin = resolveBuyerOrderCardFinancialDisplay(ord);
+                        return (
+                          <div className="text-left sm:text-right leading-none">
+                            <span className="block text-xl font-bold text-slate-900 tracking-tight">
+                              {formatCurrency(cardFin.amount)}
+                            </span>
+                            <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">
+                              {cardFin.label}
+                            </span>
+                          </div>
+                        );
+                      })()}
 
                       {!isCancelled ? (
                         <div className="relative">
@@ -828,7 +938,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
                 <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
                   <span className="font-semibold text-slate-700">Paid Out</span>
                   <span className="font-bold text-emerald-600 text-base">
-                    ${summary.paidOut.toLocaleString()}
+                    {formatCurrency(summary.paidOut)}
                   </span>
                 </div>
               </div>
@@ -849,7 +959,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
                 <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
                   <span className="font-semibold text-slate-700">Total Escrow / Spent</span>
                   <span className="font-bold text-emerald-600 text-base">
-                    ${gigSummary.totalSpent.toLocaleString()}
+                    {formatCurrency(gigSummary.totalSpent)}
                   </span>
                 </div>
               </div>

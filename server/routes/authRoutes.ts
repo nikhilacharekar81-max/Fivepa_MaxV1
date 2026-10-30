@@ -729,6 +729,31 @@ authRouter.post('/withdrawal/request-code', requireAuth, async (req: Request, re
   const caller = authUserId ? await store.getUser(authUserId) : null;
   if (!caller || !caller.email) return res.status(400).json({ error: 'User email not found.' });
 
+  if (req.body?.amount !== undefined && req.body?.amount !== null && String(req.body.amount).trim() !== '') {
+    const numAmount = Number(req.body.amount);
+    if (!Number.isFinite(numAmount) || numAmount <= 0 || Math.abs(Math.round(numAmount * 100) - numAmount * 100) > 1e-6) {
+      return res.status(400).json({ error: 'Please enter a valid withdrawal amount greater than $0.00 with at most 2 decimal places.' });
+    }
+    const { siteSettings, DEFAULT_SITE_SETTINGS } = await import('../domains/admin/siteSettings.js');
+    const liveSettings = siteSettings.getSettings();
+    const walletConfig = liveSettings?.wallets || DEFAULT_SITE_SETTINGS.wallets;
+    const minPayout = Number(walletConfig?.minimumWithdrawalAmount ?? 3.00);
+    const maxPerTx = Number(walletConfig?.maximumWithdrawalPerTransaction ?? 5000.00);
+    if (numAmount < minPayout) {
+      return res.status(400).json({ error: `Minimum payout withdrawal amount is $${minPayout.toFixed(2)}.` });
+    }
+    if (numAmount > maxPerTx) {
+      return res.status(400).json({ error: `Maximum withdrawal per transaction is $${maxPerTx.toFixed(2)}.` });
+    }
+    if (isPostgresEnabled()) {
+      const wRes = await postgresStore.getPool().query('SELECT available_balance FROM wallets WHERE user_id = $1', [caller.id]);
+      const availBal = wRes.rows.length > 0 ? Number(wRes.rows[0].available_balance || 0) : Number(caller.walletBalance || 0);
+      if (numAmount > availBal) {
+        return res.status(400).json({ error: 'Insufficient available balance.' });
+      }
+    }
+  }
+
   const code = generate6DigitCode();
   const now = Date.now();
   const expiresAtMs = now + 30 * 60 * 1000;

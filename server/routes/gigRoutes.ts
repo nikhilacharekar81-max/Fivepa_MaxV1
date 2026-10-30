@@ -121,9 +121,12 @@ gigRouter.post('/gigs', requireAuth, requireActiveStatus, async (req: Request, r
   const activeSettings = siteSettings.getSettings();
 
   const gigPrice = Number(req.body.price);
-  if (!Number.isFinite(gigPrice)) return res.status(400).json({ error: 'Gig price must be a valid number.' });
-  const minGigPrice = activeSettings.marketplace.minimumGigPrice ?? 1;
-  const maxGigPrice = activeSettings.marketplace.maximumGigPrice ?? 10000;
+  if (!Number.isFinite(gigPrice) || gigPrice <= 0) return res.status(400).json({ error: 'Gig price must be a valid positive number.' });
+  if (Math.abs(Math.round(gigPrice * 100) - gigPrice * 100) > 1e-6) {
+    return res.status(400).json({ error: 'Gig price can have at most 2 decimal places.' });
+  }
+  const minGigPrice = Math.max(5, Number(activeSettings.marketplace.minimumGigPrice ?? 5));
+  const maxGigPrice = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
   if (gigPrice < minGigPrice) {
     return res.status(400).json({ error: `Gig price ($${gigPrice}) cannot be lower than the platform minimum of $${minGigPrice}.` });
   }
@@ -136,8 +139,11 @@ gigRouter.post('/gigs', requireAuth, requireActiveStatus, async (req: Request, r
     for (const tier of ['basic', 'standard', 'premium']) {
       if (req.body.packages[tier]) {
         const p = Number(req.body.packages[tier].price);
-        if (!Number.isFinite(p) || p < minGigPrice) {
-          return res.status(400).json({ error: `Package tier '${tier}' price ($${p}) must be a valid number >= $${minGigPrice}.` });
+        if (!Number.isFinite(p) || p < minGigPrice || p > maxGigPrice) {
+          return res.status(400).json({ error: `Package tier '${tier}' price ($${p}) must be a valid number between $${minGigPrice} and $${maxGigPrice}.` });
+        }
+        if (Math.abs(Math.round(p * 100) - p * 100) > 1e-6) {
+          return res.status(400).json({ error: `Package tier '${tier}' price can have at most 2 decimal places.` });
         }
       }
     }
@@ -146,8 +152,11 @@ gigRouter.post('/gigs', requireAuth, requireActiveStatus, async (req: Request, r
     for (const tier of req.body.tiers) {
       if (tier && tier.price !== undefined) {
         const p = Number(tier.price);
-        if (!Number.isFinite(p) || p < minGigPrice) {
-          return res.status(400).json({ error: `Package tier price must be >= $${minGigPrice}.` });
+        if (!Number.isFinite(p) || p < minGigPrice || p > maxGigPrice) {
+          return res.status(400).json({ error: `Package tier price must be between $${minGigPrice} and $${maxGigPrice}.` });
+        }
+        if (Math.abs(Math.round(p * 100) - p * 100) > 1e-6) {
+          return res.status(400).json({ error: 'Package tier price can have at most 2 decimal places.' });
         }
       }
     }
@@ -253,10 +262,15 @@ const handleGigUpdate = async (req: Request, res: Response) => {
     }
     if (req.body.price !== undefined) {
       const newPrice = Number(req.body.price);
-      if (!Number.isFinite(newPrice)) return res.status(400).json({ error: 'Gig price must be a valid number.' });
+      if (!Number.isFinite(newPrice) || newPrice <= 0) {
+        return res.status(400).json({ error: 'Gig price must be a valid positive number.' });
+      }
+      if (Math.abs(Math.round(newPrice * 100) - newPrice * 100) > 1e-6) {
+        return res.status(400).json({ error: 'Gig price can have at most 2 decimal places.' });
+      }
       const activeSettings = siteSettings.getSettings();
-      const minGigPrice = activeSettings.marketplace.minimumGigPrice ?? 1;
-      const maxGigPrice = activeSettings.marketplace.maximumGigPrice ?? 10000;
+      const minGigPrice = Math.max(5, Number(activeSettings.marketplace.minimumGigPrice ?? 5));
+      const maxGigPrice = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
       if (newPrice < minGigPrice) {
         return res.status(400).json({ error: `Gig price ($${newPrice}) cannot be lower than the platform minimum of $${minGigPrice}.` });
       }
@@ -270,12 +284,16 @@ const handleGigUpdate = async (req: Request, res: Response) => {
     }
     if (req.body.packages !== undefined && typeof req.body.packages === 'object') {
       const activeSettings = siteSettings.getSettings();
-      const minGigPrice = activeSettings.marketplace.minimumGigPrice ?? 1;
+      const minGigPrice = Math.max(5, Number(activeSettings.marketplace.minimumGigPrice ?? 5));
+      const maxGigPrice = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
       for (const tier of ['basic', 'standard', 'premium']) {
         if (req.body.packages[tier]) {
           const p = Number(req.body.packages[tier].price);
-          if (!Number.isFinite(p) || p < minGigPrice) {
-            return res.status(400).json({ error: `Package tier '${tier}' price ($${p}) must be a valid number >= $${minGigPrice}.` });
+          if (!Number.isFinite(p) || p < minGigPrice || p > maxGigPrice) {
+            return res.status(400).json({ error: `Package tier '${tier}' price ($${p}) must be a valid number between $${minGigPrice} and $${maxGigPrice}.` });
+          }
+          if (Math.abs(Math.round(p * 100) - p * 100) > 1e-6) {
+            return res.status(400).json({ error: `Package tier '${tier}' price can have at most 2 decimal places.` });
           }
         }
       }

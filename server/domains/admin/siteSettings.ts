@@ -165,7 +165,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsState = {
   marketplace: {
     gigModerationRequired: false, // published directly by default
     projectModerationRequired: false,
-    minimumGigPrice: 1,
+    minimumGigPrice: 5,
     maximumGigPrice: 10000,
     minimumProjectBudget: 1,
     maximumProjectBudget: 50000,
@@ -233,11 +233,18 @@ export class SiteSettingsService {
 
   public loadFromState(parsed: any) {
     if (parsed && typeof parsed === 'object') {
+      const mergedMarketplace = { ...DEFAULT_SITE_SETTINGS.marketplace, ...(parsed.marketplace || {}) };
+      if (!Number.isFinite(Number(mergedMarketplace.minimumGigPrice)) || Number(mergedMarketplace.minimumGigPrice) < 5) {
+        mergedMarketplace.minimumGigPrice = 5;
+      }
+      if (!Number.isFinite(Number(mergedMarketplace.maximumGigPrice)) || Number(mergedMarketplace.maximumGigPrice) <= 0) {
+        mergedMarketplace.maximumGigPrice = 10000;
+      }
       this.settings = {
         website: { ...DEFAULT_SITE_SETTINGS.website, ...(parsed.website || {}) },
         commission: { ...DEFAULT_SITE_SETTINGS.commission, ...(parsed.commission || {}) },
         memberships: { ...DEFAULT_SITE_SETTINGS.memberships, ...(parsed.memberships || {}) },
-        marketplace: { ...DEFAULT_SITE_SETTINGS.marketplace, ...(parsed.marketplace || {}) },
+        marketplace: mergedMarketplace,
         wallets: { ...DEFAULT_SITE_SETTINGS.wallets, ...(parsed.wallets || {}) },
         localization: { ...DEFAULT_SITE_SETTINGS.localization, ...(parsed.localization || {}) },
         security: { ...DEFAULT_SITE_SETTINGS.security, ...(parsed.security || {}) },

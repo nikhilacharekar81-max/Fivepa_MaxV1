@@ -208,6 +208,8 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     const userOrders = await store.listOrdersForUser(userId);
     const allUsers = await store.listUsers();
     const userMap = new Map(allUsers.map(usr => [usr.id, usr]));
+    const orderById = new Map(userOrders.map(ord => [ord.id, ord]));
+    const userOrderIds = userOrders.map(ord => ord.id);
 
     const buyerEscrowOrders = userOrders.filter(o => o.buyerId === userId && activeEscrowStatuses.includes(o.status));
     const buyerEscrowAmount = await financialRepository.getBuyerHeldEscrowTotal(userId);
@@ -215,56 +217,203 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     const freelancerEscrowOrders = userOrders.filter(o => o.sellerId === userId && activeEscrowStatuses.includes(o.status));
     const freelancerEscrowAmount = await financialRepository.getFreelancerHeldEscrowTotal(userId);
 
-    const commSettings = siteSettings.getSettings()?.commission;
-    const clearingPeriodDays = Number(commSettings?.escrowProtectionDays) || 14;
+    const currentSettings = siteSettings.getSettings();
+    const commSettings = currentSettings?.commission;
+    const walletSettings = currentSettings?.wallets;
+    const clearingPeriodDays = Number(commSettings?.escrowProtectionDays ?? 14) || 14;
     const commissionPercent = Number(commSettings?.commissionPercent ?? 20);
     const buyerFeePercent = Number(commSettings?.buyerProcessingFeePercent ?? 1);
     const smallOrderFeeAmount = Number(commSettings?.smallOrderFeeAmount ?? 1);
     const smallOrderFeeThreshold = Number(commSettings?.smallOrderFeeThreshold ?? 200);
+    const minimumWithdrawalAmount = Number(walletSettings?.minimumWithdrawalAmount ?? 3);
+    const maximumWithdrawalPerTransaction = Number(walletSettings?.maximumWithdrawalPerTransaction ?? 5000);
+    const dailyWithdrawalLimit = Number(walletSettings?.dailyWithdrawalLimit ?? 10000);
+
+    const currentYearMonth = new Date().toISOString().slice(0, 7);
+    const twoMonthsAgoDate = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+
+    const pool = postgresStore.getPool();
+
+    // 1. Authoritative Buyer Ledger Entries (Account 2010: Buyer Wallets Payable)
+    // Debits on 2010 with order_id represent actual buyer escrow funding & top-ups (including buyer fees).
+    // Credits on 2010 with order_id represent actual buyer refunds (including refunded buyer fees).
+    const buyerLedgerRes = await pool.query(
+      `SELECT le.user_id, le.order_id, le.debit, le.credit, lj.event_type, lj.created_at, lj.timestamp
+       FROM ledger_entries le
+       JOIN ledger_journals lj ON lj.id = le.journal_id
+       WHERE le.account_code = '2010'
+         AND le.order_id IS NOT NULL
+         AND (le.user_id = $1 OR le.order_id = ANY($2::varchar[]))`,
+      [userId, userOrderIds]
+    );
+
+    const orderBuyerDebitsCents = new Map<string, number>();
+    const orderBuyerCreditsCents = new Map<string, number>();
+    let userBuyerTotalDebitsCents = 0;
+    let userBuyerTotalCreditsCents = 0;
+    let userBuyerMonthlyDebitsCents = 0;
+    let userBuyerMonthlyCreditsCents = 0;
+
+    for (const row of buyerLedgerRes.rows) {
+      const ordId = String(row.order_id || '');
+      if (!ordId) continue;
+      const debitCents = Math.round(Number(row.debit || 0) * 100);
+      const creditCents = Math.round(Number(row.credit || 0) * 100);
+
+      orderBuyerDebitsCents.set(ordId, (orderBuyerDebitsCents.get(ordId) || 0) + debitCents);
+      orderBuyerCreditsCents.set(ordId, (orderBuyerCreditsCents.get(ordId) || 0) + creditCents);
+
+      if (row.user_id === userId) {
+        userBuyerTotalDebitsCents += debitCents;
+        userBuyerTotalCreditsCents += creditCents;
+
+        let journalYm = '';
+        if (row.created_at) {
+          try {
+            journalYm = new Date(row.created_at).toISOString().slice(0, 7);
+          } catch {}
+        }
+        if (!journalYm && row.timestamp) {
+          journalYm = String(row.timestamp).slice(0, 7);
+        }
+        if (journalYm === currentYearMonth) {
+          userBuyerMonthlyDebitsCents += debitCents;
+          userBuyerMonthlyCreditsCents += creditCents;
+        }
+      }
+    }
+
+    // 2. Authoritative Seller Earnings from earnings_clearing
+    const clearingRes = await pool.query(
+      `SELECT id, order_id, seller_id, amount, clearance_start, clearance_end, status, payout_eligible
+       FROM earnings_clearing
+       WHERE seller_id = $1 OR order_id = ANY($2::varchar[])`,
+      [userId, userOrderIds]
+    );
+
+    const orderSellerEarnedCents = new Map<string, number>();
+    const orderSellerPendingClearanceCents = new Map<string, number>();
+    let userEarnedToDateCents = 0;
+    let userEarnedThisMonthCents = 0;
+    let userEarnedPastTwoMonthsCents = 0;
+    let userPendingClearanceCents = 0;
+    let userGigEarnedToDateCents = 0;
+    let userGigEarnedThisMonthCents = 0;
+    let userProjectEarnedToDateCents = 0;
+    let userProjectEarnedThisMonthCents = 0;
+
+    for (const row of clearingRes.rows) {
+      const ordId = String(row.order_id || '');
+      const amountCents = Math.round(Number(row.amount || 0) * 100);
+      if (amountCents <= 0) continue;
+
+      if (ordId) {
+        orderSellerEarnedCents.set(ordId, (orderSellerEarnedCents.get(ordId) || 0) + amountCents);
+        if (row.status === 'clearing') {
+          orderSellerPendingClearanceCents.set(ordId, (orderSellerPendingClearanceCents.get(ordId) || 0) + amountCents);
+        }
+      }
+
+      if (row.seller_id === userId) {
+        userEarnedToDateCents += amountCents;
+        if (row.status === 'clearing') {
+          userPendingClearanceCents += amountCents;
+        }
+
+        let startIso = '';
+        if (row.clearance_start) {
+          try {
+            startIso = new Date(row.clearance_start).toISOString();
+          } catch {}
+        }
+        const startYm = startIso.slice(0, 7);
+        const startDate = startIso.slice(0, 10);
+
+        if (startYm === currentYearMonth) {
+          userEarnedThisMonthCents += amountCents;
+        }
+        if (startDate && startDate >= twoMonthsAgoDate) {
+          userEarnedPastTwoMonthsCents += amountCents;
+        }
+
+        const linkedOrder = orderById.get(ordId);
+        const isProjectOrder = linkedOrder
+          ? (linkedOrder.orderType === 'project' || Boolean(linkedOrder.projectId))
+          : false;
+        if (isProjectOrder) {
+          userProjectEarnedToDateCents += amountCents;
+          if (startYm === currentYearMonth) {
+            userProjectEarnedThisMonthCents += amountCents;
+          }
+        } else {
+          userGigEarnedToDateCents += amountCents;
+          if (startYm === currentYearMonth) {
+            userGigEarnedThisMonthCents += amountCents;
+          }
+        }
+      }
+    }
+
+    // 3. Authoritative Escrows & Active Disputes for user's orders
+    const [escrowsRes, disputesRes] = await Promise.all([
+      userOrderIds.length > 0
+        ? pool.query('SELECT * FROM escrows WHERE order_id = ANY($1::varchar[])', [userOrderIds])
+        : Promise.resolve({ rows: [] as any[] }),
+      userOrderIds.length > 0
+        ? pool.query(
+            "SELECT order_id, status FROM disputes WHERE order_id = ANY($1::varchar[]) AND status IN ('open', 'under_investigation', 'under_review')",
+            [userOrderIds]
+          )
+        : Promise.resolve({ rows: [] as any[] })
+    ]);
+
+    const escrowRowMap = new Map<string, any>();
+    for (const r of escrowsRes.rows) {
+      escrowRowMap.set(r.order_id, r);
+    }
+    const activeDisputedOrderIds = new Set<string>(disputesRes.rows.map((r: any) => String(r.order_id)));
 
     const enrichOrderFinancialRow = async (o: Order) => {
-      const esc = await financialRepository.getEscrow(o.id);
+      const escRow = escrowRowMap.get(o.id);
+      const esc = escRow ? financialRepository.formatEscrowRow(escRow) : null;
       const offers = await store.listOffersForOrder(o.id);
-      const inEscrow = esc
-        ? Number(esc.remaining || 0)
-        : (activeEscrowStatuses.includes(o.status) ? Number(o.amount || 0) : 0);
-      const refundedAmount = esc ? Number(esc.refundedTotal || 0) : 0;
+
+      const inEscrow = esc ? Number(Number(esc.remaining || 0).toFixed(2)) : 0;
+      const releasedGross = esc ? Number(Number(esc.releasedGross || 0).toFixed(2)) : 0;
+      const refundedGross = esc ? Number(Number(esc.refundedTotal || 0).toFixed(2)) : 0;
       const totalEscrowGross = esc
-        ? Math.max(
-            Number(esc.amount || 0),
-            Number(esc.releasedGross || 0) + Number(esc.remaining || 0) + refundedAmount
+        ? Number(
+            Math.max(
+              Number(esc.amount || 0),
+              releasedGross + inEscrow + refundedGross
+            ).toFixed(2)
           )
         : 0;
-      const escrowFunded = esc
-        ? totalEscrowGross
-        : ((o.status as string) !== 'payment_pending' && (o.status as string) !== 'pending' ? Number(o.amount || 0) : 0);
+      const escrowFunded = totalEscrowGross;
+
+      const buyerDebitsCents = orderBuyerDebitsCents.get(o.id) || 0;
+      const buyerCreditsCents = orderBuyerCreditsCents.get(o.id) || 0;
+      const buyerGrossFunded = Number((buyerDebitsCents / 100).toFixed(2));
+      const buyerRefundedAmount = Number((buyerCreditsCents / 100).toFixed(2));
+      const netPaidByBuyer = Number(Math.max(0, (buyerDebitsCents - buyerCreditsCents) / 100).toFixed(2));
+
+      const feesRefundedAmount = Number(
+        Math.max(0, (buyerCreditsCents - Math.round(refundedGross * 100)) / 100).toFixed(2)
+      );
+      const feesRefunded = Boolean(escRow?.fees_refunded) || feesRefundedAmount > 0;
+
+      const freelancerNetEarned = Number(((orderSellerEarnedCents.get(o.id) || 0) / 100).toFixed(2));
+      const freelancerPendingClearance = Number(((orderSellerPendingClearanceCents.get(o.id) || 0) / 100).toFixed(2));
+
       const depositRequests = offers.filter(off => (off.kind === 'deposit' || off.kind === 'proposal') && off.status === 'pending');
       const pendingInvoices = offers.filter(off => off.kind === 'invoice' && off.status === 'pending');
       const paidInvoiceOffers = offers.filter(off => off.kind === 'invoice' && (off.status === 'paid' || off.status === 'accepted'));
       const paidOffersSum = paidInvoiceOffers.reduce((s, off) => s + Number(off.amount || 0), 0);
-      const releasedAmount = esc ? Number(esc.releasedGross || 0) : (o.status === 'completed' ? Number(o.amount || 0) : 0);
-      const paidInvoiceAmount = Math.max(paidOffersSum, releasedAmount, o.status === 'completed' ? Number(o.amount || 0) : 0);
-      const hasPaidInvoice = o.status === 'completed' || paidInvoiceOffers.length > 0 || releasedAmount > 0;
+      const paidInvoiceAmount = Number(Math.max(paidOffersSum, releasedGross).toFixed(2));
+      const hasPaidInvoice = releasedGross > 0 || paidInvoiceOffers.length > 0;
       const buyerUser = userMap.get(o.buyerId);
       const sellerUser = userMap.get(o.sellerId);
-
-      const isFundedOrCompleted = ['funded_in_escrow', 'in_progress', 'delivered', 'revision', 'disputed', 'completed', 'draft_review', 'work_in_progress'].includes(o.status);
-      const netPaidByBuyer = esc
-        ? Math.max(0, totalEscrowGross - refundedAmount)
-        : (isFundedOrCompleted ? Number(o.amount || 0) : 0);
-
-      let freelancerNetEarned = 0;
-      if (esc && Number(esc.releasedGross || 0) > 0) {
-        const relGross = Number(esc.releasedGross);
-        if (Math.abs(relGross - Number(o.amount || 0)) < 0.01 && (o.feeBreakdown as any)?.freelancerNet !== undefined) {
-          freelancerNetEarned = Number((o.feeBreakdown as any).freelancerNet);
-        } else {
-          const commPct = esc.commissionPercent ?? commissionPercent;
-          freelancerNetEarned = Number((relGross * (1 - commPct / 100)).toFixed(2));
-        }
-      } else if (o.status === 'completed' && Number(o.amount || 0) > 0) {
-        freelancerNetEarned = Number((o.feeBreakdown as any)?.freelancerNet ?? calculateOrderFees(Number(o.amount || 0)).freelancerNet);
-      }
+      const isDisputed = activeDisputedOrderIds.has(o.id) || o.status === 'disputed';
 
       return {
         ...enrichOrderWithServiceInfo(o),
@@ -272,8 +421,17 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
         sellerName: sellerUser?.name || (o as any).sellerName || o.sellerUsername || 'Freelancer',
         inEscrow,
         escrowFunded,
+        releasedGross,
+        refundedGross,
+        escrowStatus: esc?.status || 'not_funded',
+        buyerGrossFunded,
+        buyerRefundedAmount,
         netPaidByBuyer,
+        feesRefunded,
+        feesRefundedAmount,
         freelancerNetEarned,
+        freelancerPendingClearance,
+        isDisputed,
         depositRequests,
         pendingInvoices,
         paidInvoiceAmount,
@@ -281,56 +439,49 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
       };
     };
 
-    const buyerAllOrders = userOrders.filter(o => o.buyerId === userId && o.status !== 'cancelled');
-    const freelancerAllOrders = userOrders.filter(o => o.sellerId === userId && o.status !== 'cancelled');
-
-    const [buyerOrdersSummary, freelancerOrdersSummary] = await Promise.all([
-      Promise.all(buyerAllOrders.map(enrichOrderFinancialRow)),
-      Promise.all(freelancerAllOrders.map(enrichOrderFinancialRow))
-    ]);
-
-    const currentYearMonth = new Date().toISOString().slice(0, 7);
-    const twoMonthsAgoDate = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
-
-    const userPaidOrders = buyerOrdersSummary.filter(o => Number(o.netPaidByBuyer || 0) > 0);
-    const paidToDate = Number(userPaidOrders.reduce((sum, o) => sum + Number(o.netPaidByBuyer || 0), 0).toFixed(2));
-    const paidThisMonth = Number(
-      userPaidOrders
-        .filter(o => {
-          const activityMonth = String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 7);
-          const createdMonth = String(o.createdAt || '').slice(0, 7);
-          return activityMonth === currentYearMonth || createdMonth === currentYearMonth;
-        })
-        .reduce((sum, o) => sum + Number(o.netPaidByBuyer || 0), 0)
-        .toFixed(2)
-    );
-
-    const userEarnedOrders = freelancerOrdersSummary.filter(o => Number(o.freelancerNetEarned || 0) > 0);
-    const earnedToDate = Number(
-      userEarnedOrders.reduce((sum, o) => sum + Number(o.freelancerNetEarned || 0), 0).toFixed(2)
-    );
-    const earnedThisMonth = Number(
-      userEarnedOrders
-        .filter(o => {
-          const completedMonth = String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 7);
-          const createdMonth = String(o.createdAt || '').slice(0, 7);
-          return completedMonth === currentYearMonth || createdMonth === currentYearMonth;
-        })
-        .reduce((sum, o) => sum + Number(o.freelancerNetEarned || 0), 0)
-        .toFixed(2)
-    );
-    const earnedPastTwoMonths = Number(
-      userEarnedOrders
-        .filter(o => String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 10) >= twoMonthsAgoDate)
-        .reduce((sum, o) => sum + Number(o.freelancerNetEarned || 0), 0)
-        .toFixed(2)
-    );
-
-    if (u && Math.abs(Number(u.earned || 0) - earnedToDate) > 0.01) {
-      try {
-        await postgresStore.getPool().query('UPDATE users SET earned = $1 WHERE id = $2', [earnedToDate, userId]);
-      } catch {}
+    const allEnrichedOrders = await Promise.all(userOrders.map(enrichOrderFinancialRow));
+    const orderFinancials: Record<string, any> = {};
+    for (const row of allEnrichedOrders) {
+      orderFinancials[row.id] = row;
     }
+
+    const hasOrderFinancialActivity = (row: any) =>
+      row.inEscrow > 0 ||
+      row.releasedGross > 0 ||
+      row.refundedGross > 0 ||
+      row.buyerGrossFunded > 0 ||
+      row.buyerRefundedAmount > 0 ||
+      row.freelancerNetEarned > 0;
+
+    const buyerOrdersSummary = allEnrichedOrders.filter(
+      o => o.buyerId === userId && (o.status !== 'cancelled' || hasOrderFinancialActivity(o))
+    );
+    const freelancerOrdersSummary = allEnrichedOrders.filter(
+      o => o.sellerId === userId && (o.status !== 'cancelled' || hasOrderFinancialActivity(o))
+    );
+
+    const paidToDate = Number(Math.max(0, (userBuyerTotalDebitsCents - userBuyerTotalCreditsCents) / 100).toFixed(2));
+    const paidThisMonth = Number((userBuyerMonthlyDebitsCents / 100).toFixed(2));
+    const buyerRefundedToDate = Number((userBuyerTotalCreditsCents / 100).toFixed(2));
+    const buyerRefundedThisMonth = Number((userBuyerMonthlyCreditsCents / 100).toFixed(2));
+    const buyerNetPaidThisMonth = Number(Math.max(0, (userBuyerMonthlyDebitsCents - userBuyerMonthlyCreditsCents) / 100).toFixed(2));
+
+    const buyerReleasedGrossTotal = Number(
+      (
+        allEnrichedOrders
+          .filter(o => o.buyerId === userId)
+          .reduce((sumCents, o) => sumCents + Math.round(Number(o.releasedGross || 0) * 100), 0) / 100
+      ).toFixed(2)
+    );
+
+    const earnedToDate = Number((userEarnedToDateCents / 100).toFixed(2));
+    const earnedThisMonth = Number((userEarnedThisMonthCents / 100).toFixed(2));
+    const earnedPastTwoMonths = Number((userEarnedPastTwoMonthsCents / 100).toFixed(2));
+    const pendingClearance = Number((userPendingClearanceCents / 100).toFixed(2));
+    const gigEarnedToDate = Number((userGigEarnedToDateCents / 100).toFixed(2));
+    const gigEarnedThisMonth = Number((userGigEarnedThisMonthCents / 100).toFixed(2));
+    const projectEarnedToDate = Number((userProjectEarnedToDateCents / 100).toFixed(2));
+    const projectEarnedThisMonth = Number((userProjectEarnedThisMonthCents / 100).toFixed(2));
 
     let userMethods: PaymentMethodRecord[] = [];
     try {
@@ -340,22 +491,36 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     res.json({
       userId,
       availableBalance,
+      withdrawableBalance: availableBalance,
+      pendingClearance,
       buyerEscrowAmount,
       freelancerEscrowAmount,
       buyerEscrowOrders,
       freelancerEscrowOrders,
       buyerOrdersSummary,
       freelancerOrdersSummary,
+      orderFinancials,
       paidToDate,
       paidThisMonth,
+      buyerRefundedToDate,
+      buyerRefundedThisMonth,
+      buyerNetPaidThisMonth,
+      buyerReleasedGrossTotal,
       earnedToDate,
       earnedThisMonth,
       earnedPastTwoMonths,
+      gigEarnedToDate,
+      gigEarnedThisMonth,
+      projectEarnedToDate,
+      projectEarnedThisMonth,
       clearingPeriodDays,
       commissionPercent,
       buyerFeePercent,
       smallOrderFeeAmount,
       smallOrderFeeThreshold,
+      minimumWithdrawalAmount,
+      maximumWithdrawalPerTransaction,
+      dailyWithdrawalLimit,
       paymentMethods: userMethods,
       walletStatus: wallet?.status || 'active'
     });
@@ -383,10 +548,11 @@ router.post('/payments/escrow/deposit', requireAuth, requireFinancialActiveStatu
       return res.status(403).json({ error: 'Forbidden: Only the buyer of this order can deposit into its escrow.' });
     }
 
-    const amount = Math.round(Number(rawAmount) * 100) / 100;
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'Please enter a valid escrow deposit amount greater than $0.00.' });
+    const rawNumAmount = Number(rawAmount);
+    if (!Number.isFinite(rawNumAmount) || rawNumAmount <= 0 || Math.abs(Math.round(rawNumAmount * 100) - rawNumAmount * 100) > 1e-6) {
+      return res.status(400).json({ error: 'Please enter a valid escrow deposit amount greater than $0.00 with at most 2 decimal places.' });
     }
+    const amount = Math.round(rawNumAmount * 100) / 100;
     if (amount > 100000) {
       return res.status(400).json({ error: 'Amount exceeds maximum limit ($100,000.00).' });
     }
@@ -1727,8 +1893,8 @@ router.post('/wallet/deposit', requireAuth, requireFinancialActiveStatus, rateLi
       targetUserId = requestedUserId;
     }
     const amount = Number(req.body?.amount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'Please enter a valid deposit amount greater than $0.00' });
+    if (!Number.isFinite(amount) || amount <= 0 || Math.abs(Math.round(amount * 100) - amount * 100) > 1e-6) {
+      return res.status(400).json({ error: 'Please enter a valid deposit amount greater than $0.00 with at most 2 decimal places.' });
     }
     if (amount > 5000) {
       return res.status(400).json({ error: 'Simulated deposits are limited to $5,000.' });

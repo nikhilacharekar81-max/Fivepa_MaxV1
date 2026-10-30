@@ -2,7 +2,7 @@ import React from 'react';
 import { MapPin } from 'lucide-react';
 import { Order } from '../../types';
 import { DEFAULT_AVATAR } from '../../constants';
-import { formatCompactAmount } from '../../utils/formatters';
+import { formatCurrency } from '../../utils/formatters';
 
 export interface FreelancerProjectActivityItem {
   id: string;
@@ -12,6 +12,7 @@ export interface FreelancerProjectActivityItem {
   awardedDate: string;
   proposalAmount: number;
   earningsAmount: number;
+  amountLabel?: string;
   location: string;
   refNumber: string;
   statusCategory: 'pending_proposals' | 'in_progress' | 'completed';
@@ -33,21 +34,27 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
   freelanceSubFilter,
   onOpenWorkstream
 }) => {
-  const resolvedItems: FreelancerProjectActivityItem[] = items ?? orders.map(ord => ({
-    id: ord.id,
-    title: ord.title,
-    buyerName: (ord as any).buyerName || ord.buyerUsername || 'Client',
-    buyerAvatar: (ord as any).buyerAvatar || DEFAULT_AVATAR,
-    awardedDate: ord.createdAt,
-    proposalAmount: Number(ord.amount || 0),
-    earningsAmount: Number(ord.amount || 0),
-    location: 'Remote',
-    refNumber: ord.id.replace(/\D/g, '').slice(0, 7) || ord.id.replace(/^ord_/, '').slice(0, 7).toUpperCase(),
-    statusCategory: ord.status === 'completed' ? 'completed' : 'in_progress',
-    order: ord,
-    workstreamOrderId: ord.id,
-    projectId: ord.projectId
-  }));
+  const resolvedItems: FreelancerProjectActivityItem[] = items ?? orders.map(ord => {
+    const isOrdCompleted = ord.status === 'completed';
+    const netEarned = typeof (ord as any).freelancerNetEarned === 'number' ? (ord as any).freelancerNetEarned : 0;
+    const inEscrowVal = typeof (ord as any).inEscrow === 'number' ? (ord as any).inEscrow : Number(ord.amount || 0);
+    return {
+      id: ord.id,
+      title: ord.title,
+      buyerName: (ord as any).buyerName || ord.buyerUsername || 'Client',
+      buyerAvatar: (ord as any).buyerAvatar || DEFAULT_AVATAR,
+      awardedDate: ord.createdAt,
+      proposalAmount: Number(ord.amount || 0),
+      earningsAmount: isOrdCompleted ? netEarned : inEscrowVal,
+      amountLabel: isOrdCompleted ? 'EARNINGS' : (inEscrowVal > 0 ? 'IN ESCROW' : 'CONTRACT VALUE'),
+      location: 'Remote',
+      refNumber: ord.id.replace(/\D/g, '').slice(0, 7) || ord.id.replace(/^ord_/, '').slice(0, 7).toUpperCase(),
+      statusCategory: isOrdCompleted ? 'completed' : 'in_progress',
+      order: ord,
+      workstreamOrderId: ord.id,
+      projectId: ord.projectId
+    };
+  });
 
   if (resolvedItems.length === 0) {
     return (
@@ -64,6 +71,10 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
         const isPendingProposal = item.statusCategory === 'pending_proposals';
         const isCompleted = item.statusCategory === 'completed';
         const targetOrderId = item.workstreamOrderId || item.order?.id || '';
+        const rightSideAmount = isPendingProposal ? item.proposalAmount : item.earningsAmount;
+        const rightSideLabel =
+          item.amountLabel ||
+          (isCompleted ? 'EARNINGS' : isPendingProposal ? 'PROPOSAL' : 'CONTRACT VALUE');
 
         return (
           <div
@@ -101,7 +112,7 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
                 <span>
                   My Proposal:{' '}
                   <strong className="font-bold text-slate-900">
-                    ${item.proposalAmount.toLocaleString()}
+                    {formatCurrency(item.proposalAmount)}
                   </strong>
                 </span>
 
@@ -118,14 +129,14 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
               </div>
             </div>
 
-            {/* Right Side: Project Earnings + VIEW PROGRESS Button */}
+            {/* Right Side: Project Financial Metric + VIEW PROGRESS Button */}
             <div className="flex sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto shrink-0 sm:min-w-[155px] gap-2.5">
               <div className="text-left sm:text-right leading-none">
                 <span className="block text-xl font-bold text-slate-900 tracking-tight">
-                  ${formatCompactAmount(item.earningsAmount)}
+                  {formatCurrency(rightSideAmount)}
                 </span>
                 <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">
-                  EARNINGS
+                  {rightSideLabel}
                 </span>
               </div>
 
