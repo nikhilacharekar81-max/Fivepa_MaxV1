@@ -7,6 +7,7 @@ export interface UseWorkstreamEscrowProps {
   setOrders?: React.Dispatch<React.SetStateAction<Order[]>>;
   setSelectedOrder?: React.Dispatch<React.SetStateAction<Order | null>>;
   setMessages?: React.Dispatch<React.SetStateAction<Message[]>>;
+  refresh?: () => Promise<void> | void;
 }
 
 /**
@@ -17,7 +18,8 @@ export function useWorkstreamEscrow({
   selectedOrder,
   setOrders,
   setSelectedOrder,
-  setMessages
+  setMessages,
+  refresh
 }: UseWorkstreamEscrowProps) {
   const [isReleasingEscrow, setIsReleasingEscrow] = useState(false);
   const [escrowError, setEscrowError] = useState<string | null>(null);
@@ -78,6 +80,10 @@ export function useWorkstreamEscrow({
           };
           setMessages(prev => prev.some(m => m.orderId === selectedOrder.id && m.type === 'system' && m.metadata?.action === 'escrow_released') ? prev : [...prev, sysMsg]);
         }
+      }
+
+      if (refresh) {
+        void refresh();
       }
 
       setIsReleasingEscrow(false);

@@ -223,7 +223,8 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
     hasPaidInvoice,
     createOffer,
     respond,
-    refundEscrow
+    refundEscrow,
+    refresh: refreshOffers
   } = useWorkstreamOffers(order.id, lastMessageId);
 
   const isSeller = !!currentUser && currentUser.id === order.sellerId;
@@ -236,8 +237,8 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
   );
   const pendingInvoice = currentOrderOffers.find(o => o.kind === 'invoice' && o.status === 'pending');
   const pendingProposal = currentOrderOffers.find(o => o.kind === 'proposal' && o.status === 'pending');
-  const invoiceAlreadyPaid = hasPaidInvoice || Boolean((order as any).hasPaidInvoice) || currentOrderOffers.some(o => o.kind === 'invoice' && o.status === 'paid') || order.status === 'completed';
-  const activeEscrow = escrowRemaining > 0 ? escrowRemaining : (escrowFunded ? Number(order.amount || 0) : 0);
+  const invoiceAlreadyPaid = hasPaidInvoice || totalReleased > 0 || Boolean((order as any).hasPaidInvoice) || currentOrderOffers.some(o => o.kind === 'invoice' && o.status === 'paid');
+  const activeEscrow = escrowRemaining > 0 ? escrowRemaining : 0;
   const isCustomOrderWorkstream = isInquiryWorkstream(order);
   const isInquiryOrder = isCustomOrderWorkstream && !escrowFunded;
 
@@ -1017,7 +1018,12 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
             const res = await handleOfferAction(pendingInvoice.id, 'accept');
             return res.ok;
           }
-          return await onReleaseEscrow();
+          const ok = await onReleaseEscrow();
+          if (ok) {
+            await refreshOffers();
+            onOrderChanged?.(null);
+          }
+          return ok;
         }}
       />
 

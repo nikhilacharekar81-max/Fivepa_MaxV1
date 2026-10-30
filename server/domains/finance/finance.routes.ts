@@ -50,7 +50,8 @@ import {
   LATE_ORDER_PROTECTION_HOURS,
   registerAuditLog,
   validateOrderReleasePreconditions,
-  parseDeadlineInstant
+  parseDeadlineInstant,
+  processAutoAcceptOrders
 } from '../../services/orderService.js';
 import { siteSettings } from '../../../src/server/siteSettings.js';
 import { broadcastMessage } from '../../websocket.js';
@@ -195,6 +196,9 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     }
 
     const userId = targetUserId;
+    await processAutoAcceptOrders();
+    await financialTransactionService.processEarningsClearing();
+
     const u = await store.getUser(userId);
     
     if (u) {
@@ -204,17 +208,13 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     const wallet = await financialRepository.getWallet(userId);
     const availableBalance = wallet?.availableBalance ?? Number(u?.walletBalance || 0);
     
-    const activeEscrowStatuses = ['funded_in_escrow', 'in_progress', 'delivered', 'revision', 'disputed', 'draft_review', 'work_in_progress'];
     const userOrders = await store.listOrdersForUser(userId);
     const allUsers = await store.listUsers();
     const userMap = new Map(allUsers.map(usr => [usr.id, usr]));
     const orderById = new Map(userOrders.map(ord => [ord.id, ord]));
     const userOrderIds = userOrders.map(ord => ord.id);
 
-    const buyerEscrowOrders = userOrders.filter(o => o.buyerId === userId && activeEscrowStatuses.includes(o.status));
     const buyerEscrowAmount = await financialRepository.getBuyerHeldEscrowTotal(userId);
-
-    const freelancerEscrowOrders = userOrders.filter(o => o.sellerId === userId && activeEscrowStatuses.includes(o.status));
     const freelancerEscrowAmount = await financialRepository.getFreelancerHeldEscrowTotal(userId);
 
     const currentSettings = siteSettings.getSettings();
@@ -324,10 +324,24 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
           userPendingClearanceCents += amountCents;
         }
 
+        const linkedOrder = orderById.get(ordId);
         let startIso = '';
         if (row.clearance_start) {
           try {
             startIso = new Date(row.clearance_start).toISOString();
+          } catch {}
+        }
+        if (!startIso && row.clearance_end) {
+          try {
+            const endMs = new Date(row.clearance_end).getTime();
+            if (!isNaN(endMs)) {
+              startIso = new Date(endMs - 14 * 86400000).toISOString();
+            }
+          } catch {}
+        }
+        if (!startIso && linkedOrder?.completedAt) {
+          try {
+            startIso = new Date(linkedOrder.completedAt).toISOString();
           } catch {}
         }
         const startYm = startIso.slice(0, 7);
@@ -340,9 +354,8 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
           userEarnedPastTwoMonthsCents += amountCents;
         }
 
-        const linkedOrder = orderById.get(ordId);
         const isProjectOrder = linkedOrder
-          ? (linkedOrder.orderType === 'project' || Boolean(linkedOrder.projectId))
+          ? (linkedOrder.orderType === 'project' || (linkedOrder as any).type === 'project' || Boolean(linkedOrder.projectId))
           : false;
         if (isProjectOrder) {
           userProjectEarnedToDateCents += amountCents;
@@ -448,6 +461,9 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     for (const row of allEnrichedOrders) {
       orderFinancials[row.id] = row;
     }
+
+    const buyerEscrowOrders = allEnrichedOrders.filter(o => o.buyerId === userId && o.inEscrow > 0);
+    const freelancerEscrowOrders = allEnrichedOrders.filter(o => o.sellerId === userId && o.inEscrow > 0);
 
     const hasOrderFinancialActivity = (row: any) =>
       row.inEscrow > 0 ||
@@ -1238,13 +1254,13 @@ router.post('/payments/escrow/release', requireAuth, requireFinancialActiveStatu
         throw err;
       }
 
-      const pendingMatchingInvoice = pendingInvoices[0];
       const result = await releaseOrderFunds(order, actorName, 'Buyer approved work', true, requestKey, isAdmin, client);
+      await store.saveOrder(order, client);
 
-      if (pendingMatchingInvoice) {
+      if (pendingInvoices.length > 0) {
         await client.query(
-          "UPDATE workstream_offers SET status = 'paid', resolved_at = $1, resolved_by = $2 WHERE id = $3",
-          [new Date().toISOString(), caller?.id || userId, pendingMatchingInvoice.id]
+          "UPDATE workstream_offers SET status = 'paid', resolved_at = $1, resolved_by = $2 WHERE order_id = $3 AND kind = 'invoice' AND status = 'pending' AND amount <= $4",
+          [new Date().toISOString(), caller?.id || userId, order.id, Number(esc.remaining)]
         );
       }
 
@@ -1453,15 +1469,51 @@ router.get('/payments/invoices/:userId', requireAuth, async (req: Request, res: 
       return res.status(403).json({ error: 'Forbidden: Access to another user invoices is not allowed.' });
     }
     const userId = targetUserId;
+    await processAutoAcceptOrders();
+    await financialTransactionService.processEarningsClearing();
+
     const userOrders = await store.listOrdersForUser(userId);
+    const userOrderIds = userOrders.map(o => o.id);
+
+    const [escRes, clrRes] = await Promise.all([
+      userOrderIds.length > 0
+        ? pool.query('SELECT * FROM escrows WHERE order_id = ANY($1::varchar[])', [userOrderIds])
+        : Promise.resolve({ rows: [] as any[] }),
+      userOrderIds.length > 0
+        ? pool.query(
+            "SELECT order_id, COALESCE(SUM(amount), 0) AS net_earned FROM earnings_clearing WHERE order_id = ANY($1::varchar[]) AND status IN ('clearing', 'completed') AND amount > 0 GROUP BY order_id",
+            [userOrderIds]
+          )
+        : Promise.resolve({ rows: [] as any[] })
+    ]);
+    const escByOrderId = new Map<string, any>(escRes.rows.map((r: any) => [String(r.order_id), r]));
+    const netByOrderId = new Map<string, number>(clrRes.rows.map((r: any) => [String(r.order_id), Number(r.net_earned || 0)]));
 
     const currentUser = await store.getUser(userId);
     const orderInvoices = await Promise.all(userOrders.map(async o => {
       const isBuyer = o.buyerId === userId;
       const otherUser = await store.getUser(isBuyer ? o.sellerId : o.buyerId);
+      const escRow = escByOrderId.get(o.id);
+      const releasedGross = escRow ? Number(escRow.released_gross || 0) : 0;
+      const refundedGross = escRow ? Number(escRow.refunded_total || 0) : 0;
+      const netEarned = netByOrderId.get(o.id) || 0;
+
       const quote = (o.feeBreakdown as any)?.clientTotal !== undefined
         ? (o.feeBreakdown as any)
         : await quoteOrderWithLiveSettings(o.amount).catch(() => calculateOrderFees(o.amount));
+
+      const isPaid = Boolean((escRow && (escRow.status === 'released' || escRow.status === 'split' || releasedGross > 0)) || netEarned > 0);
+      const isRefunded = !isPaid && Boolean(escRow && (escRow.status === 'refunded' || refundedGross > 0));
+      const invStatus = isPaid ? 'paid' : isRefunded ? 'refunded' : 'in_escrow';
+
+      const subtotal = releasedGross > 0 ? releasedGross : Number(o.amount || 0);
+      const platformFee = isPaid && netEarned > 0
+        ? Math.max(0, Number((subtotal - netEarned).toFixed(2)))
+        : Number(o.feeBreakdown?.platformCommission ?? quote.platformCommission ?? 0);
+      const sellerNet = isPaid && netEarned > 0
+        ? Number(netEarned.toFixed(2))
+        : Math.max(0, Number((subtotal - platformFee).toFixed(2)));
+
       return {
         id: `inv_ord_${o.id}`,
         invoiceNumber: `INV-${o.id.replace('ord_', '').toUpperCase()}`,
@@ -1474,14 +1526,15 @@ router.get('/payments/invoices/:userId', requireAuth, async (req: Request, res: 
         title: o.title,
         issueDate: o.createdAt,
         dueDate: o.dueDate,
-        status: o.status === 'completed' ? 'paid' : o.status === 'cancelled' ? 'refunded' : 'in_escrow',
+        status: invStatus,
         items: [
-          { description: o.title, quantity: 1, unitPrice: o.amount, amount: o.amount }
+          { description: o.title, quantity: 1, unitPrice: subtotal, amount: subtotal }
         ],
-        subtotal: o.amount,
+        subtotal,
         serviceFee: o.feeBreakdown?.serviceFee ?? quote.serviceFee,
         smallOrderFee: o.feeBreakdown?.smallOrderFee ?? quote.smallOrderFee,
-        platformFee: o.feeBreakdown?.platformCommission ?? quote.platformCommission,
+        platformFee,
+        sellerNet,
         tax: 0,
         total: o.feeBreakdown?.clientTotal ?? quote.clientTotal,
         notes: `WorkPerHour 14-Day Escrow Protection Order #${o.id}. 100% Protected.`,
@@ -2141,6 +2194,11 @@ router.post('/admin/finance/escrow/:orderId/release', requireAdmin, async (req: 
         throw new Error('No refundable or releasable escrow funds remain for this order.');
       }
       const result = await releaseOrderFunds(order, adminActor(req), String(req.body.reason || 'Administrative escrow release'), false, req.body.requestKey, false, client);
+      await store.saveOrder(order, client);
+      await client.query(
+        "UPDATE workstream_offers SET status = 'paid', resolved_at = $1, resolved_by = $2 WHERE order_id = $3 AND kind = 'invoice' AND status = 'pending' AND amount <= $4",
+        [new Date().toISOString(), adminActor(req), order.id, Number(esc.remaining)]
+      );
       return { order, result };
     });
     res.json({ success: true, order: txResult.order, journal: txResult.result.journal, freelancerNet: txResult.result.freelancerNet, platformFee: txResult.result.platformFee });

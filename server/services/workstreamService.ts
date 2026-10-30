@@ -408,7 +408,7 @@ export async function orderHasEscrow(orderId: string, client?: any): Promise<boo
 
 export async function hasPaidInvoiceOrReleasedEscrow(order: Order, client?: any): Promise<boolean> {
   const esc = await financialRepository.getEscrow(order.id, client);
-  if (order.status === 'completed' || (esc && esc.releasedGross > 0)) return true;
+  if (esc && (esc.releasedGross > 0 || esc.status === 'released')) return true;
   try {
     const offers = await store.listOffersForOrder(order.id, client);
     return offers.some(o => o.kind === 'invoice' && o.status === 'paid');

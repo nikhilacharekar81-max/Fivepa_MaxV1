@@ -1139,9 +1139,10 @@ export class FinancialTransactionService {
         }
       }
 
+      const orderRowForFee = orderRes.rows[0];
       const rawComm = escrow.commission_percent !== null && escrow.commission_percent !== undefined
         ? Number(escrow.commission_percent)
-        : 20;
+        : resolveEffectiveFeePolicy(orderRowForFee || escrow).commissionPercent;
       const grossCents = toCents(gross);
       const platformFeeCents = percentOfCents(grossCents, rawComm);
       const freelancerNetCents = grossCents - platformFeeCents;
@@ -1171,11 +1172,12 @@ export class FinancialTransactionService {
       if (existingClrIds.has(clearingId)) {
         clearingId = `clr_${params.orderId}_${candidateSeq}_${randomUUID().slice(0, 8)}`;
       }
+      const clearanceStart = new Date().toISOString();
       const clearanceEnd = new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString();
       await client.query(
-        `INSERT INTO earnings_clearing (id, order_id, seller_id, amount, clearance_end, status, payout_eligible)
-         VALUES ($1, $2, $3, $4, $5, 'clearing', FALSE)`,
-        [clearingId, params.orderId, escrow.seller_id, freelancerNet, clearanceEnd]
+        `INSERT INTO earnings_clearing (id, order_id, seller_id, amount, clearance_start, clearance_end, status, payout_eligible)
+         VALUES ($1, $2, $3, $4, $5, $6, 'clearing', FALSE)`,
+        [clearingId, params.orderId, escrow.seller_id, freelancerNet, clearanceStart, clearanceEnd]
       );
 
       // Atomically increment user earned and completed_jobs inside the database transaction

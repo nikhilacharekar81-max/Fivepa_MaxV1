@@ -37,6 +37,8 @@ export interface OrderFeeBreakdown {
   platformCommission: number;// commissionPercent of gigPrice, taken at escrow release
   freelancerNet: number;     // gigPrice - platformCommission
   freelancerPercent: number; // 100 - commissionPercent
+  commissionPercent?: number;// explicit platform commission percent snapshot
+  buyerFeePercent?: number;  // explicit buyer service fee percent snapshot
   platformRevenue: number;   // commission + serviceFee + smallOrderFee
   cents: {
     gigPrice: number;
@@ -116,6 +118,8 @@ export function calculateOrderFees(gigPrice: number, cfg: FeeConfig = DEFAULT_FE
     platformCommission: d(commission),
     freelancerNet: d(net),
     freelancerPercent: Math.round((100 - cfg.commissionPercent) * 100) / 100,
+    commissionPercent: cfg.commissionPercent,
+    buyerFeePercent: cfg.buyerFeePercent,
     platformRevenue: d(commission + service + small),
     cents: {
       gigPrice: gig,
@@ -140,30 +144,44 @@ export function resolveEffectiveFeePolicy(orderSnapshot?: any, fallbackConfig: F
     return Number.isFinite(n) ? n : undefined;
   };
 
-  const freelancerPct = numOrUndef(orderSnapshot.feeBreakdown?.freelancerPercent);
+  let fbCamel = orderSnapshot.feeBreakdown;
+  if (typeof fbCamel === 'string') {
+    try { fbCamel = JSON.parse(fbCamel); } catch { fbCamel = undefined; }
+  }
+  let fbSnake = orderSnapshot.fee_breakdown;
+  if (typeof fbSnake === 'string') {
+    try { fbSnake = JSON.parse(fbSnake); } catch { fbSnake = undefined; }
+  }
+
+  const freelancerPct = numOrUndef(fbCamel?.freelancerPercent) ??
+    numOrUndef(fbSnake?.freelancerPercent) ??
+    numOrUndef(orderSnapshot.freelancer_percent);
   const commissionPercent = numOrUndef(orderSnapshot.commission_percent) ??
-    (freelancerPct !== undefined ? (100 - freelancerPct) : undefined) ??
-    numOrUndef(orderSnapshot.fee_breakdown?.commissionPercent) ??
+    numOrUndef(orderSnapshot.commissionPercent) ??
+    numOrUndef(fbCamel?.commissionPercent) ??
+    numOrUndef(fbSnake?.commissionPercent) ??
+    (freelancerPct !== undefined ? Math.round((100 - freelancerPct) * 100) / 100 : undefined) ??
     fallbackConfig.commissionPercent;
 
   const buyerFeePercent = numOrUndef(orderSnapshot.buyer_fee_percent) ??
-    numOrUndef(orderSnapshot.feeBreakdown?.buyerFeePercent) ??
-    numOrUndef(orderSnapshot.fee_breakdown?.buyerFeePercent) ??
+    numOrUndef(orderSnapshot.buyerFeePercent) ??
+    numOrUndef(fbCamel?.buyerFeePercent) ??
+    numOrUndef(fbSnake?.buyerFeePercent) ??
     fallbackConfig.buyerFeePercent;
 
   const smallOrderFee = numOrUndef(orderSnapshot.small_order_fee_amount) ??
-    numOrUndef(orderSnapshot.feeBreakdown?.smallOrderFeeAmount) ??
-    numOrUndef(orderSnapshot.fee_breakdown?.smallOrderFee) ??
+    numOrUndef(fbCamel?.smallOrderFeeAmount) ??
+    numOrUndef(fbSnake?.smallOrderFee) ??
     fallbackConfig.smallOrderFee;
 
   const smallOrderThreshold = numOrUndef(orderSnapshot.small_order_threshold) ??
-    numOrUndef(orderSnapshot.feeBreakdown?.smallOrderThreshold) ??
-    numOrUndef(orderSnapshot.fee_breakdown?.smallOrderThreshold) ??
+    numOrUndef(fbCamel?.smallOrderThreshold) ??
+    numOrUndef(fbSnake?.smallOrderThreshold) ??
     fallbackConfig.smallOrderThreshold;
 
   const minimumOrderAmount = numOrUndef(orderSnapshot.minimum_order_amount) ??
-    numOrUndef(orderSnapshot.feeBreakdown?.minimumOrderAmount) ??
-    numOrUndef(orderSnapshot.fee_breakdown?.minimumOrderAmount) ??
+    numOrUndef(fbCamel?.minimumOrderAmount) ??
+    numOrUndef(fbSnake?.minimumOrderAmount) ??
     fallbackConfig.minimumOrderAmount;
 
   return {

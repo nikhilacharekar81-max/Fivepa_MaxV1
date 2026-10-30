@@ -11,7 +11,7 @@ import {
   type User,
   type WorkstreamOffer
 } from '../store.js';
-import { calculateOrderFees, quoteOrderWithLiveSettings } from '../domains/finance/fees.js';
+import { calculateOrderFees, quoteOrderWithLiveSettings, resolveEffectiveFeePolicy } from '../domains/finance/fees.js';
 import { checkOrRecordIdempotency, recordIdempotencyResult } from '../domains/finance/index.js';
 import { postgresStore } from '../db/postgresStore.js';
 import { financialRepository, financialTransactionService } from '../domains/finance/financial.service.js';
@@ -46,7 +46,9 @@ import {
   getActiveEscrowRemaining,
   LATE_ORDER_PROTECTION_HOURS,
   parseDeadlineInstant,
-  calculateExtendedDeadline
+  calculateExtendedDeadline,
+  processAutoAcceptOrders,
+  getReviewWindowDays
 } from '../services/orderService.js';
 import { broadcastMessage } from '../websocket.js';
 import {
@@ -76,6 +78,7 @@ const router = Router();
 // Orders List - Directly querying PostgreSQL
 router.get('/orders', requireAuth, requireActiveStatus, async (req: Request, res: Response) => {
   try {
+    await processAutoAcceptOrders();
     const authUserId = resolveAuthenticatedUserId(req)!;
     const caller = await store.getUser(authUserId);
     const isAdmin = caller?.role === 'admin' || caller?.role === 'super_admin' || caller?.role === 'support';
@@ -211,6 +214,7 @@ router.get('/orders', requireAuth, requireActiveStatus, async (req: Request, res
 // Single Order Workspace Detail - Directly querying PostgreSQL
 router.get('/orders/:id', requireAuth, async (req: Request, res: Response) => {
   try {
+    await processAutoAcceptOrders();
     let order = await store.getOrder(req.params.id);
     if (!order) {
       const ws = await workspaceService.getWorkspaceAsync(req.params.id);
@@ -272,6 +276,7 @@ router.get('/orders/:id', requireAuth, async (req: Request, res: Response) => {
 // Single Order Immutable Invoice / Receipt
 router.get('/orders/:id/invoice', requireAuth, async (req: Request, res: Response) => {
   try {
+    await processAutoAcceptOrders();
     const order = await store.getOrder(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
@@ -282,9 +287,17 @@ router.get('/orders/:id/invoice', requireAuth, async (req: Request, res: Respons
       return res.status(403).json({ error: 'Forbidden: Access to this invoice is restricted to order participants.' });
     }
 
-    const [buyer, seller] = await Promise.all([
+    const pool = postgresStore.getPool();
+    const [buyer, seller, esc, clearingRes] = await Promise.all([
       store.getUser(order.buyerId),
-      store.getUser(order.sellerId)
+      store.getUser(order.sellerId),
+      financialRepository.getEscrow(order.id),
+      pool.query(
+        `SELECT COALESCE(SUM(amount), 0) AS net_amount
+         FROM earnings_clearing
+         WHERE order_id = $1 AND user_id = $2 AND status IN ('clearing', 'completed') AND amount > 0`,
+        [order.id, order.sellerId]
+      )
     ]);
 
     const createdClean = (order.createdAt || '').slice(0, 10).replace(/-/g, '') || new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -294,9 +307,32 @@ router.get('/orders/:id/invoice', requireAuth, async (req: Request, res: Respons
     const rawAmount = Number(order.amount || 0);
     const serviceFee = Number((order as any).serviceFee ?? order.feeBreakdown?.buyerFee ?? order.feeBreakdown?.serviceFee ?? 0);
     const smallOrderFee = Number((order as any).smallOrderFee ?? order.feeBreakdown?.smallOrderFee ?? 0);
-    const platformCommission = Number(order.feeBreakdown?.platformCommission ?? 0);
+    const recordedSellerNet = Math.round(Number(clearingRes.rows[0]?.net_amount || 0) * 100) / 100;
+    const releasedGross = esc ? Math.round(Number(esc.releasedGross || (esc as any).released || 0) * 100) / 100 : 0;
+    const refundedGross = esc ? Math.round(Number((esc as any).refundedGross || (esc as any).refunded || (esc.status === 'refunded' ? (esc as any).grossAmount || 0 : 0)) * 100) / 100 : 0;
+    const remainingEscrow = esc ? Math.round(Number(esc.remaining || 0) * 100) / 100 : 0;
+    const policy = resolveEffectiveFeePolicy(order);
+    const effectiveCommRate = esc && esc.commissionPercent !== undefined && esc.commissionPercent !== null
+      ? Number(esc.commissionPercent)
+      : policy.commissionPercent;
+    const expectedCommission = order.feeBreakdown?.platformCommission !== undefined
+      ? Number(order.feeBreakdown.platformCommission)
+      : Math.round(rawAmount * (effectiveCommRate / 100) * 100) / 100;
+    const platformCommission = recordedSellerNet > 0 && releasedGross >= recordedSellerNet
+      ? Math.round((releasedGross - recordedSellerNet) * 100) / 100
+      : expectedCommission;
     const buyerTotal = Math.round((rawAmount + serviceFee + smallOrderFee) * 100) / 100;
-    const sellerNet = Math.max(0, Math.round((rawAmount - platformCommission) * 100) / 100);
+    const sellerNet = recordedSellerNet > 0
+      ? recordedSellerNet
+      : Math.max(0, Math.round((rawAmount - platformCommission) * 100) / 100);
+
+    const invoiceStatus = (releasedGross > 0 || recordedSellerNet > 0)
+      ? 'paid'
+      : (refundedGross > 0 && remainingEscrow <= 0)
+        ? 'refunded'
+        : remainingEscrow > 0
+          ? 'in_escrow'
+          : 'unpaid';
 
     const invoice = {
       id: `inv_${order.id}`,
@@ -304,7 +340,7 @@ router.get('/orders/:id/invoice', requireAuth, async (req: Request, res: Respons
       orderId: order.id,
       workspaceId: order.workspaceId || `ws-${order.id}`,
       title: order.title,
-      status: order.status === 'completed' ? 'paid' : order.status === 'cancelled' ? 'refunded' : 'in_escrow',
+      status: invoiceStatus,
       issueDate: (order.createdAt || new Date().toISOString()).slice(0, 10),
       dueDate: (order.dueDate || order.createdAt || new Date().toISOString()).slice(0, 10),
       completedAt: order.completedAt || null,
@@ -1287,8 +1323,13 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
 
       const version = order.deliveryHistory.length + 1;
       const deliveredAt = new Date().toISOString();
-      const projectResponseDeadline = order.orderType === 'project'
-        ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+      const isProjectOrder = order.orderType === 'project' || (order as any).type === 'project' || Boolean(order.projectId);
+      const reviewDays = isProjectOrder ? 7 : getReviewWindowDays();
+      const reviewExpiresAt = !isDraft
+        ? new Date(new Date(deliveredAt).getTime() + reviewDays * 24 * 60 * 60 * 1000).toISOString()
+        : undefined;
+      const projectResponseDeadline = isProjectOrder && !isDraft
+        ? reviewExpiresAt
         : undefined;
 
       order.deliveryHistory.push({
@@ -1297,10 +1338,14 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
         reference: trimmedReference || undefined,
         files: uploadedFiles,
         deliveredAt,
-        ...(projectResponseDeadline ? { responseDeadline: projectResponseDeadline } : {})
+        ...(reviewExpiresAt ? { responseDeadline: reviewExpiresAt } : {})
       });
       if (projectResponseDeadline) {
         order.responseDeadline = projectResponseDeadline;
+      }
+      if (!isDraft && reviewExpiresAt) {
+        order.reviewWindowDays = reviewDays;
+        order.reviewWindowExpiresAt = reviewExpiresAt;
       }
 
       let resolvedRevisionCount = 0;
@@ -1321,8 +1366,10 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
              delivery_notes = $4, 
              delivery_reference = $5, 
              revisions = $6, 
-             response_deadline = $7 
-         WHERE id = $8 AND status = ANY($9)`,
+             response_deadline = $7,
+             review_window_days = $8,
+             review_window_expires_at = $9
+         WHERE id = $10 AND status = ANY($11)`,
         [
           isDraft ? 'draft_review' : 'delivered',
           JSON.stringify(order.deliverableFiles),
@@ -1331,6 +1378,8 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
           trimmedReference,
           JSON.stringify(order.revisions),
           order.responseDeadline || null,
+          order.reviewWindowDays ?? null,
+          order.reviewWindowExpiresAt || null,
           orderId,
           allowedStatuses
         ]
@@ -1405,13 +1454,15 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
           files: uploadedFiles.length > 0 ? uploadedFiles : prevMeta.files,
           reference: trimmedReference || prevMeta.reference,
           originOrderId: prevMeta.originOrderId || order.id,
+          deliveryVersion: version,
+          ...(order.reviewWindowExpiresAt ? { responseDeadline: order.reviewWindowExpiresAt } : {}),
           ...(order.workspaceId ? { workspaceId: order.workspaceId } : {})
         };
         await postgresStore.getPool().query(
           `UPDATE workstream_offers 
-           SET title = $1, amount = $2, metadata = $3 
-           WHERE id = $4`,
-          [invTitle, invAmt, JSON.stringify(updatedMeta), row.id]
+           SET title = $1, amount = $2, metadata = $3, response_deadline = COALESCE($4, response_deadline)
+           WHERE id = $5`,
+          [invTitle, invAmt, JSON.stringify(updatedMeta), order.reviewWindowExpiresAt || null, row.id]
         );
         createdInvoiceOffer = await viewOffer({
           id: row.id,
@@ -1425,6 +1476,7 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
           note: updatedMeta.note,
           files: updatedMeta.files,
           reference: updatedMeta.reference,
+          responseDeadline: order.reviewWindowExpiresAt || row.response_deadline || undefined,
           status: row.status,
           createdBy: row.created_by,
           createdAt: row.created_at
@@ -1437,12 +1489,14 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
           files: uploadedFiles.length > 0 ? uploadedFiles : undefined,
           reference: trimmedReference || undefined,
           originOrderId: order.id,
+          deliveryVersion: version,
+          ...(order.reviewWindowExpiresAt ? { responseDeadline: order.reviewWindowExpiresAt } : {}),
           ...(order.workspaceId ? { workspaceId: order.workspaceId } : {})
         };
         await postgresStore.getPool().query(
-          `INSERT INTO workstream_offers (id, order_id, kind, number, title, amount, status, created_by, created_at, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-          [newInvId, order.id, 'invoice', invNum, invTitle, invAmt, 'pending', caller?.id || order.sellerId, new Date().toISOString(), JSON.stringify(meta)]
+          `INSERT INTO workstream_offers (id, order_id, kind, number, title, amount, status, created_by, created_at, response_deadline, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [newInvId, order.id, 'invoice', invNum, invTitle, invAmt, 'pending', caller?.id || order.sellerId, new Date().toISOString(), order.reviewWindowExpiresAt || null, JSON.stringify(meta)]
         );
         const newInv: WorkstreamOffer = {
           id: newInvId,
@@ -1456,6 +1510,7 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
           note: meta.note,
           files: meta.files,
           reference: meta.reference,
+          responseDeadline: order.reviewWindowExpiresAt || undefined,
           status: 'pending',
           createdBy: caller?.id || order.sellerId,
           createdAt: new Date().toISOString()

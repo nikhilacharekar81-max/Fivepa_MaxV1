@@ -27,8 +27,8 @@ export const WorkstreamSummaryCard: React.FC<WorkstreamSummaryCardProps> = ({
   onViewPartnerProfile
 }) => {
   const isBuyer = currentUser?.id === order.buyerId;
-  const activeEscrow = escrowRemaining !== undefined ? escrowRemaining : ((order as any).escrowRemaining ?? (order.status === 'completed' ? 0 : Number(order.amount || 0)));
-  const releasedAmt = totalReleased !== undefined ? totalReleased : ((order as any).totalReleased ?? (order.status === 'completed' ? Number(order.amount || 0) : 0));
+  const activeEscrow = escrowRemaining !== undefined ? escrowRemaining : Number((order as any).escrowRemaining ?? (order as any).inEscrow ?? 0);
+  const releasedAmt = totalReleased !== undefined ? totalReleased : Number((order as any).totalReleased ?? 0);
 
   return (
     <div className="space-y-8 forced-13-17">

@@ -38,7 +38,8 @@ import {
   ensureWallet,
   validateOrderReleasePreconditions,
   getActiveEscrowRemaining,
-  getReviewWindowDays
+  getReviewWindowDays,
+  processAutoAcceptOrders
 } from '../services/orderService.js';
 import { broadcastMessage } from '../websocket.js';
 import { createNotification } from '../services/notificationService.js';
@@ -86,6 +87,7 @@ const router = Router();
 
 router.get('/workspaces', requireAuth, async (req: Request, res: Response) => {
   try {
+    await processAutoAcceptOrders();
     const authUserId = (req as any).authenticatedUserId || resolveAuthenticatedUserId(req);
     if (!authUserId) return res.status(401).json({ error: 'Authentication required' });
     const caller = await store.getUser(authUserId);
@@ -153,6 +155,7 @@ router.get('/workspaces', requireAuth, async (req: Request, res: Response) => {
 
 router.get('/workspaces/:id', requireAuth, async (req: Request, res: Response) => {
   try {
+    await processAutoAcceptOrders();
     const authUserId = (req as any).authenticatedUserId || resolveAuthenticatedUserId(req);
     if (!authUserId) return res.status(401).json({ error: 'Authentication required' });
     const caller = await store.getUser(authUserId);
@@ -767,6 +770,7 @@ router.post('/orders/:id/message', requireAuth, rateLimit(120, 60_000), async (r
 
 router.get('/offers', requireAuth, async (req: Request, res: Response) => {
   try {
+    await processAutoAcceptOrders();
     const authUserId = (req as any).authenticatedUserId;
     const pool = postgresStore.getPool();
     const result = await pool.query(
@@ -786,6 +790,7 @@ router.get('/offers', requireAuth, async (req: Request, res: Response) => {
 
 router.get('/orders/:id/offers', requireAuth, async (req: Request, res: Response) => {
   try {
+    await processAutoAcceptOrders();
     const caller = await offerCaller(req);
     let order = await store.getOrder(req.params.id);
     let workspace: any = null;
@@ -829,7 +834,7 @@ router.get('/orders/:id/offers', requireAuth, async (req: Request, res: Response
       esc = await financialRepository.getEscrow(order!.id);
       escrowFunded = await orderHasEscrow(order!.id);
       escrowRemaining = await getActiveEscrowRemaining(order!);
-      totalReleased = esc ? esc.releasedGross : (order!.status === 'completed' ? Number(order!.amount || 0) : 0);
+      totalReleased = esc ? esc.releasedGross : 0;
       hasPaidInvoice = await hasPaidInvoiceOrReleasedEscrow(order!);
     }
 
@@ -948,8 +953,10 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       }));
     }
 
-    const responseDeadline = (!isWorkspaceOnly && order!.orderType === 'project' && kind === 'invoice')
-      ? new Date(Date.now() + 7 * 86400000).toISOString()
+    const isProjectForInvoice = !isWorkspaceOnly && (order!.orderType === 'project' || (order as any).type === 'project' || Boolean(order!.projectId));
+    const invoiceReviewDays = isProjectForInvoice ? 7 : getReviewWindowDays();
+    const responseDeadline = (!isWorkspaceOnly && kind === 'invoice')
+      ? new Date(Date.now() + invoiceReviewDays * 86400000).toISOString()
       : undefined;
 
     const offer: WorkstreamOffer = {
@@ -1020,7 +1027,7 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
           const txExistingOffers = lockedOffersRes.rows.map(mapOfferRow).filter(o => o.orderId === activeOrder.id);
           const txHasPaidFirstInvoice = Boolean(
             (escRow && (Number((escRow as any).released || 0) > 0 || escRow.status === 'released')) ||
-            txExistingOffers.some(o => o.kind === 'invoice' && (o.status === 'paid' || o.status === 'accepted'))
+            txExistingOffers.some(o => o.kind === 'invoice' && o.status === 'paid')
           );
 
           if (kind === 'invoice') {
@@ -1108,8 +1115,10 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
               const gigReviewDays = getReviewWindowDays();
               activeOrder.reviewWindowDays = gigReviewDays;
               activeOrder.reviewWindowExpiresAt = new Date(new Date(deliveredAt).getTime() + gigReviewDays * 24 * 60 * 60 * 1000).toISOString();
-            } else if (responseDeadline) {
-              activeOrder.responseDeadline = responseDeadline;
+            } else {
+              activeOrder.reviewWindowDays = 7;
+              activeOrder.reviewWindowExpiresAt = responseDeadline || new Date(new Date(deliveredAt).getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
+              activeOrder.responseDeadline = activeOrder.reviewWindowExpiresAt;
             }
             if (Array.isArray(activeOrder.revisions)) {
               for (const rev of activeOrder.revisions) {
@@ -1266,6 +1275,9 @@ async function executeUnifiedOfferAccept(
       return { status: 400, body: { error: `Final invoice amount ($${invoiceAmount}) cannot be less than the current order escrow ($${currentEscrow}).` } };
     }
 
+    let releasedFreelancerNet = 0;
+    let releasedPlatformFee = 0;
+
     await postgresStore.executeInTransaction(async (client) => {
       const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [offer.id]);
       if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
@@ -1303,7 +1315,9 @@ async function executeUnifiedOfferAccept(
         await emitSystemEvent(order.id, 'revision_resolved', `📝 Revision resolved via accepted invoice ${offer.number}.`, {}, client);
       }
 
-      await releaseOrderFunds(order, caller.name, `Final invoice ${offer.number} accepted by buyer and escrow released`, false, `${idempotencyKey}-release`, false, client);
+      const releaseRes = await releaseOrderFunds(order, caller.name, `Final invoice ${offer.number} accepted by buyer and escrow released`, false, `${idempotencyKey}-release`, false, client);
+      releasedFreelancerNet = releaseRes.freelancerNet;
+      releasedPlatformFee = releaseRes.platformFee;
 
       offer.status = 'paid';
       offer.resolvedAt = now;
@@ -1321,7 +1335,7 @@ async function executeUnifiedOfferAccept(
             ? `Custom Order Invoice ${offer.number} for "${order.title}" ($${invoiceAmount}) was approved and paid. Custom Order Completed.`
             : `Invoice ${offer.number} for "${order.title}" ($${invoiceAmount}) was approved and paid.`,
           link: `/workstream/${order.id}`,
-          metadata: { orderId: order.id, offerId: offer.id, amount: invoiceAmount, isCustomOrder },
+          metadata: { orderId: order.id, offerId: offer.id, amount: invoiceAmount, freelancerNet: releasedFreelancerNet, platformFee: releasedPlatformFee, isCustomOrder },
           client
         }, client);
       }
@@ -1341,7 +1355,9 @@ async function executeUnifiedOfferAccept(
       body: {
         success: true,
         offer: await viewOffer(offer),
-        order: enrichOrderWithServiceInfo(order)
+        order: enrichOrderWithServiceInfo(order),
+        freelancerNet: releasedFreelancerNet,
+        platformFee: releasedPlatformFee
       }
     };
   } else if (isInitialFunding) {
