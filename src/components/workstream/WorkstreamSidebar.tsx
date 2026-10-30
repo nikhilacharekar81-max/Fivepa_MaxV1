@@ -78,7 +78,7 @@ export const WorkstreamSidebar: React.FC<WorkstreamSidebarProps> = ({
     <div className="space-y-6">
       {/* WORKSTREAM FILTERS */}
       <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-xs space-y-2">
-        <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-2 mb-3">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 mb-3">
           Workstream Filters
         </h3>
         {filterTabs.map(tab => {
@@ -97,7 +97,7 @@ export const WorkstreamSidebar: React.FC<WorkstreamSidebarProps> = ({
                 <span className={isActive ? 'text-white' : 'text-slate-400'}>{tab.icon}</span>
                 <span>{tab.label}</span>
               </div>
-              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+              <span className={`text-xs font-mono font-semibold px-2 py-0.5 rounded-full ${
                 isActive 
                   ? 'bg-slate-800 text-slate-200' 
                   : 'bg-slate-100 text-fiverr-muted'
@@ -113,20 +113,20 @@ export const WorkstreamSidebar: React.FC<WorkstreamSidebarProps> = ({
       {projects.length > 0 && (
         <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-xs space-y-3">
           <div className="flex items-center justify-between px-2">
-            <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
               <FolderKanban className="w-3.5 h-3.5 text-slate-400" />
               <span>Projects</span>
             </h3>
-            <span className="text-[10px] font-bold text-slate-400 font-mono">{projects.length}</span>
+            <span className="text-xs font-bold text-slate-400 font-mono">{projects.length}</span>
           </div>
           <div className="space-y-1 max-h-48 overflow-y-auto text-xs">
             {projectsWithCounts.slice(0, 10).map(p => {
               const isSelected = projectSearch === p.id;
               return (
-                <div
+                <button
                   key={p.id}
                   onClick={() => onProjectSelect(isSelected ? '' : p.id)}
-                  className={`px-2.5 py-1.5 rounded-lg hover:bg-slate-50 text-fiverr-dark flex items-center justify-between cursor-pointer font-medium border transition-colors ${
+                  className={`w-full px-2.5 py-1.5 rounded-lg hover:bg-slate-50 text-fiverr-dark flex items-center justify-between cursor-pointer font-medium border transition-colors ${
                     isSelected 
                       ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-bold' 
                       : 'border-transparent'
@@ -135,13 +135,13 @@ export const WorkstreamSidebar: React.FC<WorkstreamSidebarProps> = ({
                 >
                   <span className="truncate mr-2">• {p.title}</span>
                   {p.relatedCount > 0 && (
-                    <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full shrink-0 ${
+                    <span className={`text-xs font-mono font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
                       isSelected ? 'bg-emerald-200 text-emerald-800' : 'bg-slate-100 text-slate-600'
                     }`}>
                       {p.relatedCount}
                     </span>
                   )}
-                </div>
+                </button>
               );
             })}
           </div>
@@ -151,11 +151,11 @@ export const WorkstreamSidebar: React.FC<WorkstreamSidebarProps> = ({
       {/* MY PEOPLE / COLLABORATORS SECTION */}
       <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-xs space-y-3">
         <div className="flex items-center justify-between px-2">
-          <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
             <Users className="w-3.5 h-3.5 text-slate-400" />
             <span>My People</span>
           </h3>
-          <span className="text-[10px] font-bold text-emerald-600 font-mono">
+          <span className="text-xs font-bold text-emerald-600 font-mono">
             {filteredPeople.length} Contact{filteredPeople.length === 1 ? '' : 's'}
           </span>
         </div>
@@ -184,10 +184,10 @@ export const WorkstreamSidebar: React.FC<WorkstreamSidebarProps> = ({
               ).length;
 
               return (
-                <div
+              <button
                   key={person.id}
                   onClick={() => onSelectPersonFilter(isSelected ? null : person.id)}
-                  className={`flex items-center justify-between p-2 rounded-xl cursor-pointer transition-colors ${
+                  className={`w-full flex items-center justify-between p-2 rounded-xl cursor-pointer transition-colors ${
                     isSelected 
                       ? 'bg-emerald-50 border border-emerald-200' 
                       : 'hover:bg-slate-50 border border-transparent'
@@ -204,17 +204,17 @@ export const WorkstreamSidebar: React.FC<WorkstreamSidebarProps> = ({
                       <div className="text-xs font-bold text-fiverr-dark truncate">
                         {person.name}
                       </div>
-                      <span className="text-[10px] text-slate-400 uppercase tracking-tight block truncate">
+                      <span className="text-xs text-slate-400 font-semibold uppercase tracking-tight block truncate">
                         {person.role || 'Member'}
                       </span>
                     </div>
                   </div>
-                  <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-full shrink-0 ${
+                  <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded-full shrink-0 ${
                     isSelected ? 'bg-emerald-200 text-emerald-800' : 'bg-slate-100 text-fiverr-dark'
                   }`}>
                     {relatedOrdersCount}
                   </span>
-                </div>
+                </button>
               );
             })
           )}

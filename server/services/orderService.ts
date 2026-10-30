@@ -104,44 +104,115 @@ export function saveUsersToPostgres() { return Promise.resolve(); }
 export function saveGigsToPostgres() { return Promise.resolve(); }
 
 export async function syncUserBalances(userIds?: string[], externalClient?: any) {
-  const dbRunner = externalClient || postgresStore.getPool();
-  const useSavepoint = Boolean(externalClient);
-  const spName = 'sp_sync_user_balances';
-  try {
-    if (useSavepoint) {
-      await dbRunner.query(`SAVEPOINT ${spName}`);
-    }
-    const hasSpecificUsers = Array.isArray(userIds) && userIds.length > 0;
+  const runSync = async (client: any, isSavepoint: boolean) => {
+    const spName = 'sp_sync_user_balances';
+    try {
+      if (isSavepoint) {
+        await client.query(`SAVEPOINT ${spName}`);
+      }
+      const hasSpecificUsers = Array.isArray(userIds) && userIds.length > 0;
 
-    if (hasSpecificUsers) {
-      const distinctIds = Array.from(new Set(userIds.filter(Boolean))).sort();
-      if (distinctIds.length > 0) {
-        await dbRunner.query(`
+      if (hasSpecificUsers) {
+        const distinctIds = Array.from(new Set(userIds.filter(Boolean))).sort();
+        if (distinctIds.length > 0) {
+          // Unified Lock Order: 1. Lock Active Escrows sorted by order_id ASC
+          await client.query(`SELECT order_id FROM escrows WHERE buyer_id = ANY($1::text[]) AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`, [distinctIds]);
+          // 2. Lock Wallets sorted by user_id ASC
+          await client.query(`SELECT user_id FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE`, [distinctIds]);
+
+          await client.query(`
+            UPDATE users u
+            SET wallet_balance = w.available_balance
+            FROM wallets w
+            WHERE u.id = w.user_id
+              AND u.id = ANY($1::text[])
+              AND u.wallet_balance IS DISTINCT FROM w.available_balance
+          `, [distinctIds]);
+
+          await client.query(`
+            UPDATE users u
+            SET earned = COALESCE(ec.total_earned, 0)
+            FROM (
+              SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
+              FROM users u2
+              LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
+              WHERE u2.id = ANY($1::text[])
+              GROUP BY u2.id
+            ) ec
+            WHERE u.id = ec.user_id
+              AND u.earned IS DISTINCT FROM ec.total_earned
+          `, [distinctIds]);
+
+          await client.query(`
+            UPDATE wallets w
+            SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
+            FROM (
+              SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
+              FROM wallets w2
+              LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
+              WHERE w2.user_id = ANY($1::text[])
+              GROUP BY w2.user_id
+            ) e
+            WHERE w.user_id = e.user_id
+              AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
+          `, [distinctIds]);
+        }
+      } else {
+        // Unified Lock Order: 1. Lock all Active Escrows sorted by order_id ASC
+        await client.query(`SELECT order_id FROM escrows WHERE status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE`);
+        // 2. Lock all Wallets sorted by user_id ASC
+        await client.query(`SELECT user_id FROM wallets ORDER BY user_id ASC FOR UPDATE`);
+
+        await client.query(`
           UPDATE users u
           SET wallet_balance = w.available_balance
           FROM wallets w
           WHERE u.id = w.user_id
-            AND u.id = ANY($1::text[])
             AND u.wallet_balance IS DISTINCT FROM w.available_balance
-        `, [distinctIds]);
+        `);
+
+        await client.query(`
+          UPDATE users u
+          SET earned = COALESCE(ec.total_earned, 0)
+          FROM (
+            SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
+            FROM users u2
+            LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
+            GROUP BY u2.id
+          ) ec
+          WHERE u.id = ec.user_id
+            AND u.earned IS DISTINCT FROM ec.total_earned
+        `);
+
+        await client.query(`
+          UPDATE wallets w
+          SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
+          FROM (
+            SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
+            FROM wallets w2
+            LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
+            GROUP BY w2.user_id
+          ) e
+          WHERE w.user_id = e.user_id
+            AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
+        `);
       }
-    } else {
-      await dbRunner.query(`
-        UPDATE users u
-        SET wallet_balance = w.available_balance
-        FROM wallets w
-        WHERE u.id = w.user_id
-          AND u.wallet_balance IS DISTINCT FROM w.available_balance
-      `);
+      if (isSavepoint) {
+        await client.query(`RELEASE SAVEPOINT ${spName}`);
+      }
+    } catch (err) {
+      if (isSavepoint) {
+        try { await client.query(`ROLLBACK TO SAVEPOINT ${spName}`); } catch {}
+      }
+      console.error('[syncUserBalances] Error syncing balances:', err);
+      throw err;
     }
-    if (useSavepoint) {
-      await dbRunner.query(`RELEASE SAVEPOINT ${spName}`);
-    }
-  } catch (err) {
-    if (useSavepoint) {
-      try { await dbRunner.query(`ROLLBACK TO SAVEPOINT ${spName}`); } catch {}
-    }
-    console.error('[syncUserBalances] Error syncing balances:', err);
+  };
+
+  if (externalClient) {
+    return runSync(externalClient, true);
+  } else {
+    return postgresStore.executeInTransaction((client) => runSync(client, false));
   }
 }
 
@@ -469,12 +540,34 @@ export function validateOrderReleasePreconditions(order: Order, isAdmin = false,
 
 export function enrichOrderWithServiceInfo(o: Order, isAdmin: boolean = false) {
   const resolvedType = o.orderType || (o as any).type || (o.projectId ? 'project' : 'gig');
+  let reviewWindowDays = o.reviewWindowDays;
+  let reviewWindowExpiresAt = o.reviewWindowExpiresAt;
+  if (
+    resolvedType === 'gig' &&
+    o.status === 'delivered' &&
+    Array.isArray(o.deliveryHistory) &&
+    o.deliveryHistory.length > 0
+  ) {
+    const latestDelivery = o.deliveryHistory[o.deliveryHistory.length - 1];
+    const startMs = getReviewWindowStart(o, latestDelivery);
+    if (!isNaN(startMs)) {
+      const days = typeof reviewWindowDays === 'number' && reviewWindowDays > 0 ? reviewWindowDays : getReviewWindowDays();
+      reviewWindowDays = days;
+      if (!reviewWindowExpiresAt) {
+        reviewWindowExpiresAt = new Date(startMs + days * 24 * 60 * 60 * 1000).toISOString();
+      }
+    }
+  }
+  const isCustomOrder = Boolean(o.metadata?.isInquiry || (o as any).metadata?.isCustomOrder || (o as any).metadata?.customOrderFromInquiry);
   const base = {
     ...o,
     orderType: resolvedType,
     type: resolvedType,
+    ...(isCustomOrder ? { isCustomOrder: true, isInquiry: true } : {}),
     gigOrderId: o.gigOrderId || (resolvedType === 'gig' ? o.id : undefined),
     projectOrderId: o.projectOrderId || (resolvedType === 'project' ? o.id : undefined),
+    ...(reviewWindowDays !== undefined ? { reviewWindowDays } : {}),
+    ...(reviewWindowExpiresAt ? { reviewWindowExpiresAt } : {}),
     sellerName: (o as any).sellerName || o.sellerUsername || 'Seller',
     sellerAvatar: (o as any).sellerAvatar || '',
     buyerName: (o as any).buyerName || o.buyerUsername || 'Buyer',
@@ -546,7 +639,20 @@ export async function processCancellationTimeouts() {
             const requesterId = cancelReq.requesterId;
             const otherId = requesterId === freshOrder.buyerId ? freshOrder.sellerId : freshOrder.buyerId;
 
-            if (freshOrder.amount === 0 || /^inquiry:/i.test(freshOrder.title)) {
+            const orderMeta = typeof (freshRow as any).metadata === 'string'
+              ? (() => { try { return JSON.parse((freshRow as any).metadata); } catch { return {}; } })()
+              : ((freshRow as any).metadata || (freshOrder as any).metadata || {});
+            const isCustomOrder = Boolean((freshOrder as any).isCustomOrder || orderMeta.isCustomOrder || orderMeta.customOrderFromInquiry);
+            const escRow = await financialRepository.getEscrow(freshOrder.id, client);
+            const hasEscrowRecord = Boolean(escRow && (Number(escRow.remaining || 0) > 0 || escRow.status === 'held' || Number(escRow.amount || 0) > 0));
+
+            const isAuthoritativeInquiryOnly = Boolean(
+              ((freshOrder as any).isInquiry === true || orderMeta.isInquiry === true) &&
+              !isCustomOrder &&
+              !hasEscrowRecord
+            );
+
+            if (isAuthoritativeInquiryOnly) {
               freshOrder.status = 'cancelled';
               cancelReq.status = 'auto_cancelled';
               freshOrder.cancellationRequest = cancelReq;
@@ -665,7 +771,11 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
     }
 
     for (const order of targetOrders) {
-      const days = order.orderType === 'project' ? 7 : getReviewWindowDays();
+      const isProject = order.orderType === 'project';
+      const persistedDays = !isProject && typeof order.reviewWindowDays === 'number' && order.reviewWindowDays > 0
+        ? order.reviewWindowDays
+        : null;
+      const days = isProject ? 7 : (persistedDays ?? getReviewWindowDays());
       const windowMs = days * 24 * 60 * 60 * 1000;
 
       if (!Array.isArray(order.deliveryHistory) || order.deliveryHistory.length === 0) continue;
@@ -673,8 +783,18 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
       if (!latestDelivery || !latestDelivery.deliveredAt) continue;
 
       const deliveredAt = getReviewWindowStart(order, latestDelivery);
-      if (isNaN(deliveredAt)) continue;
-      if (now - deliveredAt < windowMs) continue;
+      const persistedExpiryMs = !isProject && order.reviewWindowExpiresAt ? Date.parse(order.reviewWindowExpiresAt) : NaN;
+      let reviewDeadlineMs: number;
+      if (!isNaN(persistedExpiryMs)) {
+        const restartedAtMs = order.reviewWindowRestartedAt ? Date.parse(order.reviewWindowRestartedAt) : NaN;
+        reviewDeadlineMs = (!isNaN(restartedAtMs) && restartedAtMs + windowMs > persistedExpiryMs)
+          ? restartedAtMs + windowMs
+          : persistedExpiryMs;
+      } else {
+        if (isNaN(deliveredAt)) continue;
+        reviewDeadlineMs = deliveredAt + windowMs;
+      }
+      if (now < reviewDeadlineMs) continue;
 
       if (Array.isArray(order.revisions)) {
         const hasActiveRequestedRevision = order.revisions.some(rev => rev.status === 'requested');
@@ -730,37 +850,89 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
           const freshOrder = (store as any).mapOrderRow ? (store as any).mapOrderRow(freshRow) : await store.getOrder(order.id, client);
           if (!freshOrder || freshOrder.status !== 'delivered') return null;
 
-          freshOrder.acceptedVersion = latestDelivery.version;
+          if (!Array.isArray(freshOrder.deliveryHistory) || freshOrder.deliveryHistory.length === 0) return null;
+          const freshLatestDelivery = freshOrder.deliveryHistory[freshOrder.deliveryHistory.length - 1];
+          if (!freshLatestDelivery || !freshLatestDelivery.deliveredAt || freshLatestDelivery.version !== latestDelivery.version) return null;
+
+          const freshIsProject = freshOrder.orderType === 'project';
+          const freshPersistedDays = !freshIsProject && typeof freshOrder.reviewWindowDays === 'number' && freshOrder.reviewWindowDays > 0
+            ? freshOrder.reviewWindowDays
+            : null;
+          const freshDays = freshIsProject ? 7 : (freshPersistedDays ?? days);
+          const freshWindowMs = freshDays * 24 * 60 * 60 * 1000;
+          const freshDeliveredAt = getReviewWindowStart(freshOrder, freshLatestDelivery);
+          const freshPersistedExpiryMs = !freshIsProject && freshOrder.reviewWindowExpiresAt ? Date.parse(freshOrder.reviewWindowExpiresAt) : NaN;
+          let freshReviewDeadlineMs: number;
+          if (!isNaN(freshPersistedExpiryMs)) {
+            const freshRestartedAtMs = freshOrder.reviewWindowRestartedAt ? Date.parse(freshOrder.reviewWindowRestartedAt) : NaN;
+            freshReviewDeadlineMs = (!isNaN(freshRestartedAtMs) && freshRestartedAtMs + freshWindowMs > freshPersistedExpiryMs)
+              ? freshRestartedAtMs + freshWindowMs
+              : freshPersistedExpiryMs;
+          } else {
+            if (isNaN(freshDeliveredAt)) return null;
+            freshReviewDeadlineMs = freshDeliveredAt + freshWindowMs;
+          }
+          if (now < freshReviewDeadlineMs) return null;
+
+          freshOrder.acceptedVersion = freshLatestDelivery.version;
           const relResult = await releaseOrderFunds(
             freshOrder, 
             'System Auto-Accept', 
-            `Auto-accept after buyer review window (${days} days) elapsed`, 
+            `Auto-accept after buyer review window (${freshDays} days) elapsed`, 
             false, 
             requestKey, 
             false, 
             client
           );
-          freshOrder.acceptedVersion = latestDelivery.version;
+          freshOrder.acceptedVersion = freshLatestDelivery.version;
           await store.saveOrder(freshOrder, client);
 
-          return { freshOrder, relResult };
+          const resolvedAtIso = new Date(now).toISOString();
+          const associatedOfferId = typeof (freshLatestDelivery as any).offerId === 'string' && (freshLatestDelivery as any).offerId
+            ? (freshLatestDelivery as any).offerId
+            : null;
+          if (associatedOfferId) {
+            await client.query(
+              "UPDATE workstream_offers SET status = 'paid', resolved_at = $1, resolved_by = 'system' WHERE id = $2 AND order_id = $3 AND kind = 'invoice' AND status = 'pending' AND amount <= $4",
+              [resolvedAtIso, associatedOfferId, freshOrder.id, freshOrder.amount]
+            );
+          } else {
+            const targetInvoiceRes = await client.query(
+              `SELECT id FROM workstream_offers
+               WHERE order_id = $1 AND kind = 'invoice' AND status = 'pending' AND amount <= $2
+               ORDER BY
+                 CASE WHEN (metadata->>'deliveryVersion') = $3 THEN 0 ELSE 1 END,
+                 created_at DESC
+               LIMIT 1
+               FOR UPDATE`,
+              [freshOrder.id, freshOrder.amount, String(freshLatestDelivery.version)]
+            );
+            if (targetInvoiceRes.rows.length > 0) {
+              await client.query(
+                "UPDATE workstream_offers SET status = 'paid', resolved_at = $1, resolved_by = 'system' WHERE id = $2 AND order_id = $3 AND kind = 'invoice' AND status = 'pending'",
+                [resolvedAtIso, targetInvoiceRes.rows[0].id, freshOrder.id]
+              );
+            }
+          }
+
+          return { freshOrder, relResult, freshDays };
         });
 
         if (!autoResult) continue;
-        const { freshOrder, relResult } = autoResult;
+        const { freshOrder, relResult, freshDays } = autoResult;
 
         const sysMsg: Message = {
           id: `msg_${randomUUID()}`,
           orderId: freshOrder.id,
           senderId: 'system',
           senderName: 'WorkPerHour System',
-          text: `🎉 Deliverables automatically accepted: Buyer review window (${days} days) closed without revisions or dispute. Escrow funds released to seller.`,
+          text: `🎉 Deliverables automatically accepted: Buyer review window (${freshDays} days) closed without revisions or dispute. Escrow funds released to seller.`,
           timestamp: new Date(now).toISOString(),
           type: 'system',
           metadata: {
             action: 'order_auto_accepted',
             acceptedVersion: latestDelivery.version,
-            reviewWindowDays: days
+            reviewWindowDays: freshDays
           }
         };
         await recordMessage(sysMsg);
@@ -771,7 +943,7 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
           role: 'system',
           action: 'ORDER_AUTO_ACCEPTED',
           target: `Order #${freshOrder.id}`,
-          details: `Auto-accepted deliverables (version ${latestDelivery.version}) after ${days}-day buyer review window expired`,
+          details: `Auto-accepted deliverables (version ${latestDelivery.version}) after ${freshDays}-day buyer review window expired`,
           timestamp: new Date(now).toISOString()
         };
         await registerAuditLog(autoLog);

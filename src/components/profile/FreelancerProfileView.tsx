@@ -15,7 +15,7 @@ interface FreelancerProfileViewProps {
   reviews?: Review[];
   onNavigate: (to: string, e?: React.MouseEvent) => void;
   onFeatureGig?: (gigId: string) => void;
-  onContact?: () => void;
+  onContact?: (freelancerId?: string) => void | Promise<void>;
   onEditProfile?: () => void;
 }
 
@@ -33,6 +33,7 @@ export const FreelancerProfileView: React.FC<FreelancerProfileViewProps> = ({
   const [searchGigs, setSearchGigs] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [copiedLink, setCopiedLink] = useState(false);
+  const [isContacting, setIsContacting] = useState(false);
 
   const isOwner = currentUser?.id === profileUser.id;
 
@@ -158,10 +159,20 @@ export const FreelancerProfileView: React.FC<FreelancerProfileViewProps> = ({
               ) : (
                 <button
                   type="button"
-                  onClick={onContact}
-                  className="flex-1 sm:flex-initial px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-md shadow-indigo-100 transition flex items-center justify-center gap-1.5"
+                  disabled={isContacting}
+                  onClick={async () => {
+                    if (onContact) {
+                      try {
+                        setIsContacting(true);
+                        await onContact(profileUser.id);
+                      } finally {
+                        setIsContacting(false);
+                      }
+                    }
+                  }}
+                  className={`flex-1 sm:flex-initial px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-md shadow-indigo-100 transition flex items-center justify-center gap-1.5 ${isContacting ? 'opacity-70 cursor-not-allowed' : ''}`}
                 >
-                  <MessageSquare className="w-3.5 h-3.5" /> Contact Me
+                  <MessageSquare className="w-3.5 h-3.5" /> {isContacting ? 'Opening WorkStream...' : 'Contact Me'}
                 </button>
               )}
 

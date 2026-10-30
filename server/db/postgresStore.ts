@@ -195,6 +195,15 @@ class PGlitePool {
       if (dataDir) {
         if (!fs.existsSync(dataDir)) {
           fs.mkdirSync(dataDir, { recursive: true });
+        } else {
+          const pidFile = path.join(dataDir, 'postmaster.pid');
+          if (fs.existsSync(pidFile)) {
+            try {
+              fs.unlinkSync(pidFile);
+            } catch {
+              // ignore stale pid cleanup errors
+            }
+          }
         }
         this.pglite = new PGlite(dataDir);
       } else {
@@ -570,6 +579,20 @@ export class PostgresStore {
     return this.ordersRepo.listOrders();
   }
 
+  async getOrderById(id: string, client?: any): Promise<Order | undefined> {
+    const res = await this.ordersRepo.getOrderById(id, client);
+    return res || undefined;
+  }
+
+  async listOrdersByWorkspaceId(workspaceId: string, client?: any): Promise<Order[]> {
+    return this.ordersRepo.listOrdersByWorkspaceId(workspaceId, client);
+  }
+
+  async resolveWorkspaceActiveOrder(workspaceId: string, client?: any): Promise<Order | undefined> {
+    const res = await this.ordersRepo.resolveWorkspaceActiveOrder(workspaceId, client);
+    return res || undefined;
+  }
+
   async saveReviews(reviews: Review[]): Promise<void> {
     return this.ordersRepo.saveReviews(reviews);
   }
@@ -590,12 +613,41 @@ export class PostgresStore {
   }
 
   async seedEscrow(orderId: string, orderTitle: string, buyerId: string, sellerId: string, amount: number, remaining: number, fundedAt: string): Promise<void> {
-    await this.getPool().query(
-      `INSERT INTO escrows (order_id, order_title, buyer_id, seller_id, amount, remaining, status, funded_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'held', $7)
-       ON CONFLICT (order_id) DO NOTHING`,
-      [orderId, orderTitle, buyerId, sellerId, amount, remaining, fundedAt]
-    );
+    await this.executeInTransaction(async (client) => {
+      // 1. Ensure buyer wallet row exists
+      await client.query(
+        `INSERT INTO wallets (user_id, user_name, user_email, user_role, available_balance, funds_on_hold, pending_withdrawals, status)
+         VALUES ($1, $1, $1 || '@example.com', 'buyer', 0.00, 0.00, 0.00, 'active')
+         ON CONFLICT (user_id) DO NOTHING`,
+        [buyerId]
+      );
+
+      // 2. Lock buyer wallet row
+      const walletLockRes = await client.query('SELECT user_id FROM wallets WHERE user_id = $1 FOR UPDATE', [buyerId]);
+      if (walletLockRes.rows.length === 0) {
+        throw new Error(`Failed to lock buyer wallet for seedEscrow: ${buyerId}`);
+      }
+
+      // 3. Insert escrow with RETURNING order_id
+      const res = await client.query(
+        `INSERT INTO escrows (order_id, order_title, buyer_id, seller_id, amount, remaining, status, funded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'held', $7)
+         ON CONFLICT (order_id) DO NOTHING
+         RETURNING order_id`,
+        [orderId, orderTitle, buyerId, sellerId, amount, remaining, fundedAt]
+      );
+
+      // 4. Update buyer wallet hold only if a new escrow row was inserted and remaining > 0
+      if (res.rows.length > 0 && remaining > 0) {
+        const updateRes = await client.query(
+          `UPDATE wallets SET funds_on_hold = funds_on_hold + $1 WHERE user_id = $2`,
+          [remaining, buyerId]
+        );
+        if (updateRes.rowCount !== 1) {
+          throw new Error(`seedEscrow wallet update failed for buyer ${buyerId}`);
+        }
+      }
+    });
   }
 
   async listUnclearedEarningsForUser(sellerId: string, client?: any): Promise<ClearingEarning[]> {
@@ -697,6 +749,10 @@ export class PostgresStore {
     return this.workspaceRepo.listMessages();
   }
 
+  async listMessagesForWorkspace(workspaceId: string, client?: any): Promise<Message[]> {
+    return this.workspaceRepo.listMessagesForWorkspace(workspaceId, client);
+  }
+
   async saveOffers(offers: WorkstreamOffer[]): Promise<void> {
     return this.workspaceRepo.saveOffers(offers);
   }
@@ -711,6 +767,10 @@ export class PostgresStore {
 
   async listOffersForOrder(orderId: string, client?: any): Promise<WorkstreamOffer[]> {
     return this.workspaceRepo.listOffersForOrder(orderId, client);
+  }
+
+  async listOffersForWorkspace(workspaceId: string, fallbackOrderId?: string, client?: any): Promise<WorkstreamOffer[]> {
+    return this.workspaceRepo.listOffersForWorkspace(workspaceId, fallbackOrderId, client);
   }
 
   async saveOffer(o: WorkstreamOffer, client?: any): Promise<void> {

@@ -313,22 +313,21 @@ export const ProjectSearchView: React.FC<ProjectSearchViewProps> = ({
     <div className="min-h-screen bg-slate-50/60 pb-16 font-sans">
       {/* 1. HERO HEADER BANNER */}
       <div className="bg-slate-900 text-white border-b border-slate-800 relative overflow-hidden py-10 md:py-14 px-4 sm:px-6 lg:px-8">
-        <div className="absolute inset-0 bg-gradient-to-r from-emerald-900/30 via-slate-900/80 to-teal-900/30 opacity-80" />
-        <div className="absolute -top-24 -right-24 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl" />
-        <div className="absolute -bottom-24 -left-24 w-96 h-96 bg-teal-500/10 rounded-full blur-3xl" />
+        <div className="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-900/90 to-emerald-950/60 opacity-90 pointer-events-none" />
+        <div className="absolute -top-24 -right-24 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
 
         <div className="max-w-7xl mx-auto relative z-10">
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-8">
             <div className="max-w-2xl space-y-3">
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold uppercase tracking-wider">
-                <Briefcase className="w-3.5 h-3.5" />
-                <span>Freelance Marketplace</span>
+              <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-bold uppercase tracking-wider shadow-xs">
+                <Briefcase className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Client Project Requests</span>
               </div>
-              <h1 className="text-3xl sm:text-4xl lg:text-5xl font-black tracking-tight text-white">
+              <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-white leading-tight">
                 Freelance Jobs & Buyer Requests
               </h1>
               <p className="text-sm sm:text-base text-slate-300 font-normal leading-relaxed">
-                Browse open client projects, filter by budget and category, and submit winning custom proposals.
+                Explore funded client requests, filter by budget and category, and submit winning custom proposals with escrow protection.
               </p>
             </div>
 
@@ -337,9 +336,9 @@ export const ProjectSearchView: React.FC<ProjectSearchViewProps> = ({
               <a
                 href="/post-project"
                 onClick={(e) => navigate('/post-project', e)}
-                className="inline-flex items-center gap-2.5 px-6 py-3.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm rounded-xl transition-all shadow-lg shadow-emerald-500/20 hover:scale-[1.02] active:scale-[0.98]"
+                className="inline-flex items-center gap-2.5 px-6 py-3.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs uppercase tracking-wider rounded-xl transition-all shadow-md hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
               >
-                <PlusCircle className="w-5 h-5 text-slate-950" />
+                <PlusCircle className="w-4 h-4 text-slate-950" />
                 <span>Post a Project Request</span>
               </a>
             </div>

@@ -23,7 +23,11 @@ if (typeof window !== 'undefined') {
 }
 
 const initialData = typeof window !== 'undefined' ? window.__INITIAL_DATA__ : undefined;
-const initialPath = typeof window !== 'undefined' ? (window.location.pathname + window.location.search) : '/';
+let rawPath = typeof window !== 'undefined' ? (window.location.pathname + window.location.search) : '/';
+if (rawPath.startsWith('/index.html')) {
+  rawPath = rawPath.replace('/index.html', '/') || '/';
+}
+const initialPath = rawPath;
 const rootElement = document.getElementById('root')!;
 
 if (rootElement.hasChildNodes() && initialData) {

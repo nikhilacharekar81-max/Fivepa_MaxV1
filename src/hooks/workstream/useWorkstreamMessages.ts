@@ -15,6 +15,10 @@ export interface UseWorkstreamMessagesOptions {
   currentUserId?: string;
   /** Active order ID for the workstream currently on screen. Takes priority over fetch cache refs. */
   activeOrderId?: string;
+  /** Active workspace ID for unified workstream messaging across multiple orders or pre-order inquiry. */
+  activeWorkspaceId?: string;
+  /** Whether the current workstream is an inquiry (workspace-only). */
+  isInquiry?: boolean;
 }
 
 export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}) {
@@ -27,17 +31,25 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
   currentUserIdRef.current = options.currentUserId;
   const activeOrderIdRef = useRef<string | undefined>(options.activeOrderId);
   activeOrderIdRef.current = options.activeOrderId;
+  const activeWorkspaceIdRef = useRef<string | undefined>(options.activeWorkspaceId);
+  activeWorkspaceIdRef.current = options.activeWorkspaceId;
+  const isInquiryRef = useRef<boolean | undefined>(options.isInquiry);
+  isInquiryRef.current = options.isInquiry;
   const [newMessageText, setNewMessageText] = useState('');
   
   // Guard against out-of-order responses when user rapidly switches workstreams
   const activeFetchOrderIdRef = useRef<string | null>(null);
 
-  const fetchMessages = useCallback(async (orderId: string) => {
-    if (!orderId) return;
-    activeFetchOrderIdRef.current = orderId;
+  const fetchMessages = useCallback(async (id?: string) => {
+    const targetId = id || activeOrderIdRef.current || activeWorkspaceIdRef.current;
+    if (!targetId) return;
+    activeFetchOrderIdRef.current = targetId;
 
     try {
-      const res = await fetchWithRetry(`/api/messages/${orderId}`);
+      const url = activeWorkspaceIdRef.current && (!id || id === activeWorkspaceIdRef.current)
+        ? `/api/workspaces/${activeWorkspaceIdRef.current}/messages`
+        : `/api/messages/${targetId}`;
+      const res = await fetchWithRetry(url);
 
       if (res.status === 401) {
         // Token has expired or is invalid; clear stale credentials cleanly
@@ -46,24 +58,34 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
       }
 
       // Check race condition: if user switched to another workstream while fetch was in flight, ignore
-      if (activeFetchOrderIdRef.current !== orderId) {
+      if (activeFetchOrderIdRef.current !== targetId) {
         return;
       }
 
       if (!res.ok) {
-        console.error(`Failed to fetch messages for ${orderId}: status ${res.status}`);
+        console.error(`Failed to fetch messages for ${targetId}: status ${res.status}`);
         return;
       }
 
       const data = await res.json();
       const newOrderMessages: Message[] = Array.isArray(data) ? data : [];
 
-      // Isolated cache merge: preserve all messages for other workstreams, update this order's messages
+      // Merge Workspace-wide messages while preserving messages from other Workspaces and each message's original orderId
       setMessages(prev => {
-        const otherMessages = prev.filter(m => m.orderId !== orderId);
         const byId = new Map<string, Message>();
-        for (const m of [...otherMessages, ...newOrderMessages]) {
+        for (const m of prev) {
+          if (String(m?.id || '').startsWith('msg_review_')) continue;
           const key = m?.metadata?.clientMessageId || m?.id;
+          if (key) {
+            byId.set(key, m);
+          }
+        }
+        for (const m of newOrderMessages) {
+          const clientKey = m?.metadata?.clientMessageId;
+          if (clientKey && byId.has(clientKey)) {
+            byId.delete(clientKey);
+          }
+          const key = m?.id || clientKey;
           if (key) {
             byId.set(key, m);
           }
@@ -74,10 +96,11 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
           const tB = b.timestamp ? new Date(b.timestamp).getTime() : NaN;
           const validA = !isNaN(tA);
           const validB = !isNaN(tB);
-          if (!validA && !validB) return 0;
+          if (!validA && !validB) return String(a.id || '').localeCompare(String(b.id || ''));
           if (!validA) return 1;
           if (!validB) return -1;
-          return tA - tB;
+          if (tA !== tB) return tA - tB;
+          return String(a.id || '').localeCompare(String(b.id || ''));
         });
       });
     } catch (err) {
@@ -86,20 +109,23 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
   }, [setMessages]);
 
   useEffect(() => {
-    if (options.activeOrderId) {
-      fetchMessages(options.activeOrderId);
+    const target = options.activeOrderId || options.activeWorkspaceId;
+    if (target) {
+      fetchMessages(target);
     }
-  }, [options.activeOrderId, fetchMessages]);
+  }, [options.activeOrderId, options.activeWorkspaceId, fetchMessages]);
 
-  const sendMessage = useCallback(async (text: string, type: string = 'text', fileInfo?: any, targetOrderId?: string) => {
-    const activeOrderId = targetOrderId || activeOrderIdRef.current || activeFetchOrderIdRef.current;
-    if (!activeOrderId || !text.trim()) return;
+  const sendMessage = useCallback(async (text: string, type: string = 'text', fileInfo?: any, targetOrderId?: string, targetWorkspaceId?: string) => {
+    const activeOrderId = targetOrderId || activeOrderIdRef.current;
+    const activeWorkspaceId = targetWorkspaceId || activeWorkspaceIdRef.current;
+    if ((!activeOrderId && !activeWorkspaceId) || !text.trim()) return;
 
     const clientMessageId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
 
     const tempMessage: Message = {
       id: clientMessageId,
-      orderId: activeOrderId,
+      orderId: activeOrderId || undefined,
+      workspaceId: activeWorkspaceId || undefined,
       senderId: currentUserIdRef.current || 'current_user',
       senderName: 'You',
       text: text.trim(),
@@ -107,7 +133,7 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
       type: type as any,
       fileInfo,
       status: 'sending',
-      metadata: { clientMessageId }
+      metadata: { clientMessageId, ...(activeWorkspaceId ? { workspaceId: activeWorkspaceId } : {}) }
     };
 
     // Optimistic update
@@ -116,14 +142,15 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
 
     const attemptSend = async () => {
       try {
-        const res = await fetchWithRetry(`/api/orders/${activeOrderId}/message`, {
+        const isWorkspaceOnly = !!isInquiryRef.current;
+        const url = isWorkspaceOnly ? '/api/messages' : `/api/orders/${activeOrderId}/message`;
+        const bodyPayload = isWorkspaceOnly
+          ? { workspaceId: activeWorkspaceId, text: text.trim(), type, fileInfo, clientMessageId }
+          : { text: text.trim(), type, fileInfo, clientMessageId };
+
+        const res = await fetchWithRetry(url, {
           method: 'POST',
-          body: JSON.stringify({
-            text: text.trim(),
-            type,
-            fileInfo,
-            clientMessageId
-          })
+          body: JSON.stringify(bodyPayload)
         });
 
         if (res.ok) {

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Receipt, X, Upload, Link as LinkIcon, FileText, Trash2, CheckCircle2, Loader2, ShieldCheck } from 'lucide-react';
-import { WorkstreamItem } from './types';
+import { WorkstreamItem, isInquiryWorkstream } from './types';
 import { uploadWorkstreamFile } from '../../utils/workstreamUpload';
 
 interface WorkstreamDeliverModalProps {
@@ -26,8 +26,9 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
   onClose,
   onSubmitDelivery
 }) => {
+  const isCustomOrderStream = isInquiryWorkstream(order);
   const defaultEscrow = escrowRemaining !== undefined && escrowRemaining > 0 ? escrowRemaining : Number(order.amount || 0);
-  const [invoiceTitle, setInvoiceTitle] = useState(`Invoice for ${order.title}`);
+  const [invoiceTitle, setInvoiceTitle] = useState(isCustomOrderStream ? `Custom Order Invoice for ${order.title}` : `Invoice for ${order.title}`);
   const [invoiceAmount, setInvoiceAmount] = useState(String(defaultEscrow || ''));
   const [notes, setNotes] = useState('');
   const [externalLink, setExternalLink] = useState('');
@@ -38,10 +39,10 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setInvoiceTitle(`Invoice for ${order.title}`);
+      setInvoiceTitle(isCustomOrderStream ? `Custom Order Invoice for ${order.title}` : `Invoice for ${order.title}`);
       setInvoiceAmount(String(defaultEscrow || ''));
     }
-  }, [isOpen, order.title, defaultEscrow]);
+  }, [isOpen, order.title, defaultEscrow, isCustomOrderStream]);
 
   if (!isOpen) return null;
 
@@ -69,14 +70,16 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!notes.trim() || uploading) return;
+    if (uploading) return;
+    const effectiveTitle = invoiceTitle.trim() || (isCustomOrderStream ? `Custom Order Invoice for ${order.title}` : `Invoice for ${order.title}`);
+    const effectiveNotes = notes.trim() || effectiveTitle;
     const parsedAmount = Number(invoiceAmount) > 0 ? Number(invoiceAmount) : defaultEscrow;
 
     onSubmitDelivery({
-      notes: notes.trim(),
+      notes: effectiveNotes,
       reference: externalLink.trim() || undefined,
       files: attachedFiles,
-      invoiceTitle: invoiceTitle.trim() || `Invoice for ${order.title}`,
+      invoiceTitle: effectiveTitle,
       invoiceAmount: parsedAmount
     });
     setNotes('');
@@ -95,8 +98,8 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
               <Receipt className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-fiverr-dark">Raise Invoice & Deliver Work</h3>
-              <p className="text-[11px] text-slate-400">Order #{order.id} • Posts an interactive Invoice card in WorkStream</p>
+              <h3 className="text-base font-bold text-fiverr-dark">{isCustomOrderStream ? 'Raise Custom Order Invoice & Deliver Work' : 'Raise Invoice & Deliver Work'}</h3>
+              <p className="text-[11px] text-slate-400">{isCustomOrderStream ? `Custom Order #${order.id} • Posts an interactive Custom Order Invoice card in WorkStream` : `Order #${order.id} • Posts an interactive Invoice card in WorkStream`}</p>
             </div>
           </div>
           <button
@@ -119,14 +122,14 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="sm:col-span-2">
               <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Invoice Description *
+                {isCustomOrderStream ? 'Custom Order Invoice Description *' : 'Invoice Description *'}
               </label>
               <input
                 type="text"
                 required
                 value={invoiceTitle}
                 onChange={(e) => setInvoiceTitle(e.target.value)}
-                placeholder="e.g., Final Deliverable & Invoice"
+                placeholder={isCustomOrderStream ? 'e.g., Custom Order Invoice — Completed deliverables' : 'e.g., Final Deliverable & Invoice'}
                 className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition"
               />
             </div>
@@ -148,10 +151,9 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
 
           <div>
             <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-              Delivery Summary & Release Notes *
+              Delivery Summary & Release Notes (Optional)
             </label>
             <textarea
-              required
               rows={4}
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
@@ -244,11 +246,11 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={!notes.trim() || uploading}
+              disabled={!invoiceTitle.trim() || uploading}
               className="flex-1 py-3 px-4 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold rounded-2xl text-xs shadow-lg transition cursor-pointer flex items-center justify-center gap-1.5"
             >
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              <span>Raise Invoice & Deliver</span>
+              <span>{isCustomOrderStream ? 'Raise Custom Order Invoice' : 'Raise Invoice & Deliver'}</span>
             </button>
           </div>
         </form>

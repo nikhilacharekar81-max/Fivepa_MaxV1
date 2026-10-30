@@ -47,10 +47,27 @@ class WorkspaceService {
     await postgresStore.saveWorkspaces(list);
   }
 
+  private syncWorkspaceToMemory(workspace: Workspace & { updatedAt?: string }, client?: any): void {
+    const isTx = Boolean(client) || postgresStore.isActiveTransaction();
+    if (isTx) {
+      postgresStore.onCommit(() => {
+        const current = this.workspaces.get(workspace.workspaceId) as (Workspace & { updatedAt?: string }) | undefined;
+        if (!current || !current.updatedAt || !workspace.updatedAt || new Date(workspace.updatedAt).getTime() >= new Date(current.updatedAt).getTime()) {
+          this.workspaces.set(workspace.workspaceId, workspace);
+        }
+      });
+    } else {
+      const current = this.workspaces.get(workspace.workspaceId) as (Workspace & { updatedAt?: string }) | undefined;
+      if (!current || !current.updatedAt || !workspace.updatedAt || new Date(workspace.updatedAt).getTime() >= new Date(current.updatedAt).getTime()) {
+        this.workspaces.set(workspace.workspaceId, workspace);
+      }
+    }
+  }
+
   public async createWorkspaceAsync(params: {
     buyerId: string;
     sellerId: string;
-    originType: 'gig' | 'project';
+    originType: 'gig' | 'project' | 'profile';
     originId: string;
     activeOrderId?: string;
     title?: string;
@@ -71,14 +88,14 @@ class WorkspaceService {
       title: params.title || params.originId
     };
     await this.persistWorkspace(workspace, client);
-    this.workspaces.set(workspaceId, workspace);
+    this.syncWorkspaceToMemory(workspace, client);
     return workspace;
   }
 
   public createWorkspace(params: {
     buyerId: string;
     sellerId: string;
-    originType: 'gig' | 'project';
+    originType: 'gig' | 'project' | 'profile';
     originId: string;
     activeOrderId?: string;
     title?: string;
@@ -98,7 +115,7 @@ class WorkspaceService {
       orderIds: params.activeOrderId ? [params.activeOrderId] : [],
       title: params.title || params.originId
     };
-    this.workspaces.set(workspaceId, workspace);
+    this.syncWorkspaceToMemory(workspace);
     this.persistWorkspace(workspace).catch(err => {
       console.error(`[WorkspaceService] Workspace creation persist error for ${workspace.workspaceId}:`, err);
     });
@@ -112,10 +129,13 @@ class WorkspaceService {
   public async getWorkspaceAsync(workspaceId: string, client?: any): Promise<Workspace | undefined> {
     const ws = await postgresStore.getWorkspace(workspaceId, client);
     if (ws) {
-      this.workspaces.set(workspaceId, ws);
+      this.syncWorkspaceToMemory(ws as any, client);
       return ws;
     }
-    this.workspaces.delete(workspaceId);
+    const isTx = Boolean(client) || postgresStore.isActiveTransaction();
+    if (!isTx) {
+      this.workspaces.delete(workspaceId);
+    }
     return undefined;
   }
 
@@ -146,30 +166,38 @@ class WorkspaceService {
 
     if (order.workspaceId) {
       const dbWs = await postgresStore.getWorkspace(order.workspaceId, client);
-      if (dbWs) {
+      if (dbWs && dbWs.buyerId === order.buyerId && dbWs.sellerId === order.sellerId) {
         ws = dbWs as Workspace & { orderIds?: string[]; updatedAt?: string };
-      } else if (this.workspaces.has(order.workspaceId)) {
-        ws = this.workspaces.get(order.workspaceId)! as Workspace & { orderIds?: string[]; updatedAt?: string };
+      } else if (!dbWs && this.workspaces.has(order.workspaceId)) {
+        const memWs = this.workspaces.get(order.workspaceId)! as Workspace & { orderIds?: string[]; updatedAt?: string };
+        if (memWs.buyerId === order.buyerId && memWs.sellerId === order.sellerId) {
+          ws = memWs;
+        }
       }
     }
 
     if (ws) {
-      const updatedOrderIds = Array.isArray(ws.orderIds) ? [...ws.orderIds] : [];
-      if (!updatedOrderIds.includes(order.id)) updatedOrderIds.push(order.id);
+      const existingOrderIds = Array.isArray(ws.orderIds) ? [...ws.orderIds] : [];
+      const isNewOrderInWorkspace = !existingOrderIds.includes(order.id);
+      const updatedOrderIds = isNewOrderInWorkspace ? [...existingOrderIds, order.id] : existingOrderIds;
+      const nextActiveOrderId =
+        isNewOrderInWorkspace || !ws.activeOrderId || !updatedOrderIds.includes(ws.activeOrderId)
+          ? order.id
+          : ws.activeOrderId;
       const updatedWs: Workspace & { orderIds?: string[]; updatedAt?: string } = {
         ...ws,
-        activeOrderId: order.id,
+        activeOrderId: nextActiveOrderId,
         orderIds: updatedOrderIds,
         updatedAt: new Date().toISOString()
       };
       await this.persistWorkspace(updatedWs, client);
-      this.workspaces.set(updatedWs.workspaceId, updatedWs);
+      this.syncWorkspaceToMemory(updatedWs, client);
       order.workspaceId = updatedWs.workspaceId;
       return updatedWs;
     }
 
-    const originType = order.projectId ? 'project' : 'gig';
-    const originId = order.projectId || order.gigId || order.id;
+    const originType = order.projectId ? 'project' : (order.gigId ? 'gig' : 'profile');
+    const originId = order.projectId || order.gigId || order.sellerId || order.id;
 
     ws = await this.createWorkspaceAsync({
       buyerId: order.buyerId,
@@ -184,18 +212,55 @@ class WorkspaceService {
     return ws;
   }
 
+  public async recordOrder(order: Order, client?: any): Promise<Workspace> {
+    if (!order.workspaceId) {
+      return this.ensureWorkspaceForOrderAsync(order, client);
+    }
+    const dbWs = await postgresStore.getWorkspace(order.workspaceId, client);
+    const baseWs = (dbWs && dbWs.buyerId === order.buyerId && dbWs.sellerId === order.sellerId)
+      ? dbWs
+      : (this.workspaces.has(order.workspaceId) &&
+         this.workspaces.get(order.workspaceId)!.buyerId === order.buyerId &&
+         this.workspaces.get(order.workspaceId)!.sellerId === order.sellerId
+          ? this.workspaces.get(order.workspaceId)!
+          : undefined);
+    if (!baseWs) {
+      return this.ensureWorkspaceForOrderAsync(order, client);
+    }
+    const updatedOrderIds = Array.isArray(baseWs.orderIds) ? [...baseWs.orderIds] : [];
+    if (!updatedOrderIds.includes(order.id)) updatedOrderIds.push(order.id);
+    const updatedWs: Workspace & { orderIds?: string[]; updatedAt?: string; title?: string } = {
+      ...baseWs,
+      activeOrderId: order.id,
+      orderIds: updatedOrderIds,
+      title: order.title || (baseWs as any).title || baseWs.originId,
+      updatedAt: new Date().toISOString()
+    };
+    await this.persistWorkspace(updatedWs, client);
+    this.syncWorkspaceToMemory(updatedWs, client);
+    return updatedWs;
+  }
+
   public ensureWorkspaceForOrder(order: Order): Workspace {
     let ws: (Workspace & { orderIds?: string[]; updatedAt?: string }) | undefined;
 
     if (order.workspaceId && this.workspaces.has(order.workspaceId)) {
-      ws = this.workspaces.get(order.workspaceId)! as Workspace & { orderIds?: string[]; updatedAt?: string };
+      const candidate = this.workspaces.get(order.workspaceId)! as Workspace & { orderIds?: string[]; updatedAt?: string };
+      if (candidate.buyerId === order.buyerId && candidate.sellerId === order.sellerId) {
+        ws = candidate;
+      }
     }
 
     if (ws) {
       const targetWs = ws;
-      targetWs.activeOrderId = order.id;
       if (!Array.isArray(targetWs.orderIds)) targetWs.orderIds = [];
-      if (!targetWs.orderIds.includes(order.id)) targetWs.orderIds.push(order.id);
+      const isNewOrderInWorkspace = !targetWs.orderIds.includes(order.id);
+      if (isNewOrderInWorkspace) {
+        targetWs.orderIds.push(order.id);
+        targetWs.activeOrderId = order.id;
+      } else if (!targetWs.activeOrderId || !targetWs.orderIds.includes(targetWs.activeOrderId)) {
+        targetWs.activeOrderId = order.id;
+      }
       targetWs.updatedAt = new Date().toISOString();
       this.persistWorkspace(targetWs).catch(err => {
         console.error(`[WorkspaceService] Workspace update persist error for ${targetWs.workspaceId}:`, err);

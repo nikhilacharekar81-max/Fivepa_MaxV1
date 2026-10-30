@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Sparkles, Code, Cpu, Palette, Smartphone, Shield } from 'lucide-react';
+import { Code, Cpu, Palette, Smartphone } from 'lucide-react';
 
 interface GigImageProps {
   src?: string | null;
@@ -74,10 +74,7 @@ export const GigImage: React.FC<GigImageProps> = ({
     <div className={`relative overflow-hidden bg-gradient-to-br ${theme.bg} p-5 flex flex-col justify-between select-none ${className}`}>
       <div className="absolute -right-8 -bottom-8 w-32 h-32 rounded-full bg-white/5 blur-xl pointer-events-none" />
       
-      <div className="flex items-center justify-between relative z-10">
-        <span className={`text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-md ${theme.badgeBg} border ${theme.border} backdrop-blur-md`}>
-          {category || 'Verified Service'}
-        </span>
+      <div className="flex items-center justify-end relative z-10">
         <div className="w-8 h-8 rounded-xl bg-white/10 backdrop-blur-md flex items-center justify-center border border-white/10 shadow-sm">
           {theme.icon}
         </div>
@@ -88,13 +85,7 @@ export const GigImage: React.FC<GigImageProps> = ({
           {title}
         </h4>
       </div>
-
-      <div className="flex items-center justify-between text-[10px] font-mono text-slate-300 opacity-90 relative z-10 pt-2 border-t border-white/10">
-        <span className="flex items-center gap-1 font-bold text-emerald-400">
-          <Shield className="w-3 h-3" /> 100% Escrow Protected
-        </span>
-        <span className="text-slate-400">WorkPerHour</span>
-      </div>
     </div>
   );
 };
+

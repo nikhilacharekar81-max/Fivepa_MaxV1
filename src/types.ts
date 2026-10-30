@@ -164,12 +164,13 @@ export interface Workspace {
   workspaceId: string;
   buyerId: string;
   sellerId: string;
-  originType: 'gig' | 'project';
+  originType: 'gig' | 'project' | 'profile';
   originId: string;
   createdAt: string;
   status: 'active' | 'archived';
   activeOrderId?: string;
   orderIds?: string[];
+  metadata?: Record<string, any>;
 }
 
 export interface GigOrder extends Order {
@@ -256,6 +257,9 @@ export interface Order {
   hasPaidInvoice?: boolean;
   type?: 'gig' | 'project';
   reviewWindowRestartedAt?: string;
+  metadata?: Record<string, any>;
+  isCustomOrder?: boolean;
+  isInquiry?: boolean;
   cancellationRequest?: {
     requestedBy: 'buyer' | 'seller';
     requesterId: string;
@@ -460,13 +464,25 @@ export interface AuditLog {
 
 export interface Message {
   id: string;
-  orderId: string;
+  orderId?: string;
+  workspaceId?: string;
   senderId: string;
   senderName: string;
   text: string;
   timestamp: string;
   type?: 'message' | 'system' | 'file' | 'deliverable';
-  fileInfo?: { name: string; size: string; url: string; type?: string; category?: string };
+  fileInfo?: {
+    name: string;
+    size: string;
+    url: string;
+    type?: string;
+    category?: string;
+    orderId?: string;
+    orderTitle?: string;
+    workspaceId?: string;
+    uploaderId?: string;
+    source?: string;
+  };
   metadata?: {
     amount?: number;
     action?: string;
@@ -488,6 +504,8 @@ export interface Message {
     oldDate?: string;
     newDueDate?: string;
     files?: any;
+    reviewId?: string;
+    reviewerId?: string;
     reviewerRole?: string;
     disputeId?: string;
     raisedBy?: string;
@@ -495,6 +513,10 @@ export interface Message {
     reply?: any;
     status?: string;
     autoProcessed?: boolean;
+    workspaceId?: string;
+    originOrderId?: string;
+    resultingOrderId?: string;
+    newOrderId?: string;
   };
   status?: 'sending' | 'sent' | 'failed';
 }
@@ -520,7 +542,9 @@ export type WorkstreamOfferStatus = 'pending' | 'accepted' | 'paid' | 'declined'
 export interface WorkstreamOffer {
   id: string;
   number: string;
-  orderId: string;
+  orderId?: string;
+  originOrderId?: string;
+  resultingOrderId?: string;
   workspaceId?: string;
   proposalId?: string;
   kind: WorkstreamOfferKind;

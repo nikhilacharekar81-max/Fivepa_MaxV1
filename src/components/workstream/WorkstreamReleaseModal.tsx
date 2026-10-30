@@ -58,7 +58,7 @@ export const WorkstreamReleaseModal: React.FC<WorkstreamReleaseModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-fiverr-dark">Release Escrow Funds</h3>
-              <p className="text-[11px] text-slate-400">Order #{order.id}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">Order #{order.id}</p>
             </div>
           </div>
           <button
@@ -73,14 +73,14 @@ export const WorkstreamReleaseModal: React.FC<WorkstreamReleaseModalProps> = ({
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl flex items-center justify-between">
             <div>
-              <span className="text-[11px] text-slate-400 uppercase font-semibold block">
+              <span className="text-xs text-slate-400 uppercase font-semibold block">
                 Total Escrow Release
               </span>
               <span className="text-xl font-bold font-mono text-emerald-600">
                 ${order.amount.toLocaleString()} USD
               </span>
             </div>
-            <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 text-[10px] font-bold uppercase rounded-full">
+            <span className="px-2.5 py-1 bg-emerald-100 text-emerald-800 text-xs font-bold uppercase rounded-full">
               Instant Payout
             </span>
           </div>
@@ -91,12 +91,12 @@ export const WorkstreamReleaseModal: React.FC<WorkstreamReleaseModalProps> = ({
                 <Receipt className="w-4 h-4 text-amber-700 shrink-0" />
                 <span>Final Invoice Pending (${pendingInvoice.amount.toLocaleString()})</span>
               </div>
-              <p className="text-[11px] text-amber-800 leading-relaxed">
+              <p className="text-xs text-amber-800 leading-relaxed">
                 A final invoice ({pendingInvoice.number}) for <strong>${pendingInvoice.amount.toLocaleString()}</strong> is awaiting payment. Releasing escrow directly is locked to avoid financial mismatch. Please click <strong>Pay Invoice</strong> on the invoice card in the workstream message stream to pay the invoice and release funds.
               </p>
             </div>
           ) : (
-            <div className="p-3 bg-emerald-50/80 text-[11px] text-emerald-800 rounded-2xl border border-emerald-200 flex items-start gap-2.5 leading-relaxed">
+            <div className="p-3 bg-emerald-50/80 text-xs text-emerald-800 rounded-2xl border border-emerald-200 flex items-start gap-2.5 leading-relaxed">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
               <span>
                 Releasing escrow accepts the deliverables, marks the Workstream as completed, and transfers the funds to the seller. Review submission is completely optional and handled separately.
@@ -105,7 +105,7 @@ export const WorkstreamReleaseModal: React.FC<WorkstreamReleaseModalProps> = ({
           )}
 
           {(error || propError) && (
-            <div className="p-3 bg-red-50/80 text-[11px] text-red-700 rounded-2xl border border-red-200 flex items-start gap-2.5">
+            <div className="p-3 bg-red-50/80 text-xs text-red-700 rounded-2xl border border-red-200 flex items-start gap-2.5">
               <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
               <span>{error || propError}</span>
             </div>

@@ -35,7 +35,9 @@ export function useWorkstream(props?: any) {
     messages: props?.messages,
     setMessages: props?.setMessages,
     currentUserId: (props?.impersonatedUser || props?.currentUser)?.id,
-    activeOrderId: currentSelectedOrder?.id
+    activeOrderId: currentSelectedOrder?.id,
+    activeWorkspaceId: currentSelectedOrder?.workspaceId || props?.selectedWorkspaceId,
+    isInquiry: !!(currentSelectedOrder as any)?.isInquiry
   });
   
   const currentSelectedOrderRef = useRef(currentSelectedOrder);
@@ -63,6 +65,7 @@ export function useWorkstream(props?: any) {
 
   const files = useWorkstreamFiles({
     selectedOrder: currentSelectedOrder,
+    orders: list.hydratedWorkstreamItems,
     messages: activeMessages
   });
 

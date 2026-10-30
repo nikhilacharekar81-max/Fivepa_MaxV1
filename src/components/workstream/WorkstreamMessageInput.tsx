@@ -40,11 +40,12 @@ interface WorkstreamMessageInputProps {
   currencySymbol?: string;
   disabled?: boolean;
   placeholder?: string;
+  isCustomOrderStream?: boolean;
 }
 
 const inputCls =
-  'w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-xs text-fiverr-dark placeholder-slate-400 focus:outline-none focus:border-emerald-500 transition';
-const labelCls = 'block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1';
+  'w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-sm text-fiverr-dark placeholder-slate-400 focus:outline-none focus:border-emerald-500 transition';
+const labelCls = 'block text-xs font-bold text-slate-600 uppercase tracking-wider mb-1.5';
 
 export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
   onSendMessage,
@@ -64,7 +65,8 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
   workspaceId,
   currencySymbol = '$',
   disabled = false,
-  placeholder = 'Click here to reply...'
+  placeholder = 'Click here to reply...',
+  isCustomOrderStream = false
 }) => {
   const [tab, setTab] = useState<ComposerTab>('message');
   const [text, setText] = useState('');
@@ -199,8 +201,8 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
     setTab('message');
   };
 
-  const tabBtn = (active: boolean, isDisabled = false) =>
-    `px-4 py-3 text-[11px] font-bold uppercase tracking-wider flex items-center gap-1.5 border-b-2 transition whitespace-nowrap ${
+  const tabBtn = (active: boolean, isDisabled = false, fontClass = 'text-[13px] leading-[17px]') =>
+    `px-4 py-3 ${fontClass} font-bold uppercase tracking-wider flex items-center gap-1.5 border-b-2 transition whitespace-nowrap ${
       isDisabled
         ? 'border-transparent text-slate-300 cursor-not-allowed'
         : active
@@ -213,8 +215,20 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
   const refundOff = !canRefundEscrow || disabled || !onRefundEscrow;
 
   const headings: Record<WorkstreamOfferKind, { title: string; hint: string; icon: React.ReactNode }> = {
-    proposal: { title: 'New Proposal', hint: 'Set the scope, price and delivery time. The buyer accepts it and pays into escrow.', icon: <FileSignature className="w-4 h-4 text-emerald-600" /> },
-    invoice: { title: 'Raise an Invoice & Deliver Work', hint: 'Attach deliverables and submit your invoice to release escrow funds into your wallet.', icon: <Receipt className="w-4 h-4 text-emerald-600" /> },
+    proposal: {
+      title: isCustomOrderStream ? 'Custom Order Proposal' : 'New Proposal',
+      hint: isCustomOrderStream
+        ? 'Set the scope, price and delivery time. The buyer accepts the proposal and funds escrow to create the Custom Order.'
+        : 'Set the scope, price and delivery time. The buyer accepts it and pays into escrow.',
+      icon: <FileSignature className="w-4 h-4 text-emerald-600" />
+    },
+    invoice: {
+      title: isCustomOrderStream ? 'Raise Custom Order Invoice' : 'Raise an Invoice & Deliver Work',
+      hint: isCustomOrderStream
+        ? 'Submit your invoice for completed work under this Custom Order to release escrow.'
+        : 'Attach deliverables and submit your invoice to release escrow funds into your wallet.',
+      icon: <Receipt className="w-4 h-4 text-emerald-600" />
+    },
     deposit: { title: 'Request Deposit', hint: 'Ask the buyer to fund escrow before you start.', icon: <Lock className="w-4 h-4 text-emerald-600" /> }
   };
 
@@ -222,26 +236,26 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
     <div className="p-4 sm:p-5 bg-white border-t border-slate-100">
       <div className="bg-slate-50 border border-slate-200 rounded-2xl">
         <div className="flex items-stretch border-b border-slate-200 rounded-t-2xl overflow-visible flex-wrap">
-          <button type="button" onClick={() => switchTab('message')} className={tabBtn(tab === 'message') + ' rounded-tl-2xl'}>
+          <button type="button" onClick={() => switchTab('message')} className={tabBtn(tab === 'message', false, '!text-[11px] leading-[15px]') + ' rounded-tl-2xl'}>
             <MessageSquare className="w-3.5 h-3.5" /> Send Message
           </button>
 
-          <button type="button" onClick={() => onStartVideoCall?.()} disabled={!onStartVideoCall} className={tabBtn(false, !onStartVideoCall)}>
+          <button type="button" onClick={() => onStartVideoCall?.()} disabled={!onStartVideoCall} className={tabBtn(false, !onStartVideoCall, '!text-[11px] leading-[15px]')}>
             <Video className="w-3.5 h-3.5" /> Video Call
           </button>
 
-          <button type="button" disabled={proposalOff} title={proposalOff ? proposalHint : 'Send a Proposal'}
-            onClick={() => switchTab('proposal')} className={tabBtn(tab === 'proposal', proposalOff)}>
-            <FileSignature className="w-3.5 h-3.5" /> New Proposal
+          <button type="button" disabled={proposalOff} title={proposalOff ? proposalHint : (isCustomOrderStream ? 'Send a Custom Order Proposal' : 'Send a Proposal')}
+            onClick={() => switchTab('proposal')} className={tabBtn(tab === 'proposal', proposalOff, '!text-[11px] leading-[15px]')}>
+            <FileSignature className="w-3.5 h-3.5" /> {isCustomOrderStream ? 'Custom Order Proposal' : 'New Proposal'}
           </button>
 
-          <button type="button" disabled={invoiceOff} title={invoiceOff ? invoiceHint : 'Raise an Invoice'}
-            onClick={() => switchTab('invoice')} className={tabBtn(tab === 'invoice', invoiceOff)}>
-            <Receipt className="w-3.5 h-3.5" /> Raise Invoice
+          <button type="button" disabled={invoiceOff} title={invoiceOff ? invoiceHint : (isCustomOrderStream ? 'Raise Custom Order Invoice' : 'Raise an Invoice')}
+            onClick={() => switchTab('invoice')} className={tabBtn(tab === 'invoice', invoiceOff, '!text-[11px] leading-[15px]')}>
+            <Receipt className="w-3.5 h-3.5" /> {isCustomOrderStream ? 'Custom Order Invoice' : 'Raise Invoice'}
           </button>
 
           <div className="relative" ref={moreRef}>
-            <button type="button" onClick={() => setMoreOpen(o => !o)} className={tabBtn(tab === 'deposit' || tab === 'refund' || moreOpen)}
+            <button type="button" onClick={() => setMoreOpen(o => !o)} className={tabBtn(tab === 'deposit' || tab === 'refund' || moreOpen, false, '!text-[11px] leading-[15px]')}
               aria-haspopup="menu" aria-expanded={moreOpen}>
               More <ChevronDown className={`w-3 h-3 transition-transform ${moreOpen ? 'rotate-180' : ''}`} />
             </button>
@@ -249,12 +263,12 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
               <div role="menu" className="absolute left-0 top-full mt-1 z-30 w-52 bg-white border border-slate-200 rounded-xl shadow-lg py-1.5">
                 <button type="button" role="menuitem" disabled={proposalOff} title={proposalOff ? proposalHint : undefined}
                   onClick={() => switchTab('deposit')}
-                  className={`w-full px-3.5 py-2 text-[11px] font-bold uppercase tracking-wider flex items-center gap-2 text-left ${proposalOff ? 'text-slate-300 cursor-not-allowed' : 'text-slate-600 hover:bg-emerald-50 hover:text-emerald-700 cursor-pointer'}`}>
+                  className={`w-full px-3.5 py-2 !text-[11px] leading-[15px] font-bold uppercase tracking-wider flex items-center gap-2 text-left ${proposalOff ? 'text-slate-300 cursor-not-allowed' : 'text-slate-600 hover:bg-emerald-50 hover:text-emerald-700 cursor-pointer'}`}>
                   <Lock className="w-3.5 h-3.5" /> Request Deposit
                 </button>
                 <button type="button" role="menuitem" disabled={refundOff} title={refundOff ? 'Only the seller of an active funded workstream can issue an escrow refund' : undefined}
                   onClick={() => switchTab('refund')}
-                  className={`w-full px-3.5 py-2 text-[11px] font-bold uppercase tracking-wider flex items-center gap-2 text-left ${refundOff ? 'text-slate-300 cursor-not-allowed' : 'text-rose-600 hover:bg-rose-50 cursor-pointer'}`}>
+                  className={`w-full px-3.5 py-2 !text-[11px] leading-[15px] font-bold uppercase tracking-wider flex items-center gap-2 text-left ${refundOff ? 'text-slate-300 cursor-not-allowed' : 'text-rose-600 hover:bg-rose-50 cursor-pointer'}`}>
                   <RotateCcw className="w-3.5 h-3.5" /> Issue Escrow Refund
                 </button>
               </div>
@@ -272,28 +286,28 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
                 onKeyDown={handleKeyDown}
                 disabled={disabled}
                 placeholder={placeholder}
-                className="w-full px-4 pt-3 pb-10 bg-white border border-slate-200 rounded-xl text-xs text-fiverr-dark placeholder-slate-400 focus:outline-none focus:border-emerald-500 transition resize-none leading-relaxed"
+                className="w-full px-4 pt-3 pb-10 bg-white border border-slate-200 rounded-xl text-sm text-fiverr-dark placeholder-slate-400 focus:outline-none focus:border-emerald-500 transition resize-none leading-relaxed"
               />
               <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
               <button type="button" onClick={() => fileInputRef.current?.click()}
-                className="absolute right-2 bottom-2 px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-500 hover:text-fiverr-dark rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition cursor-pointer"
+                className="absolute right-2 bottom-2 px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-500 hover:text-fiverr-dark rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
                 title="Attach File or Deliverable">
                 <Paperclip className="w-3.5 h-3.5" /> Attach files
               </button>
             </div>
 
-            <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
+            <p className="text-xs text-slate-500 flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
               Keep all payments and project transactions on the platform to stay protected.
             </p>
 
             <div className="flex items-center justify-end gap-4">
-              <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer select-none">
+              <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
                 <input type="checkbox" checked={enterToSend} onChange={(e) => setEnterToSend(e.target.checked)} className="accent-emerald-600 w-3.5 h-3.5" />
                 Press enter to send
               </label>
               <button type="submit" disabled={!text.trim() || disabled}
-                className="px-7 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl text-xs uppercase tracking-wider flex items-center gap-2 shadow-xs transition cursor-pointer">
+                className="px-7 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl text-xs sm:text-sm uppercase tracking-wider flex items-center gap-2 shadow-xs transition cursor-pointer">
                 <Send className="w-3.5 h-3.5" /> Send
               </button>
             </div>
@@ -304,7 +318,7 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
               <span className="p-2 bg-rose-50 rounded-xl shrink-0"><RotateCcw className="w-4 h-4 text-rose-600" /></span>
               <div>
                 <h4 className="text-sm font-bold text-fiverr-dark">Issue Escrow Refund to Buyer</h4>
-                <p className="text-[11px] text-slate-400 mt-0.5">
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                   Refund the active escrow balance ({currencySymbol}{defaultInvoiceAmount.toLocaleString()}) back to the buyer's wallet and close this order.
                 </p>
               </div>
@@ -322,7 +336,7 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
               />
             </div>
 
-            {formError && <p className="text-[11px] font-semibold text-rose-600">{formError}</p>}
+            {formError && <p className="text-xs font-semibold text-rose-600">{formError}</p>}
 
             <div className="flex items-center justify-end gap-2">
               <button type="button" onClick={() => { resetForm(); setTab('message'); }} disabled={submitting}
@@ -341,12 +355,12 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
               <span className="p-2 bg-emerald-50 rounded-xl shrink-0">{headings[tab].icon}</span>
               <div>
                 <h4 className="text-sm font-bold text-fiverr-dark">{headings[tab].title}</h4>
-                <p className="text-[11px] text-slate-400 mt-0.5">{headings[tab].hint}</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{headings[tab].hint}</p>
               </div>
             </div>
 
             {tab === 'invoice' && defaultInvoiceAmount > 0 && (
-              <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-2xl text-[11px] text-emerald-900 flex items-start gap-2">
+              <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-2xl text-xs text-emerald-900 flex items-start gap-2">
                 <Receipt className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                 <div>
                   <span className="font-bold">{isGigOrder ? 'Gig Escrow Policy:' : 'Escrow Coverage:'}</span>{' '}
@@ -358,9 +372,9 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {tab !== 'deposit' && (
                 <div className="sm:col-span-2">
-                  <label className={labelCls}>{tab === 'proposal' ? 'Proposal title' : 'Invoice Description'}</label>
+                  <label className={labelCls}>{tab === 'proposal' ? (isCustomOrderStream ? 'Custom Order Proposal Title' : 'Proposal title') : (isCustomOrderStream ? 'Custom Order Invoice Description' : 'Invoice Description')}</label>
                   <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={120} className={inputCls}
-                    placeholder={tab === 'proposal' ? 'e.g. Full-stack feature milestone — Phase 2' : 'e.g. Final Invoice — Completed deliverables'} />
+                    placeholder={tab === 'proposal' ? 'e.g. Full-stack feature milestone — Phase 2' : (isCustomOrderStream ? 'e.g. Custom Order Invoice — Completed deliverables' : 'e.g. Final Invoice — Completed deliverables')} />
                 </div>
               )}
               <div>
@@ -382,10 +396,10 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
                 </div>
               )}
               <div className="sm:col-span-2">
-                <label className={labelCls}>{tab === 'invoice' ? 'Delivery Notes & Breakdown' : 'Note (optional)'}</label>
+                <label className={labelCls}>{tab === 'invoice' ? (isCustomOrderStream ? 'Custom Order Delivery Notes & Breakdown' : 'Delivery Notes & Breakdown') : 'Note (optional)'}</label>
                 <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} maxLength={1000}
                   className={inputCls + ' resize-none leading-relaxed'}
-                  placeholder={tab === 'invoice' ? 'Describe the completed work and deliverables included with this invoice...' : 'Add scope, terms or anything the buyer should know...'} />
+                  placeholder={tab === 'invoice' ? (isCustomOrderStream ? 'Describe the completed work under this Custom Order...' : 'Describe the completed work and deliverables included with this invoice...') : 'Add scope, terms or anything the buyer should know...'} />
               </div>
 
               {tab === 'invoice' && (
@@ -396,7 +410,7 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
                     <button
                       type="button"
                       onClick={() => invoiceFileInputRef.current?.click()}
-                      className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-[11px] font-bold text-emerald-700 flex items-center gap-1.5 transition cursor-pointer"
+                      className="px-3 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs font-bold text-emerald-700 flex items-center gap-1.5 transition cursor-pointer"
                     >
                       <Paperclip className="w-3.5 h-3.5" /> Attach Deliverable File
                     </button>
@@ -407,7 +421,7 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
                         <div key={idx} className="inline-flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
                           <FileText className="w-3.5 h-3.5 text-emerald-600" />
                           <span className="font-bold text-fiverr-dark">{f.name}</span>
-                          <span className="text-[10px] text-slate-400 font-mono">({f.size})</span>
+                          <span className="text-xs text-slate-400 font-mono">({f.size})</span>
                           <button
                             type="button"
                             onClick={() => setInvoiceFiles(prev => prev.filter((_, i) => i !== idx))}
@@ -423,12 +437,14 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
               )}
             </div>
 
-            {formError && <p className="text-[11px] font-semibold text-rose-600">{formError}</p>}
+            {formError && <p className="text-xs font-semibold text-rose-600">{formError}</p>}
 
             <div className="flex items-center justify-between gap-3">
-              <p className="text-[11px] text-slate-400 flex items-center gap-1.5">
+              <p className="text-xs text-slate-400 flex items-center gap-1.5">
                 <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                {tab === 'invoice' ? 'When the buyer pays this invoice, funds are credited to your wallet.' : 'The buyer pays into escrow when they accept.'}
+                {tab === 'invoice'
+                  ? (isCustomOrderStream ? 'When the buyer pays this Custom Order Invoice, funds are released directly to your wallet.' : 'When the buyer pays this invoice, funds are credited to your wallet.')
+                  : (isCustomOrderStream ? 'The buyer funds escrow when they accept the Custom Order Proposal.' : 'The buyer pays into escrow when they accept.')}
               </p>
               <div className="flex items-center gap-2">
                 <button type="button" onClick={() => { resetForm(); setTab('message'); }} disabled={submitting}
@@ -438,7 +454,7 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
                 <button type="button" onClick={submitOffer} disabled={submitting || disabled}
                   className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl text-xs uppercase tracking-wider flex items-center gap-2 shadow-xs transition cursor-pointer">
                   {submitting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-                  {tab === 'invoice' ? 'Send Invoice' : 'Send'}
+                  {tab === 'invoice' ? (isCustomOrderStream ? 'Send Custom Order Invoice' : 'Send Invoice') : (isCustomOrderStream ? 'Send Custom Order Proposal' : 'Send')}
                 </button>
               </div>
             </div>

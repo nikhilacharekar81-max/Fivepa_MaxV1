@@ -297,7 +297,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
   const [serviceOptionFilter, setServiceOptionFilter] = useState('All');
   const [sellerLevelFilter, setSellerLevelFilter] = useState('All');
-  const [budgetFilter, setBudgetFilter] = useState('');
+  const [budgetFilter, setBudgetFilter] = useState('All');
   const [deliveryTimeFilter, setDeliveryTimeFilter] = useState<number | null>(null);
   const [onlineNowOnly, setOnlineNowOnly] = useState(false);
   const [gigViewMode, setGigViewMode] = useState<'grid' | 'list'>('grid');
@@ -692,18 +692,98 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   );
 
   const handleContactSeller = useCallback(
-    (_freelancerId: string, _freelancerName: string, _gigTitle: string) => {
+    async (freelancerId: string, freelancerName: string, gigTitle?: string, gigId?: string, projectId?: string) => {
       if (!activeUser) {
         setIsLoginModalOpen(true);
         return;
       }
-      navigate('/workstream');
+      if (activeUser.id === freelancerId) {
+        setOrderFeedback({
+          type: 'error',
+          message: 'You cannot open an inquiry with yourself.'
+        });
+        return;
+      }
+
+      const rawTitle = (gigTitle || `Consultation with ${freelancerName || 'Seller'}`).trim();
+      const inquiryTitle = /^inquiry:/i.test(rawTitle) ? rawTitle : `Inquiry: ${rawTitle}`;
+
+      try {
+        let token = getAuthToken();
+        const isPrivileged = ['admin', 'super_admin', 'support'].includes(activeUser.role || '');
+        if (!token && !isPrivileged) {
+          const session = await requestDemoSession(activeUser.id);
+          if (session?.token) {
+            token = session.token;
+            setAuthToken(token);
+          }
+        }
+        if (!token) {
+          setIsLoginModalOpen(true);
+          return;
+        }
+
+        const sendInquiryRequest = (tok: string) =>
+          fetch('/api/orders', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-device-id': getDeviceId(),
+              Authorization: `Bearer ${tok}`
+            },
+            body: JSON.stringify({
+              title: inquiryTitle,
+              amount: 0,
+              isInquiry: true,
+              buyerId: activeUser.id,
+              sellerId: freelancerId,
+              ...(gigId ? { gigId } : {}),
+              ...(projectId ? { projectId } : {}),
+              ...(!gigId && !projectId ? { originType: 'profile' } : {})
+            })
+          });
+
+        let res = await sendInquiryRequest(token);
+        if (res.status === 401 && !isPrivileged) {
+          const recovered = await requestDemoSession(activeUser.id);
+          if (recovered?.token) {
+            token = recovered.token;
+            setAuthToken(token);
+            res = await sendInquiryRequest(token);
+          }
+        }
+
+        if (res.ok) {
+          const inquiryOrder = await res.json();
+          setOrders(prev => [inquiryOrder, ...prev.filter(o => o.id !== inquiryOrder.id)]);
+          setSelectedOrder(inquiryOrder);
+          workstream.fetchMessages(inquiryOrder.id);
+          navigate(`/workstream/${inquiryOrder.id}`);
+          void refresh(activeUser.id);
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          setOrderFeedback({
+            type: 'error',
+            message: errData.error || 'Failed to open inquiry WorkStream.'
+          });
+        }
+      } catch (err: any) {
+        console.error('Contact seller inquiry failed:', err);
+        setOrderFeedback({
+          type: 'error',
+          message: err?.message || 'Network error while opening inquiry.'
+        });
+      }
     },
-    [activeUser, navigate]
+    [activeUser, navigate, refresh, setOrders, workstream]
   );
 
   // Parse path & route segments
-  const cleanPath = currentPath.split('?')[0].replace(/\/+$/, '') || '/';
+  let rawCleanPath = currentPath.split('?')[0].replace(/\/+$/, '') || '/';
+  if (rawCleanPath === '/index.html') {
+    rawCleanPath = '/';
+  }
+  const cleanPath = rawCleanPath;
   const pathParts = cleanPath.split('/').filter(Boolean);
 
   // Check modal trigger routes
@@ -718,6 +798,46 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     if (cleanPath === '/forgot-password') setIsForgotPasswordModalOpen(true);
   }, [cleanPath]);
 
+  const resolveOrderFromRouteParam = useCallback(
+    (targetId: string | null) => {
+      if (!targetId) return null;
+      let decodedId = targetId;
+      try {
+        decodedId = decodeURIComponent(targetId);
+      } catch {}
+
+      const allItems = workstream.hydratedWorkstreamItems.length > 0 ? workstream.hydratedWorkstreamItems : orders;
+      // 1. Exact Order ID match
+      const exactMatch =
+        allItems.find(
+          o =>
+            o.id === targetId ||
+            o.id === decodedId ||
+            (o as any).gigOrderId === targetId ||
+            (o as any).gigOrderId === decodedId ||
+            (o as any).projectOrderId === targetId ||
+            (o as any).projectOrderId === decodedId
+        );
+      if (exactMatch) return exactMatch;
+
+      // 2. Workspace ID match -> resolve deterministically to the most recently updated / active order in that Workspace
+      const wsMatches = allItems.filter(
+        o => o.workspaceId === targetId || o.workspaceId === decodedId
+      );
+      if (wsMatches.length > 0) {
+        const sorted = [...wsMatches].sort((a, b) => {
+          const tA = new Date((a as any).updatedAt || a.createdAt || 0).getTime();
+          const tB = new Date((b as any).updatedAt || b.createdAt || 0).getTime();
+          if (tA !== tB) return tA - tB;
+          return a.id.localeCompare(b.id);
+        });
+        return sorted[sorted.length - 1];
+      }
+      return null;
+    },
+    [orders, workstream.hydratedWorkstreamItems]
+  );
+
   useEffect(() => {
     if (
       (cleanPath.startsWith('/workstream/') ||
@@ -728,21 +848,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     ) {
       const targetOrderId = pathParts[1];
       if (targetOrderId) {
-        const matched =
-          workstream.hydratedWorkstreamItems.find(
-            o =>
-              o.id === targetOrderId ||
-              o.workspaceId === targetOrderId ||
-              (o as any).gigOrderId === targetOrderId ||
-              (o as any).projectOrderId === targetOrderId
-          ) ||
-          orders.find(
-            o =>
-              o.id === targetOrderId ||
-              o.workspaceId === targetOrderId ||
-              (o as any).gigOrderId === targetOrderId ||
-              (o as any).projectOrderId === targetOrderId
-          );
+        const matched = resolveOrderFromRouteParam(targetOrderId);
         if (matched && selectedOrder?.id !== matched.id) {
           setSelectedOrder(matched);
         }
@@ -757,7 +863,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         setSelectedOrder(null);
       }
     }
-  }, [cleanPath, pathParts, orders, workstream.hydratedWorkstreamItems, selectedOrder]);
+  }, [cleanPath, pathParts, resolveOrderFromRouteParam, selectedOrder]);
 
   // Route flags
   const isGigsList = cleanPath === '/gigs' || cleanPath.startsWith('/categories');
@@ -806,11 +912,16 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         const matchTags = g.tags?.some(t => t.toLowerCase().includes(q));
         if (!matchTitle && !matchDesc && !matchSeller && !matchTags) return false;
       }
-      if (budgetFilter) {
-        if (budgetFilter === 'under25' && g.price >= 25) return false;
-        if (budgetFilter === '25to50' && (g.price < 25 || g.price > 50)) return false;
+      if (budgetFilter && budgetFilter !== 'All') {
+        if (budgetFilter === 'under25' && g.price >= 50) return false;
         if (budgetFilter === '50to100' && (g.price < 50 || g.price > 100)) return false;
         if (budgetFilter === 'over100' && g.price <= 100) return false;
+        if (budgetFilter.startsWith('custom:')) {
+          const parts = budgetFilter.replace('custom:', '').split('-');
+          const min = parseFloat(parts[0]) || 0;
+          const max = parseFloat(parts[1]) || Infinity;
+          if (g.price < min || g.price > max) return false;
+        }
       }
       if (deliveryTimeFilter) {
         if (g.deliveryDays > deliveryTimeFilter) return false;
@@ -939,8 +1050,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
   ) {
     const routeOrderId = pathParts.length >= 2 ? pathParts[1] : null;
     const rawActiveOrder = routeOrderId
-      ? workstream.hydratedWorkstreamItems.find(o => o.id === routeOrderId || o.workspaceId === routeOrderId || (o as any).gigOrderId === routeOrderId || (o as any).projectOrderId === routeOrderId) ||
-        orders.find(o => o.id === routeOrderId || o.workspaceId === routeOrderId || (o as any).gigOrderId === routeOrderId || (o as any).projectOrderId === routeOrderId) ||
+      ? resolveOrderFromRouteParam(routeOrderId) ||
         (selectedOrder?.id === routeOrderId || selectedOrder?.workspaceId === routeOrderId ? selectedOrder : null)
       : null;
 
@@ -954,38 +1064,101 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
       const workstreamPartner = users.find(
         u => u.id === (activeUser?.id === hydratedActiveOrder.buyerId ? hydratedActiveOrder.sellerId : hydratedActiveOrder.buyerId)
       );
-      const orderSpecificMessages = workstream.messages.filter(m => m.orderId === hydratedActiveOrder.id);
+      const workspaceOrders = hydratedActiveOrder.workspaceId
+        ? workstream.hydratedWorkstreamItems
+            .filter(
+              o =>
+                o.workspaceId === hydratedActiveOrder.workspaceId &&
+                o.buyerId === hydratedActiveOrder.buyerId &&
+                o.sellerId === hydratedActiveOrder.sellerId
+            )
+            .sort((a, b) => {
+              const tA = new Date((a as any).updatedAt || a.createdAt || 0).getTime();
+              const tB = new Date((b as any).updatedAt || b.createdAt || 0).getTime();
+              if (tA !== tB) return tA - tB;
+              return a.id.localeCompare(b.id);
+            })
+        : [hydratedActiveOrder as any];
+      const workspaceOrderIds = new Set(workspaceOrders.map(o => o.id));
+      workspaceOrderIds.add(hydratedActiveOrder.id);
+
+      const workspaceMessages = workstream.messages
+        .filter(
+          m =>
+            (m.orderId && workspaceOrderIds.has(m.orderId)) ||
+            (Boolean(hydratedActiveOrder.workspaceId) &&
+              (m.workspaceId === hydratedActiveOrder.workspaceId ||
+               m.metadata?.workspaceId === hydratedActiveOrder.workspaceId ||
+               m.orderId === hydratedActiveOrder.workspaceId))
+        )
+        .sort((a, b) => {
+          const tA = a.timestamp ? new Date(a.timestamp).getTime() : NaN;
+          const tB = b.timestamp ? new Date(b.timestamp).getTime() : NaN;
+          const validA = !isNaN(tA);
+          const validB = !isNaN(tB);
+          if (!validA && !validB) return String(a.id || '').localeCompare(String(b.id || ''));
+          if (!validA) return 1;
+          if (!validB) return -1;
+          if (tA !== tB) return tA - tB;
+          return String(a.id || '').localeCompare(String(b.id || ''));
+        });
+
       mainContent = (
-        <WorkstreamWorkspace
-          order={hydratedActiveOrder as any}
-          messages={orderSpecificMessages as any}
-          files={workstream.activeSharedFiles}
-          currentUser={activeUser}
-          usersList={users}
-          partner={workstreamPartner}
-          onBack={() => {
-            setSelectedOrder(null);
-            navigate('/workstream');
-          }}
-          onSendMessage={workstream.sendMessage}
-          onAttachFile={(file) => workstream.sendMessage(`Attached file: ${file.name}`, 'file', file)}
-          sendEvent={workstream.sendEvent}
-          onOrderChanged={() => {
-            if (activeUser?.id) void refresh(activeUser.id);
-          }}
-          onReleaseEscrow={workstream.handleReleaseEscrow}
-          onDeliverWork={workstream.handleDeliverWork}
-          onRequestRevision={workstream.handleRequestRevision}
-          isReviewModalOpen={workstream.isReviewModalOpen}
-          setIsReviewModalOpen={workstream.setIsReviewModalOpen}
-          handleSubmitReview={workstream.handleSubmitReview}
-        />
+        <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+          <WorkstreamWorkspace
+            order={hydratedActiveOrder as any}
+            workspaceOrders={workspaceOrders as any}
+            onSelectOrder={(oid) => {
+              const matched = orders.find(o => o.id === oid);
+              if (matched) setSelectedOrder(matched);
+              navigate(`/workstream/${oid}`);
+            }}
+            messages={workspaceMessages as any}
+            files={workstream.activeSharedFiles}
+            currentUser={activeUser}
+            usersList={users}
+            partner={workstreamPartner}
+            onBack={() => {
+              setSelectedOrder(null);
+              navigate('/workstream');
+            }}
+            onSendMessage={workstream.sendMessage}
+            onAttachFile={(file) => workstream.sendMessage(`Attached file: ${file.name}`, 'file', file)}
+            sendEvent={workstream.sendEvent}
+            onOrderChanged={(updatedOrder, newOrder) => {
+              const targetOrder = newOrder || updatedOrder;
+              if (targetOrder && targetOrder.id) {
+                setOrders(prev => {
+                  const withoutTarget = prev.filter(
+                    o =>
+                      o.id !== targetOrder.id &&
+                      !(targetOrder.workspaceId && (o as any).isInquiry && o.id === targetOrder.workspaceId)
+                  );
+                  return [targetOrder, ...withoutTarget];
+                });
+                setSelectedOrder(targetOrder);
+                if (newOrder?.id && newOrder.id !== hydratedActiveOrder.id) {
+                  workstream.fetchMessages(newOrder.id);
+                  navigate(`/workstream/${newOrder.id}`);
+                }
+              }
+              if (activeUser?.id) void refresh(activeUser.id);
+            }}
+            onReleaseEscrow={workstream.handleReleaseEscrow}
+            onDeliverWork={workstream.handleDeliverWork}
+            onRequestRevision={workstream.handleRequestRevision}
+            isReviewModalOpen={workstream.isReviewModalOpen}
+            setIsReviewModalOpen={workstream.setIsReviewModalOpen}
+            handleSubmitReview={workstream.handleSubmitReview}
+          />
+        </div>
       );
     } else {
       mainContent = (
         <div className="max-w-7xl mx-auto py-8 px-4">
           <WorkstreamList
             workstreams={workstream.hydratedWorkstreamItems}
+            currentUser={activeUser}
             selectedOrderId={selectedOrder?.id}
             onSelectOrder={(id: string) => {
               const matched = orders.find(o => o.id === id);
@@ -1099,8 +1272,11 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         />
       </div>
     );
-  } else if (pathParts.length === 1 && !RESERVED_ROUTES.includes(pathParts[0].toLowerCase())) {
-    const usernameParam = pathParts[0].toLowerCase();
+  } else if (
+    (pathParts.length === 1 && !RESERVED_ROUTES.includes(pathParts[0].toLowerCase())) ||
+    (pathParts.length === 2 && ['profile', 'freelancer', 'user', 'freelancers'].includes(pathParts[0].toLowerCase()))
+  ) {
+    const usernameParam = (pathParts.length === 2 ? pathParts[1] : pathParts[0]).toLowerCase();
     const matchedUser = users.find(
       u =>
         (u.username && u.username.toLowerCase() === usernameParam) ||
@@ -1116,6 +1292,7 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
             gigs={gigs}
             reviews={reviews}
             onNavigate={navigate}
+            onContact={(targetId) => handleContactSeller(targetId || matchedUser.id, matchedUser.name, `Consultation with ${matchedUser.name}`)}
           />
         </div>
       );

@@ -275,6 +275,7 @@ projectRouter.post('/projects', requireAuth, requireActiveStatus, async (req: Re
     const deadlineDays = 14;
     const createdAt = new Date().toISOString().split('T')[0];
 
+    const maxHires = Math.max(1, Math.min(50, Number(req.body.maxHires ?? req.body.freelancersNeeded ?? 1) || 1));
     const newProj: Project = {
       id: newProjId,
       buyerId: caller.id,
@@ -290,7 +291,9 @@ projectRouter.post('/projects', requireAuth, requireActiveStatus, async (req: Re
       proposalsCount: 0,
       createdAt,
       status: 'open',
-      featured: false
+      featured: false,
+      maxHires,
+      ...( { freelancersNeeded: maxHires } as any )
     };
 
     await store.saveProject(newProj);

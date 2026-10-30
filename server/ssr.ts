@@ -11,6 +11,14 @@ import { isGigPublic, sanitizePublicGig, isUserPublic, sanitizePublicUser, isPro
 import { slugify } from '../src/utils/slugify.js';
 import { PRIVATE_ROUTES, RESERVED_ROUTES } from '../src/shared/routes.js';
 
+function safeDecodeURIComponent(str: string): string {
+  try {
+    return decodeURIComponent(str);
+  } catch {
+    return str;
+  }
+}
+
 function getGigUrl(gig: any) {
   const uname = (gig.freelancerUsername || slugify(gig.freelancerName)).toLowerCase();
   const gslug = (gig.slug || slugify(gig.title)).toLowerCase();
@@ -77,7 +85,14 @@ export async function setupSSR(
       return next();
     }
 
-    const pathname = req.originalUrl.split('?')[0];
+    let rawPathname = req.originalUrl.split('?')[0];
+    let pathname = safeDecodeURIComponent(rawPathname);
+    if (pathname.endsWith('/index.html')) {
+      pathname = pathname.slice(0, -11) || '/';
+    } else if (pathname.endsWith('.html')) {
+      pathname = pathname.slice(0, -5) || '/';
+    }
+
     const ext = path.extname(pathname);
     const accept = req.headers.accept || '';
     const secFetchDest = req.headers['sec-fetch-dest'] || '';
@@ -89,7 +104,7 @@ export async function setupSSR(
       pathname.startsWith('/@react-refresh') ||
       pathname.startsWith('/node_modules') ||
       pathname.startsWith('/src') ||
-      Boolean(ext);
+      (Boolean(ext) && ext !== '.html');
 
     const isNonHtmlAccept =
       Boolean(accept) &&
@@ -103,7 +118,7 @@ export async function setupSSR(
       return next();
     }
 
-    if (ext) {
+    if (ext && ext !== '.html') {
       return next();
     }
 
@@ -227,7 +242,11 @@ export async function setupSSR(
 
       const rendered = renderFn ? renderFn(pathname, initialData) : { html: '', head: '' };
 
-      const serializedInitialData = JSON.stringify(initialData).replace(/</g, '\\u003c');
+      const serializedInitialData = JSON.stringify(initialData)
+        .replace(/</g, '\\u003c')
+        .replace(/>/g, '\\u003e')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
 
       const finalHtml = template
         .replace('</head>', `${rendered.head}\n</head>`)
@@ -241,10 +260,24 @@ export async function setupSSR(
 
     } catch (e: any) {
       if (!isProd && vite) {
-        vite.ssrFixStacktrace(e);
+        try {
+          vite.ssrFixStacktrace(e);
+        } catch {}
       }
       console.error('SSR Error:', e);
-      next(e);
+      try {
+        let template = templateHtml || fs.readFileSync(path.resolve(root, 'index.html'), 'utf-8');
+        if (!hasProdBuild && vite) {
+          try {
+            template = await vite.transformIndexHtml('/', template);
+          } catch {
+            // Keep template as is if transformIndexHtml fails
+          }
+        }
+        return res.status(200).setHeader('Content-Type', 'text/html').end(template);
+      } catch {
+        next(e);
+      }
     }
   });
 }

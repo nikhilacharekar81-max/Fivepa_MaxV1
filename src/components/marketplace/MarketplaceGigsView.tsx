@@ -105,9 +105,6 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
   const [sortBy, setSortBy] = useState<SortOption>('recommended');
   const [showSortDropdown, setShowSortDropdown] = useState(false);
 
-  // Pro Services Toggle (Fiverr Pro style)
-  const [proServicesOnly, setProServicesOnly] = useState(false);
-
   // Custom budget inputs
   const [customMin, setCustomMin] = useState('');
   const [customMax, setCustomMax] = useState('');
@@ -134,11 +131,6 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
   // Filter & Sort Logic
   const sortedAndFilteredGigs = useMemo(() => {
     let list = [...filteredGigs];
-
-    // Pro filter
-    if (proServicesOnly) {
-      list = list.filter(g => g.featured || (g.freelancerLevel && g.freelancerLevel.toLowerCase().includes('top')));
-    }
 
     // Custom budget range if set
     if (budgetFilter.startsWith('custom:')) {
@@ -176,7 +168,7 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
     }
 
     return list;
-  }, [filteredGigs, proServicesOnly, budgetFilter, sortBy]);
+  }, [filteredGigs, budgetFilter, sortBy]);
 
   const sortLabels: Record<SortOption, string> = {
     recommended: 'Recommended',
@@ -204,41 +196,82 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 font-sans text-slate-800">
       {isHomePage ? (
         /* ========================================================= */
-        /* HOMEPAGE HERO BANNER                                      */
+        /* HOMEPAGE HERO BANNER WITH TRUST METRICS                   */
         /* ========================================================= */
-        <div className="relative rounded-3xl bg-slate-900 text-white p-8 md:p-12 mb-10 overflow-hidden shadow-xl">
-          <div
-            className="absolute right-0 top-0 w-1/2 h-full opacity-20 bg-cover bg-center pointer-events-none"
-            style={{ backgroundImage: `url('https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=1200&h=800&fit=crop')` }}
-          />
-          <div className="relative z-10 max-w-2xl">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400 text-xs font-semibold mb-4 border border-emerald-500/30">
-              <ShieldCheck className="w-4 h-4" /> 100% Escrow Protection Guaranteed
+        <div className="relative rounded-3xl bg-slate-900 dark:bg-slate-950 text-white p-8 md:p-12 mb-8 overflow-hidden shadow-2xl border border-slate-800">
+          <div className="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-900/90 to-emerald-950/60 pointer-events-none" />
+          <div className="absolute -top-24 -right-24 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
+          <div className="relative z-10 max-w-3xl">
+            <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-xs font-semibold mb-4 border border-emerald-500/20 backdrop-blur-md">
+              <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>100% Escrow Protection</span>
+              <span className="text-slate-500">·</span>
+              <span className="text-slate-300">Vetted Top 1% Freelancers</span>
             </div>
-            <h1 className="text-3xl md:text-4xl font-bold leading-tight mb-4 text-white text-wrap balance">
-              {currentCategory === 'All' ? 'Hire top freelance talent for fixed-price gigs' : `${currentCategory} Freelance Gigs`}
+            <h1 className="text-3xl sm:text-4xl md:text-5xl font-extrabold leading-tight tracking-tight mb-4 text-white text-balance">
+              {currentCategory === 'All' ? 'Hire top freelance talent with fixed-price escrow' : `${currentCategory} Freelance Gigs`}
             </h1>
-            <p className="text-slate-300 text-sm md:text-base leading-relaxed mb-8">
-              Connect with elite developers, designers, and AI experts. Funds are safely held in escrow until you approve the deliverables.
+            <p className="text-slate-300 text-sm md:text-base leading-relaxed mb-8 max-w-2xl">
+              Connect with vetted software engineers, UI/UX product designers, and AI specialists. Funds remain safely held in escrow until deliverables are accepted.
             </p>
 
             {/* Search Bar */}
-            <div className="flex items-center bg-white rounded-2xl p-2 shadow-lg max-w-xl">
+            <div className="flex items-center bg-white dark:bg-slate-900 rounded-2xl p-2 shadow-2xl max-w-xl border border-slate-200 dark:border-slate-800">
               <Search className="w-5 h-5 text-slate-400 ml-3 shrink-0" />
               <input
                 type="text"
-                placeholder="Search services (e.g. React, UI/UX, Automation)..."
+                placeholder="Search services (e.g. React, UI/UX, AI Agents)..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
+                className="w-full px-3 py-2 text-sm text-slate-900 dark:text-slate-100 font-medium placeholder:text-slate-400 focus:outline-none bg-transparent"
               />
               <button
                 type="button"
                 onClick={(e) => navigate('/gigs', e)}
-                className="px-6 py-3 bg-slate-900 text-white text-xs font-semibold rounded-xl hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+                className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold uppercase tracking-wider rounded-xl transition-all cursor-pointer shrink-0 shadow-md active:scale-98"
               >
                 Search
               </button>
+            </div>
+          </div>
+
+          {/* 4-Column Trust & Performance Ticker */}
+          <div className="relative z-10 grid grid-cols-2 lg:grid-cols-4 gap-4 pt-8 mt-8 border-t border-slate-800 text-xs">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="font-mono font-bold text-sm text-white tabular-nums">$14.2M+</div>
+                <div className="text-slate-400 text-[11px]">Escrow Secured</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                <Check className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="font-mono font-bold text-sm text-white tabular-nums">100%</div>
+                <div className="text-slate-400 text-[11px]">Milestone Guaranteed</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                <Zap className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="font-mono font-bold text-sm text-white tabular-nums">&lt; 2 Hours</div>
+                <div className="text-slate-400 text-[11px]">Avg First Delivery</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                <Star className="w-4 h-4 fill-emerald-400" />
+              </div>
+              <div>
+                <div className="font-mono font-bold text-sm text-white tabular-nums">4.96 / 5.0</div>
+                <div className="text-slate-400 text-[11px]">Client Rating (12k+ Reviews)</div>
+              </div>
             </div>
           </div>
         </div>
@@ -248,16 +281,16 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
         /* ========================================================= */
         <div className="mb-6">
           {/* Breadcrumb row */}
-          <div className="flex items-center gap-1.5 text-xs text-slate-400 mb-2">
+          <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 mb-2 font-medium">
             <a 
               href="/" 
               onClick={(e) => navigate('/', e)} 
-              className="hover:text-slate-700 transition-colors"
+              className="hover:text-slate-900 dark:hover:text-slate-200 transition-colors"
             >
-              Fivepa
+              WorkPerHour
             </a>
-            <ChevronRight className="w-3.5 h-3.5 text-slate-300" />
-            <span className="text-slate-600 font-medium capitalize">
+            <span aria-hidden="true">·</span>
+            <span className="text-slate-700 dark:text-slate-300 capitalize">
               {currentCategory === 'All' ? 'Services' : currentCategory}
             </span>
           </div>
@@ -265,11 +298,11 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
           {/* Category Title & Description */}
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
             <div>
-              <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 tracking-tight">
+              <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">
                 {currentCategory === 'All' ? 'Explore Freelance Services' : `${currentCategory} Services`}
               </h1>
-              <p className="text-xs sm:text-sm text-slate-500 mt-1 max-w-2xl leading-relaxed">
-                Find top-rated talent, review verified portfolios, and hire securely with Fivepa USD Escrow protection.
+              <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-2xl leading-relaxed">
+                Find top-rated talent, review verified portfolios, and hire securely with WorkPerHour USD Escrow protection.
               </p>
             </div>
 
@@ -281,7 +314,7 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                 placeholder="Search gigs..." 
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:border-slate-400 shadow-2xs"
+                className="w-full pl-9 pr-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-xs text-slate-800 dark:text-slate-200 placeholder:text-slate-400 focus:outline-hidden focus:border-slate-400 shadow-xs"
               />
             </div>
           </div>
@@ -289,9 +322,9 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
       )}
 
       {/* ========================================================= */}
-      {/* FIVERR CATEGORY PILL STRIP                                 */}
+      {/* SEGMENTED CATEGORY CONTROL STRIP                          */}
       {/* ========================================================= */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-2 mb-6 scrollbar-none">
+      <div className="p-1 bg-slate-100 dark:bg-slate-900 rounded-2xl flex items-center gap-1 overflow-x-auto pb-1 mb-6 scrollbar-none border border-slate-200/60 dark:border-slate-800/80">
         {['All', 'Development & IT', 'AI & Data', 'Design & Creative', 'Mobile Apps'].map(catName => {
           const slug = CATEGORY_SLUGS[catName];
           const catUrl = slug === 'all' ? '/' : `/categories/${slug}`;
@@ -301,10 +334,10 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
               key={catName}
               href={catUrl}
               onClick={(e) => navigate(catUrl, e)}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-full whitespace-nowrap transition-all border ${
+              className={`px-4 py-2 text-xs font-medium rounded-xl whitespace-nowrap transition-all shrink-0 cursor-pointer ${
                 isActive 
-                  ? 'bg-slate-900 text-white border-slate-900 shadow-xs' 
-                  : 'bg-white text-slate-700 hover:bg-slate-50 border-slate-200'
+                  ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-sm font-semibold' 
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
               {catName}
@@ -393,13 +426,13 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
               <button 
                 onClick={() => setActiveDropdown(activeDropdown === 'budget' ? null : 'budget')}
                 className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
-                  budgetFilter !== 'All'
+                  budgetFilter && budgetFilter !== 'All'
                     ? 'bg-slate-900 text-white border-slate-900'
                     : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300'
                 }`}
               >
                 <span>
-                  Budget {budgetFilter !== 'All' ? `(${budgetFilter.replace('custom:', '$')})` : ''}
+                  Budget {budgetFilter && budgetFilter !== 'All' ? `(${budgetFilter.replace('custom:', '$')})` : ''}
                 </span>
                 <ChevronRight className={`w-3.5 h-3.5 transition-transform ${activeDropdown === 'budget' ? '-rotate-90' : 'rotate-90'}`} />
               </button>
@@ -503,26 +536,6 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
 
           {/* Right: Fiverr-style Toggles (Pro Services & Online Now) */}
           <div className="flex items-center gap-4 text-xs font-semibold text-slate-700">
-            {/* Pro Services Toggle */}
-            <label className="flex items-center gap-2 cursor-pointer select-none">
-              <div 
-                onClick={() => setProServicesOnly(!proServicesOnly)}
-                className={`w-9 h-5 rounded-full transition-colors relative cursor-pointer ${
-                  proServicesOnly ? 'bg-emerald-600' : 'bg-slate-200'
-                }`}
-              >
-                <div 
-                  className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${
-                    proServicesOnly ? 'left-4.5' : 'left-0.5'
-                  }`}
-                />
-              </div>
-              <span className="flex items-center gap-1">
-                <span>Pro services</span>
-                <Zap className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
-              </span>
-            </label>
-
             {/* Online Now Toggle */}
             <label className="flex items-center gap-2 cursor-pointer select-none">
               <div 
@@ -640,7 +653,6 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                 setSellerLevelFilter('All');
                 setServiceOptionFilter('All');
                 setDeliveryTimeFilter(null);
-                setProServicesOnly(false);
                 setOnlineNowOnly(false);
               }}
               className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-xl text-xs transition cursor-pointer"
@@ -662,10 +674,10 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
               <div 
                 key={gig.id} 
                 onClick={(e) => navigate(gigUrl, e)}
-                className="bg-white rounded-xl border border-slate-200/90 overflow-hidden hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 flex flex-col justify-between group cursor-pointer relative"
+                className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200/90 dark:border-slate-800 overflow-hidden hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 flex flex-col justify-between group cursor-pointer relative"
               >
                 {/* 16:10 Fiverr Aspect Ratio Image Container */}
-                <div className="relative aspect-[16/10] overflow-hidden bg-slate-100 select-none">
+                <div className="relative aspect-[16/10] overflow-hidden bg-slate-100 dark:bg-slate-800 select-none">
                   <GigImage 
                     src={gig.image} 
                     title={gig.title} 
@@ -673,34 +685,28 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                     className="w-full h-full group-hover:scale-105 transition-transform duration-300 object-cover" 
                   />
 
-                  {/* Top-Left Fiverr Badge: Top Rated / Fiverr's Choice */}
-                  {gig.featured ? (
+                  {/* Top-Left Fiverr Badge: Choice */}
+                  {gig.featured && (
                     <div className="absolute top-2.5 left-2.5 z-10">
-                      <span className="bg-emerald-600 text-white font-bold text-[10px] px-2 py-0.5 rounded-sm tracking-wide uppercase shadow-xs flex items-center gap-1">
-                        <Sparkles className="w-2.5 h-2.5 fill-white" />
+                      <span className="bg-emerald-600 text-white font-bold text-xs px-2 py-0.5 rounded-sm tracking-wide uppercase shadow-xs flex items-center gap-1">
+                        <Sparkles className="w-3 h-3 fill-white" />
                         <span>Fiverr's Choice</span>
                       </span>
                     </div>
-                  ) : isTopSeller ? (
-                    <div className="absolute top-2.5 left-2.5 z-10">
-                      <span className="bg-slate-900 text-white font-bold text-[10px] px-2 py-0.5 rounded-sm tracking-wide uppercase shadow-xs">
-                        Top Rated
-                      </span>
-                    </div>
-                  ) : null}
+                  )}
 
                   {/* Top-Right Heart Wishlist Button */}
                   <button 
                     type="button"
                     onClick={(e) => handleToggleLike(gig.id, e)}
-                    className={`absolute top-2.5 right-2.5 z-10 w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-xs ${
+                    className={`absolute top-2.5 right-2.5 z-10 w-7 h-7 rounded-full flex items-center justify-center transition-all cursor-pointer shadow-xs ${
                       isLiked 
                         ? 'bg-white text-red-500 fill-red-500 scale-105' 
-                        : 'bg-black/30 hover:bg-white text-white hover:text-red-500 backdrop-blur-xs'
+                        : 'bg-white/80 hover:bg-white text-slate-700 hover:text-red-500 backdrop-blur-xs'
                     }`}
                     title={isLiked ? 'Remove from Saved' : 'Save to List'}
                   >
-                    <Heart className={`w-4 h-4 ${isLiked ? 'fill-red-500 text-red-500' : ''}`} />
+                    <Heart className={`w-3.5 h-3.5 ${isLiked ? 'fill-red-500 text-red-500' : ''}`} />
                   </button>
 
                   {/* Hover Left / Right Carousel Navigation Arrows */}
@@ -743,7 +749,7 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                           size="xs"
                         />
                         {/* Green Online Dot */}
-                        <span className="w-2 h-2 rounded-full bg-emerald-500 ring-1.5 ring-white absolute -bottom-0.5 -right-0.5 inline-block" />
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 ring-1.5 ring-white dark:ring-slate-900 absolute -bottom-0.5 -right-0.5 inline-block" />
                       </div>
                       <div className="flex-1 min-w-0">
                         <a 
@@ -752,25 +758,25 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                             e.stopPropagation();
                             navigate(sellerUrl, e);
                           }}
-                          className="text-xs font-bold text-slate-800 hover:underline block truncate"
+                          className="text-xs font-bold text-slate-900 dark:text-slate-100 hover:underline block truncate"
                         >
                           {gig.freelancerName}
                         </a>
-                        <span className="text-[11px] text-slate-400 font-medium block truncate">
+                        <span className="text-xs text-slate-500 dark:text-slate-400 font-medium block truncate">
                           {gig.freelancerLevel || 'Level 2 Seller'}
                         </span>
                       </div>
                     </div>
 
                     {/* Gig Title: Exactly "I will ..." */}
-                    <h3 className="text-[14px] leading-[20px] font-normal text-slate-700 group-hover:text-emerald-600 transition-colors line-clamp-2 min-h-[40px] mb-2.5">
+                    <h3 className="text-sm sm:text-base leading-snug font-normal text-slate-800 dark:text-slate-200 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors line-clamp-2 min-h-[44px] mb-2.5">
                       <a
                         href={gigUrl}
                         onClick={(e) => {
                           e.stopPropagation();
                           navigate(gigUrl, e);
                         }}
-                        className="text-slate-700 hover:text-emerald-600 transition-colors block"
+                        className="text-slate-800 dark:text-slate-200 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors block"
                       >
                         {formatFiverrTitle(gig.title)}
                       </a>
@@ -778,8 +784,8 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
 
                     {/* Rating & Review Count */}
                     <div className="flex items-center gap-1 text-xs mb-3">
-                      <Star className="w-3.5 h-3.5 fill-slate-900 text-slate-900 shrink-0" />
-                      <span className="font-bold text-slate-900 font-mono tabular-nums">
+                      <Star className="w-3.5 h-3.5 fill-slate-900 dark:fill-amber-400 text-slate-900 dark:text-amber-400 shrink-0" />
+                      <span className="font-bold text-slate-900 dark:text-slate-100 font-mono tabular-nums">
                         {(gig.rating || 5.0).toFixed(1)}
                       </span>
                       <span className="text-slate-400 font-normal">
@@ -789,15 +795,15 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                   </div>
 
                   {/* Card Footer: Delivery Badge & Pricing */}
-                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
-                    <div className="flex items-center gap-1 text-[11px] text-slate-400 font-medium">
-                      <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                    <div className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 font-medium">
+                      <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                       <span>{gig.deliveryDays || 3}d delivery</span>
                     </div>
 
                     <div className="flex items-baseline gap-1">
-                      <span className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">From</span>
-                      <span className="text-[16px] font-bold text-slate-900 font-mono tabular-nums">${gig.price}</span>
+                      <span className="text-xs uppercase tracking-wider text-slate-400 font-semibold">From</span>
+                      <span className="text-base font-extrabold text-slate-900 dark:text-slate-100 font-mono tabular-nums">${gig.price}</span>
                     </div>
                   </div>
                 </div>
@@ -819,10 +825,10 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
               <div 
                 key={gig.id} 
                 onClick={(e) => navigate(gigUrl, e)}
-                className="bg-white rounded-xl border border-slate-200/90 p-4 hover:shadow-md transition-all flex flex-col md:flex-row items-center justify-between gap-5 group cursor-pointer"
+                className="bg-white rounded-xl border border-slate-200/90 p-4 hover:shadow-md transition-all flex flex-col md:flex-row items-start md:items-center justify-between gap-5 group cursor-pointer overflow-hidden"
               >
-                <div className="flex items-center gap-4 w-full md:w-auto">
-                  <div className="relative w-40 sm:w-48 aspect-[16/10] rounded-lg overflow-hidden bg-slate-100 shrink-0">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 w-full md:w-auto flex-1 min-w-0">
+                  <div className="relative w-full sm:w-48 aspect-[16/10] rounded-lg overflow-hidden bg-slate-100 shrink-0">
                     <GigImage 
                       src={gig.image} 
                       title={gig.title} 
@@ -843,9 +849,9 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                     </button>
                   </div>
 
-                  <div className="space-y-1.5 flex-1 min-w-0">
+                  <div className="space-y-1.5 flex-1 min-w-0 w-full">
                     {/* Seller row */}
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <Avatar 
                         src={gig.freelancerAvatar} 
                         name={gig.freelancerName} 
@@ -866,7 +872,7 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                       </span>
                     </div>
 
-                    <h3 className="text-sm font-semibold text-slate-900 group-hover:text-emerald-600 transition-colors line-clamp-1">
+                    <h3 className="text-sm font-semibold text-slate-900 group-hover:text-emerald-600 transition-colors line-clamp-2 sm:line-clamp-1">
                       <a
                         href={gigUrl}
                         onClick={(e) => {
@@ -879,7 +885,7 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                       </a>
                     </h3>
 
-                    <div className="flex items-center gap-3 text-xs">
+                    <div className="flex items-center gap-3 text-xs flex-wrap">
                       <div className="flex items-center gap-1 font-bold text-slate-900">
                         <Star className="w-3.5 h-3.5 fill-slate-900 text-slate-900" />
                         <span>{(gig.rating || 5.0).toFixed(1)}</span>
@@ -894,7 +900,7 @@ export const MarketplaceGigsView: React.FC<MarketplaceGigsViewProps> = ({
                   </div>
                 </div>
 
-                <div className="flex md:flex-col items-center md:items-end justify-between w-full md:w-auto pt-3 md:pt-0 border-t md:border-t-0 border-slate-100 gap-3 shrink-0">
+                <div className="flex items-center justify-between md:flex-col md:items-end w-full md:w-auto pt-3 md:pt-0 border-t md:border-t-0 border-slate-100 gap-3 shrink-0">
                   <div className="text-left md:text-right">
                     <span className="text-[10px] uppercase tracking-wider text-slate-400 block font-medium">Starting at</span>
                     <span className="text-xl font-bold text-slate-900 font-mono tabular-nums">${gig.price}</span>

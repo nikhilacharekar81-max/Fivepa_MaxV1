@@ -189,6 +189,19 @@ export async function processProposalAccept(req: any, res: any) {
         }
         const lockedProposal = propLockRes.rows[0];
         if (lockedProposal.status !== 'pending') {
+          if (lockedProposal.status === 'accepted' && (lockedProposal.workstream_order_id || lockedProposal.workstreamOrderId)) {
+            const acceptedOrderId = lockedProposal.workstream_order_id || lockedProposal.workstreamOrderId;
+            const existingOrder = await store.getOrder(acceptedOrderId, client);
+            const offerIdVal = lockedProposal.offer_id || lockedProposal.offerId;
+            const existingOffer = offerIdVal ? ((await store.getOfferById(offerIdVal, client)) || null) : null;
+            const existingWs = existingOrder?.workspaceId ? await workspaceService.getWorkspaceAsync(existingOrder.workspaceId, client) : null;
+            if (existingOrder) {
+              proposal.status = 'accepted';
+              proposal.workstreamOrderId = existingOrder.id;
+              proposal.offerId = offerIdVal;
+              return { status: 200 as const, replayed: true, maxHires, order: existingOrder, offer: existingOffer, workspace: existingWs };
+            }
+          }
           return { status: 409 as const, error: 'Proposal is already accepted or being processed', maxHires };
         }
 
@@ -300,47 +313,79 @@ export async function processProposalAccept(req: any, res: any) {
         offer.resolvedAt = resolvedAt;
         offer.resolvedBy = caller.id;
 
-        createdWorkspace = workspace;
-        createdOrder = order;
-        createdOffer = offer;
-        return { status: 200 as const, maxHires };
+        return { status: 200 as const, maxHires, order, offer, workspace };
       });
 
       if (txResult.status !== 200) {
         return res.status(txResult.status).json({ error: txResult.error });
       }
 
-      const order = createdOrder!;
-      const offer = createdOffer!;
-      const workspace = createdWorkspace!;
+      const order: Order = (txResult as any).order;
+      const offer: WorkstreamOffer | null = (txResult as any).offer || null;
+      const workspace: any = (txResult as any).workspace;
+      const isReplay = Boolean((txResult as any).replayed);
 
-      await recordOrder(order);
-
-      if (Array.isArray((proj as any).proposalsList)) {
-        (proj as any).proposalsList = (proj as any).proposalsList.map((p: any) => p.id === proposal.id ? { ...p, status: 'accepted', workstreamOrderId: order.id, offerId: offer.id } : p);
+      try {
+        await recordOrder(order);
+      } catch (recErr) {
+        console.error('[processProposalAccept] Post-commit recordOrder warning:', recErr);
       }
 
-      try { await store.saveOrder(order); } catch {}
-      try { await store.saveProject(proj); } catch {}
-      try { await syncUserBalances(); } catch {}
-      try {
-        await emitSystemEvent(order.id, 'order_created', `Order placed: ${order.title}. Payment is held in escrow until the work is approved.`);
-        await postOfferMessage(order, offer, null, `Proposal ${offer.number} was created.`, 'offer_created');
-        await postOfferMessage(order, offer, null, `Proposal ${offer.number} was accepted and escrow funded ($${order.amount}).`, 'offer_accepted');
-      } catch {}
+      if (!isReplay) {
+        if (Array.isArray((proj as any).proposalsList)) {
+          (proj as any).proposalsList = (proj as any).proposalsList.map((p: any) => p.id === proposal.id ? { ...p, status: 'accepted', workstreamOrderId: order.id, offerId: offer?.id } : p);
+        }
+        try { await store.saveProject(proj); } catch (e) { console.warn('[processProposalAccept] Post-commit saveProject warning:', e); }
+      } else {
+        try {
+          const freshProj = await store.getProject(proposal.projectId);
+          if (freshProj) {
+            Object.assign(proj, freshProj);
+          }
+        } catch (e) {
+          console.warn('[processProposalAccept] Post-commit reload project warning:', e);
+        }
+      }
 
-      try {
-        await createNotification({
-          userId: proposal.freelancerId,
-          type: 'proposal_accepted',
-          title: 'Proposal accepted',
-          message: `Your proposal for "${proj.title}" was accepted and escrow has been funded.`,
-          link: `/workstream/${order.id}`,
-          metadata: { orderId: order.id, projectId: proj.id, proposalId: proposal.id }
-        });
-      } catch {}
+      try { await store.saveOrder(order); } catch (e) { console.warn('[processProposalAccept] Post-commit saveOrder warning:', e); }
+      try { await syncUserBalances(); } catch (e) { console.warn('[processProposalAccept] Post-commit syncUserBalances warning:', e); }
 
-      res.json({ success: true, proposal: await enrichProposalWithWorkstream(proposal), order: enrichOrderWithServiceInfo(order), workspace, offer: await viewOffer(offer) });
+      if (!isReplay) {
+        try {
+          await emitSystemEvent(order.id, 'order_created', `Order placed: ${order.title}. Payment is held in escrow until the work is approved.`);
+          if (offer) {
+            await postOfferMessage(order, offer, null, `Proposal ${offer.number} was created.`, 'offer_created');
+            await postOfferMessage(order, offer, null, `Proposal ${offer.number} was accepted and escrow funded ($${order.amount}).`, 'offer_accepted');
+          }
+        } catch (e) {
+          console.warn('[processProposalAccept] Post-commit events warning:', e);
+        }
+
+        try {
+          await createNotification({
+            userId: proposal.freelancerId,
+            type: 'proposal_accepted',
+            title: 'Proposal accepted',
+            message: `Your proposal for "${proj.title}" was accepted and escrow has been funded.`,
+            link: `/workstream/${order.id}`,
+            metadata: { orderId: order.id, projectId: proj.id, proposalId: proposal.id }
+          });
+        } catch (e) {
+          console.warn('[processProposalAccept] Post-commit notification warning:', e);
+        }
+      }
+
+      const enrichedProposal = await enrichProposalWithWorkstream(proposal);
+      const enrichedOrder = enrichOrderWithServiceInfo(order);
+      const offerView = offer ? await viewOffer(offer) : null;
+
+      return res.json({
+        success: true,
+        proposal: enrichedProposal,
+        order: enrichedOrder,
+        workspace,
+        offer: offerView
+      });
     } catch (acceptErr: any) {
       return res.status(400).json({ error: acceptErr.message || 'Failed to accept proposal.' });
     }

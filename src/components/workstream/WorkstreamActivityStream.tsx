@@ -8,7 +8,7 @@ import {
   Award, ShieldAlert, Video, PhoneMissed, Layers,
   DollarSign, Check, MoreHorizontal, Ban, X
 } from 'lucide-react';
-import { WorkstreamMessage, WorkstreamOffer, WorkstreamItem } from './types';
+import { WorkstreamMessage, WorkstreamOffer, WorkstreamItem, isInquiryWorkstream } from './types';
 import { UserAccount } from '../../types';
 import { DEFAULT_AVATAR } from '../../constants';
 import {
@@ -40,6 +40,7 @@ interface WorkstreamActivityStreamProps {
   onReplyReview?: (reviewId: string, replyText: string) => Promise<{ ok: boolean; error?: string }>;
   onRetryMessage?: (msg: WorkstreamMessage) => void;
   order?: WorkstreamItem;
+  workspaceOrders?: WorkstreamItem[];
   onOpenDeliverModal?: () => void;
   onOpenReleaseModal?: () => void;
   onOpenRevisionModal?: () => void;
@@ -47,6 +48,7 @@ interface WorkstreamActivityStreamProps {
   onOpenDisputeModal?: () => void;
   onStartVideoCall?: () => void;
   onRespondToExtension?: (action: 'approve' | 'reject', reason?: string) => Promise<{ ok: boolean; error?: string }>;
+  isCustomOrderStream?: boolean;
 }
 
 export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> = ({
@@ -67,14 +69,17 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
   onReplyReview,
   onRetryMessage,
   order,
+  workspaceOrders = [],
   onOpenDeliverModal,
   onOpenReleaseModal,
   onOpenRevisionModal,
   onOpenReviewModal,
   onOpenDisputeModal,
   onStartVideoCall,
-  onRespondToExtension
+  onRespondToExtension,
+  isCustomOrderStream
 }) => {
+  const hasMultipleOrders = workspaceOrders.length > 1;
   const scrollEndRef = useRef<HTMLDivElement>(null);
   const [activeFilter, setActiveFilter] = useState<ActivityFilter>('all');
   const [busyOfferId, setBusyOfferId] = useState<string | null>(null);
@@ -119,17 +124,66 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
     }
   };
 
+  /** Deduplicate review_submitted messages (e.g. legacy client-fabricated msg_review_* duplicates) */
+  const dedupedMessages = useMemo(() => {
+    const isReviewMsg = (m: WorkstreamMessage) =>
+      m.type === 'system' &&
+      (m.metadata?.action === 'review_submitted' ||
+        String(m.id || '').startsWith('msg_review_') ||
+        /review submitted/i.test(String(m.text || '')));
+
+    const authoritativeReviews = messages.filter(
+      m => isReviewMsg(m) && !String(m.id || '').startsWith('msg_review_') && /review submitted by\s+/i.test(String(m.text || ''))
+    );
+
+    const seenKeys = new Set<string>();
+    return messages.filter(m => {
+      if (!isReviewMsg(m)) return true;
+
+      const isClientFabricated =
+        String(m.id || '').startsWith('msg_review_') ||
+        !/review submitted by\s+/i.test(String(m.text || ''));
+
+      const mComment = String(m.metadata?.comment || '').trim().toLowerCase();
+      const mRating = Number(m.metadata?.rating || 0);
+      const mReviewId = m.metadata?.reviewId ? String(m.metadata.reviewId) : '';
+      const mReviewerId = m.metadata?.reviewerId ? String(m.metadata.reviewerId) : '';
+
+      // If this is a legacy client-fabricated message and an authoritative server message exists for the same review, drop it
+      if (isClientFabricated && authoritativeReviews.some(auth => {
+        if (auth.id === m.id) return false;
+        const authComment = String(auth.metadata?.comment || '').trim().toLowerCase();
+        const authRating = Number(auth.metadata?.rating || 0);
+        if (mReviewId && auth.metadata?.reviewId && String(auth.metadata.reviewId) === mReviewId) return true;
+        if (mReviewerId && auth.metadata?.reviewerId && String(auth.metadata.reviewerId) === mReviewerId) return true;
+        return authRating === mRating && authComment === mComment;
+      })) {
+        return false;
+      }
+
+      const dedupeKey = mReviewId
+        ? `id:${mReviewId}`
+        : mReviewerId
+          ? `reviewer:${mReviewerId}:${mRating}:${mComment}`
+          : `text:${String(m.text || '').trim().toLowerCase()}:${mRating}:${mComment}`;
+
+      if (seenKeys.has(dedupeKey)) return false;
+      seenKeys.add(dedupeKey);
+      return true;
+    });
+  }, [messages]);
+
   /** Filter counts */
   const counts = useMemo(() => {
     const res = {
-      all: messages.length,
+      all: dedupedMessages.length,
       deliveries: 0,
       financial: 0,
       proposals_orders: 0,
       system_audit: 0,
       chat_only: 0
     };
-    for (const m of messages) {
+    for (const m of dedupedMessages) {
       if (matchesActivityFilter(m, 'deliveries')) res.deliveries++;
       if (matchesActivityFilter(m, 'financial')) res.financial++;
       if (matchesActivityFilter(m, 'proposals_orders')) res.proposals_orders++;
@@ -137,11 +191,11 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
       if (matchesActivityFilter(m, 'chat_only')) res.chat_only++;
     }
     return res;
-  }, [messages]);
+  }, [dedupedMessages]);
 
   const filteredMessages = useMemo(() => {
-    return messages.filter(m => matchesActivityFilter(m, activeFilter));
-  }, [messages, activeFilter]);
+    return dedupedMessages.filter(m => matchesActivityFilter(m, activeFilter));
+  }, [dedupedMessages, activeFilter]);
 
   /** Maps icon names to Lucide icons */
   const renderIcon = (iconName: string) => {
@@ -199,11 +253,21 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
     const isConfirmingThis = confirmingOffer?.offer.id === offer.id;
     const isExpanded = !!expandedOfferIds[offer.id];
 
+    const isCustomOrderStreamLocal = isCustomOrderStream || isInquiryWorkstream(order) || Boolean(
+      offer?.metadata?.isInquiry ||
+      offer?.metadata?.isCustomOrder ||
+      (offer?.workspaceId && !offer?.orderId)
+    );
+
     // Header title & icon matching reference image:
     // "Invoice Received" / "Proposal Received" for buyer; "Invoice Sent" / "Proposal Sent" for seller
     const headerTitle = isInvoice
-      ? (iAmBuyer ? 'Invoice Received' : 'Invoice Sent')
-      : (iAmBuyer ? 'Proposal Received' : 'Proposal Sent');
+      ? (isCustomOrderStreamLocal
+          ? (iAmBuyer ? 'Custom Order Invoice Received' : 'Custom Order Invoice Sent')
+          : (iAmBuyer ? 'Invoice Received' : 'Invoice Sent'))
+      : (isCustomOrderStreamLocal
+          ? (iAmBuyer ? 'Custom Order Proposal Received' : 'Custom Order Proposal Sent')
+          : (iAmBuyer ? 'Proposal Received' : 'Proposal Sent'));
 
     const iconTileCls = isInvoice
       ? 'bg-blue-50 text-blue-500'
@@ -225,26 +289,58 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
     // One-line message text matching reference image:
     let messageText = '';
     if (offer.status === 'pending') {
-      if (iAmBuyer) {
-        messageText = `${senderName} has sent you an ${isInvoice ? 'invoice' : 'proposal'} for this Gig Order.`;
-      } else if (iAmSeller) {
-        messageText = `Your ${isInvoice ? 'invoice' : 'proposal'} has been sent to the buyer and is awaiting their response.`;
+      if (isCustomOrderStreamLocal) {
+        if (isInvoice) {
+          if (iAmBuyer) {
+            messageText = `${senderName} has sent you a Custom Order Invoice for this Custom Order.`;
+          } else if (iAmSeller) {
+            messageText = `Your Custom Order Invoice has been sent to the buyer and is awaiting their response.`;
+          } else {
+            messageText = `${senderName} has sent a Custom Order Invoice for this Custom Order.`;
+          }
+        } else {
+          if (iAmBuyer) {
+            messageText = `${senderName} has sent you a Custom Order Proposal.`;
+          } else if (iAmSeller) {
+            messageText = `Your Custom Order Proposal has been sent to the buyer and is awaiting their response.`;
+          } else {
+            messageText = `${senderName} has sent a Custom Order Proposal.`;
+          }
+        }
       } else {
-        messageText = `${senderName} has sent an ${isInvoice ? 'invoice' : 'proposal'} for this Gig Order.`;
+        if (iAmBuyer) {
+          messageText = `${senderName} has sent you an ${isInvoice ? 'invoice' : 'proposal'} for this ${order?.orderType === 'project' ? 'Project' : 'Gig Order'}.`;
+        } else if (iAmSeller) {
+          messageText = `Your ${isInvoice ? 'invoice' : 'proposal'} has been sent to the buyer and is awaiting their response.`;
+        } else {
+          messageText = `${senderName} has sent an ${isInvoice ? 'invoice' : 'proposal'} for this ${order?.orderType === 'project' ? 'Project' : 'Gig Order'}.`;
+        }
       }
     } else if (offer.status === 'accepted' || offer.status === 'paid') {
-      messageText = `The ${isInvoice ? 'invoice' : 'proposal'} has been accepted and processed.`;
+      if (isCustomOrderStreamLocal) {
+        if (isInvoice) {
+          messageText = `The Custom Order Invoice has been accepted, payment was released, and the Custom Order is Completed.`;
+        } else {
+          messageText = `The Custom Order Proposal has been accepted and escrow was funded to create the Custom Order.`;
+        }
+      } else {
+        messageText = `The ${isInvoice ? 'invoice' : 'proposal'} has been accepted and processed.`;
+      }
     } else if (offer.status === 'declined') {
-      messageText = `The ${isInvoice ? 'invoice' : 'proposal'} was rejected by the buyer.`;
+      messageText = `The ${isCustomOrderStreamLocal ? (isInvoice ? 'Custom Order Invoice' : 'Custom Order Proposal') : (isInvoice ? 'invoice' : 'proposal')} was rejected by the buyer.`;
     } else if (offer.status === 'cancelled') {
-      messageText = `The ${isInvoice ? 'invoice' : 'proposal'} was cancelled by the seller.`;
+      messageText = `The ${isCustomOrderStreamLocal ? (isInvoice ? 'Custom Order Invoice' : 'Custom Order Proposal') : (isInvoice ? 'invoice' : 'proposal')} was cancelled by the seller.`;
     } else {
-      messageText = `The ${isInvoice ? 'invoice' : 'proposal'} has expired.`;
+      messageText = `The ${isCustomOrderStreamLocal ? (isInvoice ? 'Custom Order Invoice' : 'Custom Order Proposal') : (isInvoice ? 'invoice' : 'proposal')} has expired.`;
     }
 
-    const amountLabel = isInvoice ? 'Invoice Amount' : 'Proposal Amount';
+    const amountLabel = isInvoice
+      ? (isCustomOrderStreamLocal ? 'Custom Order Invoice Amount' : 'Invoice Amount')
+      : (isCustomOrderStreamLocal ? 'Custom Order Proposal Amount' : 'Proposal Amount');
     const formattedAmount = `${sym}${Number(offer.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    const detailsLinkText = isInvoice ? 'View invoice details' : 'View proposal details';
+    const detailsLinkText = isInvoice
+      ? (isCustomOrderStreamLocal ? 'View Custom Order Invoice details' : 'View invoice details')
+      : (isCustomOrderStreamLocal ? 'View Custom Order Proposal details' : 'View proposal details');
 
     return (
       <div key={keyStr} className="flex justify-center my-4">
@@ -256,9 +352,18 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                 {headerIcon}
               </div>
               <div>
-                <h3 className="text-base font-bold text-gray-900 leading-tight">
-                  {headerTitle}
-                </h3>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="text-base font-bold text-gray-900 leading-tight">
+                    {headerTitle}
+                  </h3>
+                  {(hasMultipleOrders || (offer.originOrderId && offer.resultingOrderId && offer.originOrderId !== offer.resultingOrderId)) && (
+                    <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 text-[10px] font-mono">
+                      {offer.originOrderId && offer.resultingOrderId && offer.originOrderId !== offer.resultingOrderId
+                        ? `#${offer.originOrderId} → #${offer.resultingOrderId}`
+                        : `Order #${offer.orderId || msg.orderId}`}
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-gray-400 font-normal mt-0.5">
                   {relTime}
                 </p>
@@ -440,8 +545,8 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                     <ShieldCheck className="w-4 h-4 text-emerald-600" />
                     <span>
                       {isInvoice
-                        ? `Confirm Payment: Invoice ${offer.number || ''} (${sym}${offer.amount.toLocaleString()})`
-                        : `Confirm Accept & Pay (${sym}${offer.amount.toLocaleString()})`}
+                        ? `Confirm Payment: ${isCustomOrderStreamLocal ? 'Custom Order Invoice' : 'Invoice'} ${offer.number || ''} (${sym}${offer.amount.toLocaleString()})`
+                        : `Confirm Accept & Pay: ${isCustomOrderStreamLocal ? 'Custom Order Proposal' : 'Proposal'} (${sym}${offer.amount.toLocaleString()})`}
                     </span>
                   </div>
                   <p className="text-xs text-emerald-900 leading-relaxed font-mono tabular-nums">
@@ -449,10 +554,10 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                       hasAdditional ? (
                         <>Releases <strong>{sym}{activeEscrow.toLocaleString()}</strong> from Escrow and debits <strong>{sym}{Number(offer.clientAdditionalTotal ?? (offer.amount - activeEscrow)).toLocaleString()}</strong> from your wallet.</>
                       ) : (
-                        <>Releases <strong>{sym}{offer.amount.toLocaleString()}</strong> directly from your funded Escrow deposit to the seller's wallet. No extra wallet charge.</>
+                        <>Releases <strong>{sym}{offer.amount.toLocaleString()}</strong> directly from your funded Escrow deposit to the seller's wallet to complete the {isCustomOrderStreamLocal ? 'Custom Order' : 'order'}.</>
                       )
                     ) : (
-                      <>Funds <strong>{sym}{offer.amount.toLocaleString()}</strong> into WorkPerHour Escrow Vault under protection (total wallet debit: <strong>{sym}{Number(offer.clientTotal ?? offer.amount).toLocaleString()}</strong> incl. fees).</>
+                      <>Funds <strong>{sym}{offer.amount.toLocaleString()}</strong> into Escrow Vault under protection to create your {isCustomOrderStreamLocal ? 'Custom Order' : 'order'} (total wallet debit: <strong>{sym}{Number(offer.clientTotal ?? offer.amount).toLocaleString()}</strong> incl. fees).</>
                     )}
                   </p>
                   <div className="flex items-center gap-2 pt-1">
@@ -488,9 +593,11 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                   >
                     {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ban className="w-4 h-4 text-slate-600" />}
                     <span>
-                      {order?.orderType === 'project'
-                        ? (isInvoice ? 'Cancel / Withdraw' : 'Cancel Proposal')
-                        : `Cancel ${isInvoice ? 'Invoice' : 'Proposal'}`}
+                      {isCustomOrderStreamLocal
+                        ? `Cancel ${isInvoice ? 'Custom Order Invoice' : 'Custom Order Proposal'}`
+                        : order?.orderType === 'project'
+                          ? (isInvoice ? 'Cancel / Withdraw' : 'Cancel Proposal')
+                          : `Cancel ${isInvoice ? 'Invoice' : 'Proposal'}`}
                     </span>
                   </button>
                 </div>
@@ -575,6 +682,11 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                   {info.badgeLabel && (
                     <span className={`px-2 py-0.5 rounded-full border text-[10px] font-bold ${info.badgeCls}`}>
                       {info.badgeLabel}
+                    </span>
+                  )}
+                  {(hasMultipleOrders || (msg.orderId && order?.id && msg.orderId !== order.id)) && msg.orderId && (
+                    <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 text-[10px] font-mono">
+                      Order #{msg.orderId}
                     </span>
                   )}
                 </div>
@@ -1029,14 +1141,14 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
               key={btn.id}
               type="button"
               onClick={() => setActiveFilter(btn.id)}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+              className={`px-3 py-1.5 text-[13px] font-semibold rounded-lg transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
                 activeFilter === btn.id
                   ? 'bg-white text-slate-900 shadow-2xs font-bold'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               <span>{btn.label}</span>
-              <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono tabular-nums ${
+              <span className={`text-[9px] px-1.5 py-0.2 rounded font-mono tabular-nums ${
                 activeFilter === btn.id ? 'bg-emerald-50 text-emerald-800' : 'bg-slate-200/70 text-slate-600'
               }`}>
                 {btn.count}
@@ -1104,7 +1216,7 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                     {shouldShowDivider && (
                       <div className="flex items-center justify-center my-4">
                         <div className="h-px bg-slate-200/70 flex-1 max-w-[100px]" />
-                        <span className="mx-3 text-[10px] font-bold tracking-wider text-slate-500 uppercase bg-white px-2.5 py-0.5 rounded-full border border-slate-200 shadow-2xs">
+                        <span className="mx-3 text-xs font-semibold tracking-wider text-slate-500 uppercase bg-white dark:bg-slate-900 px-3 py-1 rounded-full border border-slate-200 dark:border-slate-800 shadow-2xs">
                           {msgDate}
                         </span>
                         <div className="h-px bg-slate-200/70 flex-1 max-w-[100px]" />
@@ -1122,7 +1234,7 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                   {shouldShowDivider && (
                     <div className="flex items-center justify-center my-4">
                       <div className="h-px bg-slate-200/70 flex-1 max-w-[100px]" />
-                      <span className="mx-3 text-[10px] font-bold tracking-wider text-slate-500 uppercase bg-white px-2.5 py-0.5 rounded-full border border-slate-200 shadow-2xs">
+                      <span className="mx-3 text-xs font-semibold tracking-wider text-slate-500 uppercase bg-white dark:bg-slate-900 px-3 py-1 rounded-full border border-slate-200 dark:border-slate-800 shadow-2xs">
                         {msgDate}
                       </span>
                       <div className="h-px bg-slate-200/70 flex-1 max-w-[100px]" />
@@ -1146,42 +1258,49 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                 {shouldShowDivider && (
                   <div className="flex items-center justify-center my-4">
                     <div className="h-px bg-slate-200/70 flex-1 max-w-[100px]" />
-                    <span className="mx-3 text-[10px] font-bold tracking-wider text-slate-500 uppercase bg-white px-2.5 py-0.5 rounded-full border border-slate-200 shadow-2xs">
+                    <span className="mx-3 text-xs font-semibold tracking-wider text-slate-500 uppercase bg-white dark:bg-slate-900 px-3 py-1 rounded-full border border-slate-200 dark:border-slate-800 shadow-2xs">
                       {msgDate}
                     </span>
                     <div className="h-px bg-slate-200/70 flex-1 max-w-[100px]" />
                   </div>
                 )}
-                <div key={uniqueKey} className={`flex gap-3 my-2 ${isMe ? 'flex-row-reverse' : ''}`}>
+                <div key={uniqueKey} className={`flex gap-3 my-2.5 ${isMe ? 'flex-row-reverse' : ''}`}>
                   <img 
                     src={avatarUrl || DEFAULT_AVATAR} 
                     alt={senderName} 
-                    className="w-8 h-8 rounded-full object-cover shrink-0 mt-0.5 border border-slate-200" 
+                    className="w-9 h-9 rounded-full object-cover shrink-0 mt-0.5 border border-slate-200 dark:border-slate-700 shadow-2xs" 
                     onError={(e) => { (e.target as HTMLImageElement).src = DEFAULT_AVATAR; }}
                   />
-                  <div className={`flex flex-col gap-1 ${isMe ? 'items-end' : 'items-start'} max-w-[75%]`}>
-                    <span className="text-[10px] font-bold text-slate-400 px-1">{senderName}</span>
-                    <div className={`px-4 py-3 rounded-2xl text-xs ${
+                  <div className={`flex flex-col gap-1 ${isMe ? 'items-end' : 'items-start'} max-w-[80%] sm:max-w-[75%]`}>
+                    <div className="flex items-center gap-2 px-1">
+                      <span className="text-xs font-bold text-slate-600 dark:text-slate-400">{senderName}</span>
+                      {(hasMultipleOrders || (msg.orderId && order?.id && msg.orderId !== order.id)) && msg.orderId && (
+                        <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 text-xs font-mono font-semibold">
+                          #{msg.orderId}
+                        </span>
+                      )}
+                    </div>
+                    <div className={`px-4.5 py-3 rounded-2xl text-sm leading-relaxed ${
                       isFailed
-                        ? 'bg-rose-50 border border-rose-300 text-rose-900 rounded-tr-none'
+                        ? 'bg-rose-50 dark:bg-rose-950/60 border border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200 rounded-tr-none'
                         : isMe
-                          ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-tr-none shadow-sm'
-                          : 'bg-white border border-slate-200 text-slate-800 rounded-tl-none shadow-xs'
+                          ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-normal rounded-tr-none shadow-sm'
+                          : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 rounded-tl-none shadow-xs'
                     }`}>
                       {msg.type === 'file' && msg.fileInfo ? (
                         <div className="flex items-center gap-3">
-                          <div className={`p-2.5 rounded-xl ${isFailed ? 'bg-rose-100 text-rose-700' : isMe ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-600'}`}>
-                            <FileText className="w-4 h-4" />
+                          <div className={`p-2.5 rounded-xl ${isFailed ? 'bg-rose-100 text-rose-700' : isMe ? 'bg-white/20 text-white' : 'bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400'}`}>
+                            <FileText className="w-5 h-5" />
                           </div>
                           <div className="flex-1 min-w-0">
-                            <div className="font-bold truncate">{msg.fileInfo.name}</div>
-                            <div className="text-[10px] opacity-70 font-mono tabular-nums">{msg.fileInfo.size}</div>
+                            <div className="font-bold truncate text-sm">{msg.fileInfo.name}</div>
+                            <div className="text-xs opacity-80 font-mono tabular-nums">{msg.fileInfo.size}</div>
                           </div>
                           {!isFailed && (
                             <button
                               type="button"
                               onClick={() => onDownloadFile?.(msg.fileInfo!)}
-                              className={`p-2 rounded-lg cursor-pointer transition ${isMe ? 'hover:bg-white/20 text-white' : 'hover:bg-slate-100 text-slate-500'}`}
+                              className={`p-2 rounded-lg cursor-pointer transition ${isMe ? 'hover:bg-white/20 text-white' : 'hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500'}`}
                               title="Download shared file"
                             >
                               <Download className="w-4 h-4" />
@@ -1191,9 +1310,9 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                       ) : (
                         <div className="space-y-2">
                           {msg.metadata?.offPlatformWarning && (
-                            <div className="p-2 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 font-semibold flex items-center gap-2 animate-in slide-in-from-top-1">
-                              <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
-                              <span className="text-[10px] leading-tight">Safety Warning: Keep payments & contact on WorkPerHour to stay protected.</span>
+                            <div className="p-2.5 bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 rounded-xl text-amber-900 dark:text-amber-200 font-semibold flex items-center gap-2 text-xs">
+                              <ShieldAlert className="w-4 h-4 shrink-0 text-amber-600" />
+                              <span>Safety Warning: Keep payments & contact on WorkPerHour to stay protected.</span>
                             </div>
                           )}
                           <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>
@@ -1202,32 +1321,32 @@ export const WorkstreamActivityStream: React.FC<WorkstreamActivityStreamProps> =
                     </div>
 
                     {/* Status and retry bar */}
-                    <div className="flex items-center gap-1.5 px-1 text-[9px]">
+                    <div className="flex items-center gap-2 px-1 text-xs">
                       {isFailed && (
                         <div className="flex items-center gap-1.5 text-rose-600 font-semibold">
-                          <AlertTriangle className="w-3 h-3 text-rose-500" />
+                          <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
                           <span>Failed to send</span>
                           {isMe && onRetryMessage && (
                             <button
                               type="button"
                               onClick={() => onRetryMessage(msg)}
-                              className="inline-flex items-center gap-1 px-2 py-0.5 bg-rose-100 hover:bg-rose-200 text-rose-700 rounded-md font-bold transition cursor-pointer"
+                              className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-rose-100 hover:bg-rose-200 text-rose-700 rounded-md font-bold transition cursor-pointer"
                               title="Retry sending this message"
                             >
-                              <RotateCcw className="w-2.5 h-2.5" />
+                              <RotateCcw className="w-3 h-3" />
                               <span>Retry</span>
                             </button>
                           )}
                         </div>
                       )}
                       {isSending && (
-                        <div className="flex items-center gap-1 text-slate-400">
-                          <Loader2 className="w-3 h-3 animate-spin" />
+                        <div className="flex items-center gap-1.5 text-slate-400">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
                           <span>Sending...</span>
                         </div>
                       )}
                       {!isFailed && !isSending && (
-                        <span className="text-slate-400 font-medium font-mono tabular-nums">{formatMessageTime(msg.timestamp)}</span>
+                        <span className="text-slate-400 font-semibold font-mono tabular-nums">{formatMessageTime(msg.timestamp)}</span>
                       )}
                     </div>
                   </div>

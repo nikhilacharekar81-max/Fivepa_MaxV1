@@ -34,12 +34,18 @@ export class WorkspaceRepo {
         buyer_id = EXCLUDED.buyer_id,
         seller_id = EXCLUDED.seller_id,
         order_ids = (
-          SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
+          SELECT COALESCE(jsonb_agg(elem ORDER BY min_ord), '[]'::jsonb)
           FROM (
-            SELECT jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) AS elem
-            UNION
-            SELECT jsonb_array_elements_text(EXCLUDED.order_ids) AS elem
-          ) s
+            SELECT elem, MIN(ord) AS min_ord
+            FROM (
+              SELECT elem, ord
+              FROM jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) WITH ORDINALITY AS t1(elem, ord)
+              UNION ALL
+              SELECT elem, ord + 100000
+              FROM jsonb_array_elements_text(EXCLUDED.order_ids) WITH ORDINALITY AS t2(elem, ord)
+            ) combined
+            GROUP BY elem
+          ) deduped
         ),
         title = EXCLUDED.title,
         updated_at = EXCLUDED.updated_at,
@@ -69,10 +75,16 @@ export class WorkspaceRepo {
   }
 
   async listWorkspaces(): Promise<any[]> {
-    const res = await this.ctx.getPool().query('SELECT * FROM workspaces ORDER BY created_at DESC');
+    const res = await this.ctx.getPool().query('SELECT * FROM workspaces ORDER BY updated_at DESC NULLS LAST, created_at DESC');
     return res.rows.map(r => {
       const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
-      const orderIds = typeof r.order_ids === 'string' ? JSON.parse(r.order_ids) : (r.order_ids || []);
+      const rawOrderIds = typeof r.order_ids === 'string' ? JSON.parse(r.order_ids) : (r.order_ids || []);
+      const orderIds: string[] = Array.isArray(rawOrderIds) ? rawOrderIds.map(String) : [];
+      const candidateActive = meta.activeOrderId ? String(meta.activeOrderId) : undefined;
+      const activeOrderId =
+        candidateActive && (orderIds.length === 0 || orderIds.includes(candidateActive))
+          ? candidateActive
+          : (orderIds.length > 0 ? orderIds[orderIds.length - 1] : candidateActive);
       return {
         workspaceId: r.workspace_id,
         buyerId: r.buyer_id,
@@ -85,7 +97,7 @@ export class WorkspaceRepo {
         originType: meta.originType || 'gig',
         originId: meta.originId || r.title || r.workspace_id,
         status: meta.status || 'active',
-        activeOrderId: meta.activeOrderId || (Array.isArray(orderIds) ? orderIds[0] : undefined),
+        activeOrderId,
         metadata: meta
       };
     });
@@ -97,7 +109,13 @@ export class WorkspaceRepo {
     if (res.rows.length === 0) return null;
     const r = res.rows[0];
     const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
-    const orderIds = typeof r.order_ids === 'string' ? JSON.parse(r.order_ids) : (r.order_ids || []);
+    const rawOrderIds = typeof r.order_ids === 'string' ? JSON.parse(r.order_ids) : (r.order_ids || []);
+    const orderIds: string[] = Array.isArray(rawOrderIds) ? rawOrderIds.map(String) : [];
+    const candidateActive = meta.activeOrderId ? String(meta.activeOrderId) : undefined;
+    const activeOrderId =
+      candidateActive && (orderIds.length === 0 || orderIds.includes(candidateActive))
+        ? candidateActive
+        : (orderIds.length > 0 ? orderIds[orderIds.length - 1] : candidateActive);
     return {
       workspaceId: r.workspace_id,
       buyerId: r.buyer_id,
@@ -110,7 +128,7 @@ export class WorkspaceRepo {
       originType: meta.originType || 'gig',
       originId: meta.originId || r.title || r.workspace_id,
       status: meta.status || 'active',
-      activeOrderId: meta.activeOrderId || (Array.isArray(orderIds) ? orderIds[0] : undefined),
+      activeOrderId,
       metadata: meta
     };
   }
@@ -134,9 +152,10 @@ export class WorkspaceRepo {
               [m.timestamp || new Date().toISOString()]
             );
           }
+          const workspaceIdVal = (m as any).workspaceId || m.metadata?.workspaceId || null;
           await client.query(
-            `INSERT INTO messages (id, order_id, sender_id, sender_name, text, timestamp, type, file_info, metadata)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            `INSERT INTO messages (id, order_id, sender_id, sender_name, text, timestamp, type, file_info, metadata, workspace_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (id) DO UPDATE SET
                order_id = EXCLUDED.order_id,
                sender_id = EXCLUDED.sender_id,
@@ -145,10 +164,12 @@ export class WorkspaceRepo {
                timestamp = EXCLUDED.timestamp,
                type = EXCLUDED.type,
                file_info = EXCLUDED.file_info,
-               metadata = EXCLUDED.metadata`,
+               metadata = EXCLUDED.metadata,
+               workspace_id = COALESCE(EXCLUDED.workspace_id, messages.workspace_id)`,
             [
-              m.id, m.orderId, m.senderId, m.senderName, m.text, m.timestamp,
-              m.type || 'message', JSON.stringify(m.fileInfo || null), JSON.stringify(m.metadata || null)
+              m.id, m.orderId || null, m.senderId, m.senderName, m.text, m.timestamp,
+              m.type || 'message', JSON.stringify(m.fileInfo || null), JSON.stringify(m.metadata || null),
+              workspaceIdVal
             ]
           );
         }
@@ -168,11 +189,64 @@ export class WorkspaceRepo {
 
   async listMessages(orderId?: string): Promise<Message[]> {
     const res = orderId
-      ? await this.ctx.getPool().query('SELECT * FROM messages WHERE order_id = $1 ORDER BY timestamp ASC', [orderId])
-      : await this.ctx.getPool().query('SELECT * FROM messages ORDER BY timestamp ASC');
+      ? await this.ctx.getPool().query('SELECT * FROM messages WHERE order_id = $1 ORDER BY timestamp ASC, id ASC', [orderId])
+      : await this.ctx.getPool().query('SELECT * FROM messages ORDER BY timestamp ASC, id ASC');
     return res.rows.map(r => ({
       id: r.id,
       orderId: r.order_id,
+      senderId: r.sender_id,
+      senderName: r.sender_name,
+      text: r.text,
+      timestamp: r.timestamp,
+      type: r.type || undefined,
+      fileInfo: r.file_info || undefined,
+      metadata: r.metadata || undefined
+    }));
+  }
+
+  async getVerifiedWorkspaceOrderIds(workspaceId: string, client?: any): Promise<string[]> {
+    if (!workspaceId) return [];
+    const dbRunner = client || this.ctx.getPool();
+    const wsRes = await dbRunner.query(
+      'SELECT workspace_id, buyer_id, seller_id, order_ids FROM workspaces WHERE workspace_id = $1',
+      [workspaceId]
+    );
+    const wsRow = wsRes.rows[0];
+    if (wsRow) {
+      const rawOrderIds = Array.isArray(wsRow.order_ids)
+        ? wsRow.order_ids.map(String)
+        : (typeof wsRow.order_ids === 'string' ? JSON.parse(wsRow.order_ids || '[]').map(String) : []);
+      const ordRes = await dbRunner.query(
+        `SELECT id FROM orders
+         WHERE buyer_id = $2 AND seller_id = $3
+           AND (workspace_id = $1 OR (workspace_id IS NULL AND id = ANY($4::text[])))`,
+        [workspaceId, wsRow.buyer_id, wsRow.seller_id, rawOrderIds]
+      );
+      return ordRes.rows.map((r: any) => String(r.id));
+    }
+    const ordRes = await dbRunner.query(
+      'SELECT id FROM orders WHERE workspace_id = $1',
+      [workspaceId]
+    );
+    return ordRes.rows.map((r: any) => String(r.id));
+  }
+
+  async listMessagesForWorkspace(workspaceId: string, client?: any): Promise<Message[]> {
+    if (!workspaceId) return [];
+    const dbRunner = client || this.ctx.getPool();
+    const verifiedOrderIds = await this.getVerifiedWorkspaceOrderIds(workspaceId, dbRunner);
+    const res = await dbRunner.query(
+      `SELECT * FROM messages
+       WHERE workspace_id = $1
+          OR metadata->>'workspaceId' = $1
+          OR (order_id IS NOT NULL AND order_id = ANY($2::text[]))
+       ORDER BY timestamp ASC, id ASC`,
+      [workspaceId, verifiedOrderIds.length > 0 ? verifiedOrderIds : ['__nonexistent__']]
+    );
+    return res.rows.map((r: any) => ({
+      id: r.id,
+      orderId: r.order_id || undefined,
+      workspaceId: r.workspace_id || r.metadata?.workspaceId || undefined,
       senderId: r.sender_id,
       senderName: r.sender_name,
       text: r.text,
@@ -194,8 +268,14 @@ export class WorkspaceRepo {
         for (const o of offers) {
           if (!o?.id || seen.has(o.id)) continue;
           seen.add(o.id);
+          const originOrderId = o.originOrderId || o.metadata?.originOrderId || o.orderId;
           const mergedMetadata = {
             ...(o.metadata || {}),
+            ...(originOrderId ? { originOrderId } : {}),
+            ...(o.resultingOrderId !== undefined
+              ? { resultingOrderId: o.resultingOrderId }
+              : (o.metadata?.resultingOrderId ? { resultingOrderId: o.metadata.resultingOrderId } : {})),
+            ...(o.workspaceId !== undefined ? { workspaceId: o.workspaceId } : {}),
             ...(o.note !== undefined ? { note: o.note } : {}),
             ...(o.files !== undefined ? { files: o.files } : {}),
             ...(o.reference !== undefined ? { reference: o.reference } : {}),
@@ -213,7 +293,7 @@ export class WorkspaceRepo {
             ON CONFLICT (id) DO UPDATE SET
               number = EXCLUDED.number,
               order_id = EXCLUDED.order_id,
-              workspace_id = EXCLUDED.workspace_id,
+              workspace_id = COALESCE(EXCLUDED.workspace_id, workstream_offers.workspace_id),
               kind = EXCLUDED.kind,
               title = EXCLUDED.title,
               amount = EXCLUDED.amount,
@@ -225,7 +305,7 @@ export class WorkspaceRepo {
               resolved_by = EXCLUDED.resolved_by,
               metadata = EXCLUDED.metadata`,
             [
-              o.id, o.number, o.orderId, o.workspaceId || null, o.kind, o.title, o.amount,
+              o.id, o.number, o.orderId || null, o.workspaceId || null, o.kind, o.title, o.amount,
               o.deliveryDays ?? null, o.status, o.createdBy, o.createdAt,
               o.resolvedAt || null, o.resolvedBy || null, JSON.stringify(mergedMetadata)
             ]
@@ -244,8 +324,14 @@ export class WorkspaceRepo {
   async saveOffer(offer: WorkstreamOffer, client?: any): Promise<void> {
     if (client) {
       if (!offer?.id) return;
+      const originOrderId = offer.originOrderId || offer.metadata?.originOrderId || offer.orderId;
       const mergedMetadata = {
         ...(offer.metadata || {}),
+        ...(originOrderId ? { originOrderId } : {}),
+        ...(offer.resultingOrderId !== undefined
+          ? { resultingOrderId: offer.resultingOrderId }
+          : (offer.metadata?.resultingOrderId ? { resultingOrderId: offer.metadata.resultingOrderId } : {})),
+        ...(offer.workspaceId !== undefined ? { workspaceId: offer.workspaceId } : {}),
         ...(offer.note !== undefined ? { note: offer.note } : {}),
         ...(offer.files !== undefined ? { files: offer.files } : {}),
         ...(offer.reference !== undefined ? { reference: offer.reference } : {}),
@@ -263,7 +349,7 @@ export class WorkspaceRepo {
         ON CONFLICT (id) DO UPDATE SET
           number = EXCLUDED.number,
           order_id = EXCLUDED.order_id,
-          workspace_id = EXCLUDED.workspace_id,
+          workspace_id = COALESCE(EXCLUDED.workspace_id, workstream_offers.workspace_id),
           kind = EXCLUDED.kind,
           title = EXCLUDED.title,
           amount = EXCLUDED.amount,
@@ -275,7 +361,7 @@ export class WorkspaceRepo {
           resolved_by = EXCLUDED.resolved_by,
           metadata = EXCLUDED.metadata`,
         [
-          offer.id, offer.number, offer.orderId, offer.workspaceId || null, offer.kind, offer.title, offer.amount,
+          offer.id, offer.number, offer.orderId || null, offer.workspaceId || null, offer.kind, offer.title, offer.amount,
           offer.deliveryDays ?? null, offer.status, offer.createdBy, offer.createdAt,
           offer.resolvedAt || null, offer.resolvedBy || null, JSON.stringify(mergedMetadata)
         ]
@@ -300,8 +386,38 @@ export class WorkspaceRepo {
   async listOffersForOrder(orderId: string, client?: any): Promise<WorkstreamOffer[]> {
     const dbRunner = client || this.ctx.getPool();
     const res = await dbRunner.query(
-      'SELECT * FROM workstream_offers WHERE order_id = $1 ORDER BY created_at DESC',
+      `SELECT * FROM workstream_offers
+       WHERE order_id = $1
+          OR (metadata->>'originOrderId') = $1
+          OR (metadata->>'resultingOrderId') = $1
+       ORDER BY created_at DESC, id DESC`,
       [orderId]
+    );
+    return res.rows.map(mapOfferRow);
+  }
+
+  async listOffersForWorkspace(workspaceId: string, fallbackOrderId?: string, client?: any): Promise<WorkstreamOffer[]> {
+    const dbRunner = client || this.ctx.getPool();
+    const verifiedOrderIds = workspaceId
+      ? await this.getVerifiedWorkspaceOrderIds(workspaceId, dbRunner)
+      : [];
+    if (fallbackOrderId && !verifiedOrderIds.includes(fallbackOrderId)) {
+      // Only include fallbackOrderId if it actually belongs to workspaceId (or if workspaceId is empty)
+      if (!workspaceId) {
+        verifiedOrderIds.push(fallbackOrderId);
+      }
+    }
+    if (verifiedOrderIds.length === 0 && !workspaceId) {
+      return [];
+    }
+    const res = await dbRunner.query(
+      `SELECT * FROM workstream_offers
+       WHERE order_id = ANY($1::text[])
+          OR workspace_id = $2
+          OR (metadata->>'originOrderId') = ANY($1::text[])
+          OR (metadata->>'resultingOrderId') = ANY($1::text[])
+       ORDER BY created_at DESC, id DESC`,
+      [verifiedOrderIds.length > 0 ? verifiedOrderIds : ['__nonexistent__'], workspaceId]
     );
     return res.rows.map(mapOfferRow);
   }

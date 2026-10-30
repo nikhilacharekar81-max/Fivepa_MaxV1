@@ -54,14 +54,26 @@ export const RelatedGigsSection: React.FC<RelatedGigsSectionProps> = ({
     }
   };
 
+  const formatFiverrTitle = (t: string) => {
+    const trimmed = (t || '').trim();
+    if (trimmed.toLowerCase().startsWith('i will')) return 'I will ' + trimmed.slice(6).trim();
+    return `I will ${trimmed.charAt(0).toLowerCase()}${trimmed.slice(1)}`;
+  };
+
+  const formatReviewCount = (count: number) => {
+    if (count >= 1000) return `${(count / 1000).toFixed(1)}k`;
+    return String(count);
+  };
+
   return (
-    <div className="mt-8 pt-6 border-t border-slate-200">
+    <div className="mt-8 pt-6 border-t border-slate-200 dark:border-slate-800">
       <div className="flex items-center justify-between mb-4">
         <div>
-          <div className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/60 px-2.5 py-0.5 rounded-full mb-1">
-            <Sparkles className="w-3 h-3 text-emerald-600" /> Handpicked Matches
+          <div className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200/60 dark:border-emerald-800/60 px-2.5 py-1 rounded-full mb-1.5">
+            <Sparkles className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+            <span>Handpicked Matches</span>
           </div>
-          <h3 className="text-lg font-bold text-slate-900 text-fiverr-dark">{title}</h3>
+          <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">{title}</h3>
         </div>
       </div>
 
@@ -70,39 +82,41 @@ export const RelatedGigsSection: React.FC<RelatedGigsSectionProps> = ({
           <div
             key={gig.id}
             onClick={(e) => handleGigClick(gig, e)}
-            className="bg-white rounded-2xl border border-slate-200 overflow-hidden hover:border-emerald-500/50 hover:shadow-lg transition-all flex flex-col justify-between group cursor-pointer"
+            className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden hover:border-emerald-500/50 hover:shadow-lg transition-all flex flex-col justify-between group cursor-pointer"
           >
             <div>
-              <div className="relative aspect-video bg-slate-100 overflow-hidden">
+              <div className="relative aspect-video bg-slate-100 dark:bg-slate-800 overflow-hidden">
                 <GigImage
                   src={gig.image}
                   title={gig.title}
                   category={gig.category}
-                  className="w-full h-full group-hover:scale-105 transition-transform duration-300"
+                  className="w-full h-full group-hover:scale-105 transition-transform duration-300 object-cover"
                 />
               </div>
 
-              <div className="p-3.5 space-y-2">
+              <div className="p-3.5 space-y-2.5">
                 <div className="flex items-center gap-2 min-w-0">
                   <Avatar src={gig.freelancerAvatar} name={gig.freelancerName} size="xs" />
-                  <span className="text-xs font-semibold text-fiverr-dark truncate">{gig.freelancerName}</span>
+                  <span className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">{gig.freelancerName}</span>
                 </div>
 
-                <h4 className="font-semibold text-xs text-slate-900 text-fiverr-dark group-hover:text-emerald-600 transition-colors line-clamp-2 leading-snug">
-                  {gig.title}
+                <h4 className="text-sm sm:text-base leading-snug font-normal text-slate-800 dark:text-slate-200 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors line-clamp-2 min-h-[44px]">
+                  {formatFiverrTitle(gig.title)}
                 </h4>
 
-                <div className="flex items-center gap-1 text-[11px] text-amber-500 font-bold">
-                  <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
-                  <span>{gig.rating || 5.0}</span>
-                  <span className="text-fiverr-muted font-normal">({gig.reviewsCount || 0})</span>
+                <div className="flex items-center gap-1 text-xs text-slate-700 dark:text-slate-300">
+                  <Star className="w-3.5 h-3.5 fill-slate-900 dark:fill-amber-400 text-slate-900 dark:text-amber-400 shrink-0" />
+                  <span className="font-bold text-slate-900 dark:text-slate-100 font-mono tabular-nums">
+                    {(gig.rating || 5.0).toFixed(1)}
+                  </span>
+                  <span className="text-slate-400 font-normal">({formatReviewCount(gig.reviewsCount || 1)})</span>
                 </div>
               </div>
             </div>
 
-            <div className="px-3.5 py-2.5 border-t border-slate-100 flex items-center justify-between bg-slate-50/50 text-xs">
-              <span className="text-[10px] uppercase text-fiverr-muted font-bold">Starting at</span>
-              <span className="text-sm font-bold text-emerald-600 font-mono">${gig.price}</span>
+            <div className="px-3.5 py-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs">
+              <span className="text-xs uppercase tracking-wider text-slate-400 font-semibold">From</span>
+              <span className="text-base font-extrabold text-slate-900 dark:text-slate-100 font-mono tabular-nums">${gig.price}</span>
             </div>
           </div>
         ))}

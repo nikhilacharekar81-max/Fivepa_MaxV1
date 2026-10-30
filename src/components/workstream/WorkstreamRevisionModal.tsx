@@ -47,7 +47,7 @@ export const WorkstreamRevisionModal: React.FC<WorkstreamRevisionModalProps> = (
             </div>
             <div>
               <h3 className="text-base font-bold text-fiverr-dark">Request Revisions</h3>
-              <p className="text-[11px] text-slate-400">Order #{order.id}</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">Order #{order.id}</p>
             </div>
           </div>
           <button
@@ -61,7 +61,7 @@ export const WorkstreamRevisionModal: React.FC<WorkstreamRevisionModalProps> = (
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">
           <div>
-            <label className="block text-fiverr-dark font-bold uppercase tracking-wider text-[10px] mb-1.5">
+            <label className="block text-fiverr-dark font-bold uppercase tracking-wider text-xs mb-1.5">
               Specific Changes & Adjustments Needed
             </label>
             <textarea
@@ -74,13 +74,13 @@ export const WorkstreamRevisionModal: React.FC<WorkstreamRevisionModalProps> = (
             />
           </div>
 
-          <div className="p-3 bg-purple-50/70 text-[11px] text-purple-800 rounded-2xl border border-purple-200 flex items-center gap-2">
+          <div className="p-3 bg-purple-50/70 text-xs text-purple-800 rounded-2xl border border-purple-200 flex items-center gap-2">
             <AlertCircle className="w-4 h-4 text-purple-600 shrink-0" />
             <span>Escrow remains safely held while the freelancer makes the requested updates.</span>
           </div>
 
           {error && (
-            <div className="p-3 bg-red-50/80 text-[11px] text-red-700 rounded-2xl border border-red-200 flex items-start gap-2.5">
+            <div className="p-3 bg-red-50/80 text-xs text-red-700 rounded-2xl border border-red-200 flex items-start gap-2.5">
               <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
               <span>{error}</span>
             </div>

@@ -3,7 +3,7 @@ import {
   ChevronLeft, ShieldCheck, Clock, CheckCircle2, AlertCircle, 
   RotateCcw, Activity, FolderOpen, Send, Sparkles, MessageSquare, Video, Star, Receipt
 } from 'lucide-react';
-import { WorkstreamItem, WorkstreamMessage, SharedFileItem, WorkstreamSubTab } from './types';
+import { WorkstreamItem, WorkstreamMessage, SharedFileItem, WorkstreamSubTab, isInquiryWorkstream } from './types';
 import { UserAccount, Order } from '../../types';
 import { WorkstreamActivityStream } from './WorkstreamActivityStream';
 import { WorkstreamMessageInput } from './WorkstreamMessageInput';
@@ -23,6 +23,8 @@ import { useWorkstreamOffers } from '../../hooks/workstream/useWorkstreamOffers'
 
 interface WorkstreamWorkspaceProps {
   order: WorkstreamItem;
+  workspaceOrders?: WorkstreamItem[];
+  onSelectOrder?: (orderId: string) => void;
   messages: WorkstreamMessage[];
   files: SharedFileItem[];
   currentUser?: UserAccount | null;
@@ -59,6 +61,8 @@ interface WorkstreamWorkspaceProps {
 
 export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
   order,
+  workspaceOrders = [],
+  onSelectOrder,
   messages,
   files,
   currentUser,
@@ -224,22 +228,29 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
 
   const isSeller = !!currentUser && currentUser.id === order.sellerId;
   const isBuyer = !!currentUser && currentUser.id === order.buyerId;
-  const pendingInvoice = offers.find(o => o.kind === 'invoice' && o.status === 'pending');
-  const pendingProposal = offers.find(o => o.kind === 'proposal' && o.status === 'pending');
-  const invoiceAlreadyPaid = hasPaidInvoice || Boolean((order as any).hasPaidInvoice) || offers.some(o => o.kind === 'invoice' && o.status === 'paid') || order.status === 'completed';
+  const currentOrderOffers = offers.filter(
+    o =>
+      o.orderId === order.id ||
+      o.originOrderId === order.id ||
+      (!o.orderId && !o.originOrderId && Boolean(o.workspaceId) && (o.workspaceId === order.id || o.workspaceId === order.workspaceId))
+  );
+  const pendingInvoice = currentOrderOffers.find(o => o.kind === 'invoice' && o.status === 'pending');
+  const pendingProposal = currentOrderOffers.find(o => o.kind === 'proposal' && o.status === 'pending');
+  const invoiceAlreadyPaid = hasPaidInvoice || Boolean((order as any).hasPaidInvoice) || currentOrderOffers.some(o => o.kind === 'invoice' && o.status === 'paid') || order.status === 'completed';
   const activeEscrow = escrowRemaining > 0 ? escrowRemaining : (escrowFunded ? Number(order.amount || 0) : 0);
+  const isCustomOrderWorkstream = isInquiryWorkstream(order);
+  const isInquiryOrder = isCustomOrderWorkstream && !escrowFunded;
 
   // PeoplePerHour Gig vs Project Proposal rules:
-  // - For Gigs: Seller CANNOT send a new proposal initially because the Gig is already pre-funded.
-  //   Once the first invoice is paid, Seller CAN send follow-on proposals in the same WorkStream!
+  // - For Paid Gigs: Seller CANNOT send a new proposal initially because the Gig is already pre-funded.
+  //   Once the first invoice is paid, or if the thread is an unfunded Pre-Purchase Inquiry, Seller CAN send proposals in the same WorkStream!
   // - For Projects: Seller can send a proposal when no active escrow/invoice is blocking, or after an invoice is paid.
-  const isGigInitiallyLocked = order.type === 'gig' && !invoiceAlreadyPaid;
+  const isGigInitiallyLocked = (order.type === 'gig' || (order as any).orderType === 'gig') && !invoiceAlreadyPaid && !isInquiryOrder && !isCustomOrderWorkstream;
   const canSendProposal = isSeller
-    && order.status !== 'cancelled'
     && !pendingInvoice
     && !pendingProposal
     && !isGigInitiallyLocked
-    && (!escrowFunded || invoiceAlreadyPaid);
+    && (!escrowFunded || invoiceAlreadyPaid || order.status === 'cancelled');
 
   const canRaiseInvoice = isSeller
     && (escrowFunded || activeEscrow > 0)
@@ -247,22 +258,22 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
     && !pendingInvoice;
 
   const proposalHint = !isSeller
-    ? 'Only the seller can send a proposal'
+    ? (isCustomOrderWorkstream ? 'Only the seller can send a Custom Order Proposal' : 'Only the seller can send a proposal')
     : isGigInitiallyLocked
       ? 'This Gig is already funded in Escrow. Deliver the work and raise your first invoice — once it is paid, you can send follow-on proposals.'
       : pendingInvoice
-        ? 'Cannot send a proposal while an invoice is awaiting payment.'
+        ? (isCustomOrderWorkstream ? 'Cannot send a Custom Order Proposal while a Custom Order Invoice is awaiting payment.' : 'Cannot send a proposal while an invoice is awaiting payment.')
         : pendingProposal
-          ? 'A proposal is already awaiting the buyer\'s response.'
+          ? (isCustomOrderWorkstream ? 'A Custom Order Proposal is already awaiting the buyer\'s response.' : 'A proposal is already awaiting the buyer\'s response.')
           : escrowFunded && !invoiceAlreadyPaid
-            ? 'Escrow is already funded for this stage. Raise an invoice to complete the current work first.'
-            : 'Send a custom proposal for additional scope.';
+            ? (isCustomOrderWorkstream ? 'Escrow is already funded for this Custom Order. Raise a Custom Order Invoice to complete the current work first.' : 'Escrow is already funded for this stage. Raise an invoice to complete the current work first.')
+            : (isCustomOrderWorkstream ? 'Send a Custom Order Proposal for this inquiry or additional scope.' : 'Send a custom proposal for this inquiry or additional scope.');
 
   const invoiceHint = !isSeller
-    ? 'Only the seller can raise an invoice'
+    ? (isCustomOrderWorkstream ? 'Only the seller can raise a Custom Order Invoice' : 'Only the seller can raise an invoice')
     : pendingInvoice
-      ? 'An invoice is already awaiting buyer payment.'
-      : 'Invoices require an active funded Escrow deposit. Send a Proposal first so the buyer can fund Escrow.';
+      ? (isCustomOrderWorkstream ? 'A Custom Order Invoice is already awaiting buyer payment.' : 'An invoice is already awaiting buyer payment.')
+      : (isCustomOrderWorkstream ? 'Invoices require an active funded Custom Order. Send a Custom Order Proposal first so the buyer can fund Escrow.' : 'Invoices require an active funded Escrow deposit. Send a Proposal first so the buyer can fund Escrow.');
 
   // Refresh parent order state when an offer or review or escrow action occurs in the stream
   const lastMessage = messages.length ? messages[messages.length - 1] : undefined;
@@ -406,7 +417,23 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
       return (
         <span className="px-3 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
           <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-          <span>Invoice Paid • WorkStream Open</span>
+          <span>{isCustomOrderWorkstream ? 'Custom Order Completed' : 'Invoice Paid • WorkStream Open'}</span>
+        </span>
+      );
+    }
+    if (order.status === 'cancelled' || (order.status as string) === 'refunded') {
+      return (
+        <span className="px-3 py-1 bg-rose-50 text-rose-800 border border-rose-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
+          <AlertCircle className="w-3.5 h-3.5 text-rose-600" />
+          <span>{isCustomOrderWorkstream ? 'Custom Order Cancelled • WorkStream Open' : 'Order Cancelled • WorkStream Open'}</span>
+        </span>
+      );
+    }
+    if (isInquiryOrder) {
+      return (
+        <span className="px-3 py-1 bg-indigo-50 text-indigo-800 border border-indigo-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
+          <MessageSquare className="w-3.5 h-3.5 text-indigo-600" />
+          <span>{isCustomOrderWorkstream ? 'Custom Order Proposal • Pre-Purchase' : 'Inquiry • Pre-Purchase'}</span>
         </span>
       );
     }
@@ -414,7 +441,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
       return (
         <span className="px-3 py-1 bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
           <Clock className="w-3.5 h-3.5 text-amber-600" />
-          <span>Invoice Raised • Awaiting Buyer Payment</span>
+          <span>{isCustomOrderWorkstream ? 'Custom Order Invoice Raised • Awaiting Buyer Payment' : 'Invoice Raised • Awaiting Buyer Payment'}</span>
         </span>
       );
     }
@@ -429,7 +456,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
     return (
       <span className="px-3 py-1 bg-blue-50 text-blue-800 border border-blue-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5">
         <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-        <span>In Escrow ({currencySymbol}{Number(activeEscrow || order.amount || 0).toLocaleString()})</span>
+        <span>{isCustomOrderWorkstream ? 'Custom Order • In Escrow' : 'In Escrow'} ({currencySymbol}{Number(activeEscrow || order.amount || 0).toLocaleString()})</span>
       </span>
     );
   };
@@ -496,7 +523,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
             </button>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-lg sm:text-xl font-bold text-fiverr-dark tracking-tight">
+                <h1 className="text-xl sm:text-2xl font-extrabold text-fiverr-dark tracking-tight">
                   {order.title}
                 </h1>
                 {getStatusBadge()}
@@ -504,7 +531,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                   const remaining = getReviewCountdown();
                   if (!remaining) return null;
                   return (
-                    <span suppressHydrationWarning className="px-3 py-1 bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-bold uppercase rounded-full flex items-center gap-1.5 shadow-2xs">
+                    <span suppressHydrationWarning className="px-3 py-1 bg-amber-50 text-amber-800 border border-amber-200 text-xs font-bold uppercase rounded-full flex items-center gap-1.5 shadow-2xs">
                       <Clock className="w-3.5 h-3.5 text-amber-600" />
                       <span>{isBuyer ? 'Buyer Review: ' : 'Review Window: '}</span>
                       <strong className="font-mono text-amber-900">{remaining}</strong>
@@ -512,7 +539,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                   );
                 })()}
               </div>
-              <p className="text-xs text-slate-400 mt-0.5">
+              <p className="text-sm text-slate-500 mt-1">
                 WorkStream #{order.id} • Partner: <strong className="text-fiverr-dark font-medium">{partner?.name || 'Collaborator'}</strong>
                 {totalReleased > 0 && (
                   <span className="ml-2 text-emerald-600 font-semibold">
@@ -527,17 +554,17 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
             {isBuyer && activeEscrow > 0 && (order.status === 'delivered' || !!pendingInvoice) && (
               <button
                 onClick={() => setIsReleaseModalOpen(true)}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-xs transition cursor-pointer"
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-sm flex items-center gap-1.5 shadow-xs transition cursor-pointer"
               >
                 <ShieldCheck className="w-4 h-4" />
-                <span>{pendingInvoice ? `Pay Invoice (${pendingInvoice.number})` : 'Release Escrow'}</span>
+                <span>{isCustomOrderWorkstream ? (pendingInvoice ? `Pay Custom Order Invoice (${pendingInvoice.number})` : 'Release Custom Order Escrow') : (pendingInvoice ? `Pay Invoice (${pendingInvoice.number})` : 'Release Escrow')}</span>
               </button>
             )}
 
             {isBuyer && (invoiceAlreadyPaid || order.status === 'cancelled') && !order.review && (
               <button
                 onClick={() => setIsReviewModalOpen(true)}
-                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-xs transition cursor-pointer"
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-white font-bold rounded-xl text-sm flex items-center gap-1.5 shadow-xs transition cursor-pointer"
               >
                 <Star className="w-4 h-4 fill-white" />
                 <span>Review Seller</span>
@@ -547,7 +574,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
             {isSeller && (invoiceAlreadyPaid || order.status === 'cancelled') && !sellerReview && (
               <button
                 onClick={() => setIsReviewModalOpen(true)}
-                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-xs transition cursor-pointer"
+                className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-white font-bold rounded-xl text-sm flex items-center gap-1.5 shadow-xs transition cursor-pointer"
               >
                 <Star className="w-4 h-4 fill-white" />
                 <span>Review Buyer</span>
@@ -557,7 +584,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
             {isSeller && activeEscrow > 0 && order.status !== 'cancelled' && (
               <button
                 onClick={() => setIsDeliverModalOpen(true)}
-                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-xs transition cursor-pointer"
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl text-sm flex items-center gap-1.5 shadow-xs transition cursor-pointer"
               >
                 <Receipt className="w-3.5 h-3.5 text-emerald-400" />
                 <span>Raise Invoice & Deliver</span>
@@ -566,7 +593,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
             {isSeller && order.status !== 'cancelled' && order.status !== 'completed' && !order.freeExtensionUsed && !order.extensionRequests?.some(r => r.status === 'pending') && (
               <button
                 onClick={() => setIsExtensionModalOpen(true)}
-                className="px-4 py-2 bg-white hover:bg-slate-50 text-slate-900 border border-slate-200 font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-xs transition cursor-pointer"
+                className="px-4 py-2 bg-white hover:bg-slate-50 text-slate-900 border border-slate-200 font-bold rounded-xl text-sm flex items-center gap-1.5 shadow-xs transition cursor-pointer"
               >
                 <Clock className="w-3.5 h-3.5 text-slate-400" />
                 <span>Request more time</span>
@@ -574,6 +601,34 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
             )}
           </div>
         </div>
+
+        {/* MULTI-ORDER WORKSPACE CONTEXT SWITCHER */}
+        {workspaceOrders.length > 1 && (
+          <div className="pt-3 border-t border-slate-100 flex items-center gap-2 overflow-x-auto" style={{ width: '100%', height: '43px' }}>
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 shrink-0">
+              Workspace Orders ({workspaceOrders.length}):
+            </span>
+            {workspaceOrders.map((wo, idx) => {
+              const isSelected = wo.id === order.id;
+              return (
+                <button
+                  key={wo.id}
+                  type="button"
+                  onClick={() => onSelectOrder?.(wo.id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-medium border flex items-center gap-1.5 shrink-0 transition cursor-pointer ${
+                    isSelected
+                      ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-bold shadow-2xs'
+                      : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  <span className="font-mono text-xs text-slate-500">#{idx + 1}</span>
+                  <span className="truncate max-w-[160px] text-xs font-semibold">{wo.title}</span>
+                  <span className="font-mono text-xs opacity-75">({wo.status.replace(/_/g, ' ')})</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* 2-COLUMN LAYOUT: MAIN WORKSTREAM + SUMMARY SIDEBAR */}
@@ -586,7 +641,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
               <div className="flex gap-4">
                 <button
                   onClick={() => setActiveSubTab('activity')}
-                  className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
+                  className={`px-4 py-2.5 text-xs sm:text-sm font-bold uppercase tracking-wider transition-all border-b-2 cursor-pointer ${
                     activeSubTab === 'activity'
                       ? 'border-emerald-600 text-emerald-700'
                       : 'border-transparent text-slate-400 hover:text-slate-600'
@@ -594,7 +649,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                 >
                   <div className="flex items-center gap-1.5">
                     <Activity className="w-3.5 h-3.5" />
-                    <span>Activity Stream</span>
+                    <span className="!text-[11px] !leading-[15px]">Activity Stream</span>
                   </div>
                 </button>
 
@@ -608,7 +663,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                 >
                   <div className="flex items-center gap-1.5">
                     <FolderOpen className="w-3.5 h-3.5" />
-                    <span>Shared Files ({files.length})</span>
+                    <span className="!text-[11px] !leading-[15px]">Shared Files ({files.length})</span>
                   </div>
                 </button>
 
@@ -622,7 +677,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                 >
                   <div className="flex items-center gap-1.5">
                     <Receipt className="w-3.5 h-3.5" />
-                    <span>Receipt & Invoice</span>
+                    <span className="!text-[11px] !leading-[15px]">Receipt & Invoice</span>
                   </div>
                 </button>
               </div>
@@ -634,6 +689,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                 <>
                   <WorkstreamActivityStream
                     order={order}
+                    workspaceOrders={workspaceOrders}
                     messages={messages}
                     currentUserId={currentUser?.id}
                     usersList={usersList}
@@ -657,6 +713,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                     onOpenDisputeModal={() => setIsDisputeModalOpen(true)}
                     onStartVideoCall={() => setIsVideoCallModalOpen(true)}
                     onRespondToExtension={handleRespondExtension}
+                    isCustomOrderStream={isCustomOrderWorkstream}
                   />
                   <WorkstreamMessageInput
                     key={order.id}
@@ -679,6 +736,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
                     proposalHint={proposalHint}
                     invoiceHint={invoiceHint}
                     currencySymbol={currencySymbol}
+                    isCustomOrderStream={isCustomOrderWorkstream}
                   />
                 </>
               ) : activeSubTab === 'files' ? (
@@ -701,7 +759,7 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
         </div>
 
         {/* RIGHT COLUMN: SUMMARY CARD & ACTIONS PANEL (1 COL) */}
-        <div className="space-y-6">
+        <div className="space-y-6 forced-13-17">
           <WorkstreamSummaryCard
             order={order}
             partner={partner}

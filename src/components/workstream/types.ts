@@ -60,6 +60,9 @@ export interface WorkstreamOffer {
   id: string;
   number: string;
   orderId: string;
+  originOrderId?: string;
+  resultingOrderId?: string;
+  workspaceId?: string;
   kind: WorkstreamOfferKind;
   title: string;
   amount: number;
@@ -79,6 +82,7 @@ export interface WorkstreamOffer {
   files?: Array<{ id?: string; name: string; size: string; url: string; uploadedAt?: string }>;
   reference?: string;
   rejectionReason?: string;
+  metadata?: Record<string, any>;
 }
 
 export interface WorkstreamItem extends Order {
@@ -97,8 +101,13 @@ export interface SharedFileItem {
   url: string;
   uploadedAt: string;
   uploadedBy: string;
+  uploaderId?: string;
   uploaderAvatar?: string;
   type?: string;
+  orderId?: string;
+  orderTitle?: string;
+  workspaceId?: string;
+  source?: 'deliverable' | 'delivery_history' | 'message' | 'offer';
 }
 
 export const WORKSTREAM_TAB_STATUSES = {
@@ -108,3 +117,32 @@ export const WORKSTREAM_TAB_STATUSES = {
   completed: ['completed'],
   archived: ['cancelled', 'disputed']
 } as const;
+
+export function isInquiryWorkstream(order?: any, workspace?: any): boolean {
+  if (!order && !workspace) return false;
+
+  // 1. Authoritative Inquiry or Custom Order flags on the order
+  if (order?.isInquiry === true || order?.isCustomOrder === true || order?.customOrderFromInquiry === true) {
+    return true;
+  }
+  if (
+    order?.metadata?.isInquiry === true ||
+    order?.metadata?.isCustomOrder === true ||
+    order?.metadata?.customOrderFromInquiry === true
+  ) {
+    return true;
+  }
+  if (Boolean(order?.inquiryWorkspaceId) || Boolean(order?.metadata?.inquiryWorkspaceId)) {
+    return true;
+  }
+
+  // 2. Authoritative Inquiry or Custom Order flags on the workspace
+  const targetWs = workspace || order?.workspace;
+  if (targetWs) {
+    if (targetWs?.isInquiry === true || targetWs?.isCustomOrder === true) return true;
+    if (targetWs?.metadata?.isInquiry === true || targetWs?.metadata?.isCustomOrder === true) return true;
+  }
+
+  return false;
+}
+

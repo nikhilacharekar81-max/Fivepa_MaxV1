@@ -70,8 +70,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
 
   // Availability states
   const [availableStatus, setAvailableStatus] = useState(currentUser?.isAvailableNow ? 'Active' : 'Inactive');
-  const [weeklyCapacityHours, setWeeklyCapacityHours] = useState<number>(35);
-  const [weeklyHours, setWeeklyHours] = useState('35 hrs/week');
+
   const [isVacationMode, setIsVacationMode] = useState<boolean>(false);
 
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -684,40 +683,6 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     }`}
                   />
                 </button>
-              </div>
-
-              {/* Row 2: Weekly Capacity Range Slider */}
-              <div className="space-y-4 pb-6 border-b border-slate-100">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-sm font-bold text-slate-800 block">Weekly Work Capacity Slider</span>
-                    <p className="text-xs text-slate-500">Set the maximum hours per week you are open to take on new projects.</p>
-                  </div>
-                  <span className="text-base font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-xl font-mono">
-                    {weeklyCapacityHours} hrs / week
-                  </span>
-                </div>
-
-                <div className="space-y-2 pt-2">
-                  <input 
-                    type="range" 
-                    min={5} 
-                    max={60} 
-                    step={5} 
-                    value={weeklyCapacityHours} 
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setWeeklyCapacityHours(val);
-                      setWeeklyHours(`${val} hrs/week`);
-                    }}
-                    className="w-full h-2.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
-                  />
-                  <div className="flex justify-between text-[11px] font-semibold text-slate-400 font-mono">
-                    <span>5 hrs/wk (Part-time)</span>
-                    <span>30 hrs/wk</span>
-                    <span>60 hrs/wk (Full Capacity)</span>
-                  </div>
-                </div>
               </div>
 
               {/* Row 3: Vacation Mode Slider Toggle */}

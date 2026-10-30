@@ -92,6 +92,9 @@ export interface StoreInterface {
   // Orders
   mapOrderRow?(r: any): Order;
   getOrder(id: string, client?: any): Promise<Order | undefined>;
+  getOrderById(id: string, client?: any): Promise<Order | undefined>;
+  listOrdersByWorkspaceId(workspaceId: string, client?: any): Promise<Order[]>;
+  resolveWorkspaceActiveOrder(workspaceId: string, client?: any): Promise<Order | undefined>;
   saveOrder(order: Order, client?: any): Promise<void>;
   listOrders(): Promise<Order[]>;
   listOrdersForUser(userId: string): Promise<Order[]>;
@@ -134,6 +137,7 @@ export interface StoreInterface {
   // Offers
   getOfferById(id: string, client?: any): Promise<WorkstreamOffer | undefined>;
   listOffersForOrder(orderId: string, client?: any): Promise<WorkstreamOffer[]>;
+  listOffersForWorkspace(workspaceId: string, fallbackOrderId?: string, client?: any): Promise<WorkstreamOffer[]>;
   saveOffer(offer: WorkstreamOffer, client?: any): Promise<void>;
 
   // Custom Invoices
@@ -187,6 +191,7 @@ export interface StoreInterface {
 
   // Messages, Reviews, Uploads
   listMessages(orderId: string, client?: any): Promise<Message[]>;
+  listMessagesForWorkspace(workspaceId: string, client?: any): Promise<Message[]>;
   getMessageByClientMsgId(orderId: string, senderId: string, clientMsgId: string): Promise<Message | undefined>;
   addMessage(message: Message, client?: any): Promise<void>;
   addReview(review: Review): Promise<void>;
@@ -411,11 +416,15 @@ export function mapProposalRow(r: any): Proposal {
 export function mapOfferRow(r: any): WorkstreamOffer {
   if (!r) return undefined as any;
   const meta = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
+  const originOrderId = meta.originOrderId || r.order_id;
+  const resultingOrderId = meta.resultingOrderId || undefined;
   return {
     id: r.id,
     number: r.number || '',
     orderId: r.order_id,
-    workspaceId: r.workspace_id || undefined,
+    originOrderId,
+    resultingOrderId,
+    workspaceId: r.workspace_id || meta.workspaceId || undefined,
     kind: r.kind,
     title: r.title,
     amount: Number(r.amount),
@@ -570,34 +579,33 @@ export class PostgresAsyncStore implements StoreInterface {
     return mapOrderRow(r);
   }
 
+  async getOrderById(id: string, client?: any): Promise<Order | undefined> {
+    return postgresStore.getOrderById(id, client);
+  }
+
+  async listOrdersByWorkspaceId(workspaceId: string, client?: any): Promise<Order[]> {
+    return postgresStore.listOrdersByWorkspaceId(workspaceId, client);
+  }
+
+  async resolveWorkspaceActiveOrder(workspaceId: string, client?: any): Promise<Order | undefined> {
+    return postgresStore.resolveWorkspaceActiveOrder(workspaceId, client);
+  }
+
   async getOrder(id: string, client?: any): Promise<Order | undefined> {
     if (!id) return undefined;
-    const dbRunner = client || postgresStore.getPool();
-    const res = await dbRunner.query(
-      `SELECT * FROM orders
-       WHERE id = $1 OR gig_order_id = $1 OR project_order_id = $1 OR workspace_id = $1
-       ORDER BY
-         CASE
-           WHEN id = $1 THEN 0
-           WHEN gig_order_id = $1 OR project_order_id = $1 THEN 1
-           ELSE 2
-         END ASC,
-         created_at DESC
-       LIMIT 1`,
-      [id]
-    );
-    if (res.rows.length > 0) return mapOrderRow(res.rows[0]);
-    return undefined;
+    const direct = await this.getOrderById(id, client);
+    if (direct) return direct;
+    return this.resolveWorkspaceActiveOrder(id, client);
   }
 
   async listOrders(): Promise<Order[]> {
-    const res = await postgresStore.getPool().query('SELECT * FROM orders ORDER BY created_at DESC');
+    const res = await postgresStore.getPool().query('SELECT * FROM orders ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC');
     return res.rows.map(mapOrderRow);
   }
 
   async listOrdersForUser(userId: string): Promise<Order[]> {
     const res = await postgresStore.getPool().query(
-      'SELECT * FROM orders WHERE buyer_id = $1 OR seller_id = $1 ORDER BY created_at DESC',
+      'SELECT * FROM orders WHERE buyer_id = $1 OR seller_id = $1 ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC',
       [userId]
     );
     return res.rows.map(mapOrderRow);
@@ -1209,7 +1217,7 @@ export class PostgresAsyncStore implements StoreInterface {
   async listMessages(orderId: string, client?: any): Promise<Message[]> {
     const dbRunner = client || postgresStore.getPool();
     const res = await dbRunner.query(
-      'SELECT * FROM messages WHERE order_id = $1 ORDER BY timestamp ASC',
+      'SELECT * FROM messages WHERE order_id = $1 ORDER BY timestamp ASC, id ASC',
       [orderId]
     );
     return res.rows.map((r: any) => ({
@@ -1225,18 +1233,25 @@ export class PostgresAsyncStore implements StoreInterface {
     }));
   }
 
-  async getMessageByClientMsgId(orderId: string, senderId: string, clientMsgId: string): Promise<Message | undefined> {
+  async listMessagesForWorkspace(workspaceId: string, client?: any): Promise<Message[]> {
+    return postgresStore.listMessagesForWorkspace(workspaceId, client);
+  }
+
+  async getMessageByClientMsgId(orderIdOrWorkspaceId: string, senderId: string, clientMsgId: string): Promise<Message | undefined> {
     const res = await postgresStore.getPool().query(
       `SELECT * FROM messages 
-       WHERE order_id = $1 AND sender_id = $2 AND metadata->>'clientMessageId' = $3 
+       WHERE (order_id = $1 OR workspace_id = $1 OR metadata->>'workspaceId' = $1)
+         AND sender_id = $2 
+         AND metadata->>'clientMessageId' = $3 
        LIMIT 1`,
-      [orderId, senderId, clientMsgId]
+      [orderIdOrWorkspaceId, senderId, clientMsgId]
     );
     if (res.rows.length > 0) {
       const r = res.rows[0];
       return {
         id: r.id,
-        orderId: r.order_id,
+        orderId: r.order_id || undefined,
+        workspaceId: r.workspace_id || r.metadata?.workspaceId || undefined,
         senderId: r.sender_id,
         senderName: r.sender_name,
         text: r.text,
@@ -1259,9 +1274,10 @@ export class PostgresAsyncStore implements StoreInterface {
         [message.timestamp || new Date().toISOString()]
       );
     }
+    const wsId = (message as any).workspaceId || message.metadata?.workspaceId || null;
     await dbRunner.query(
-      `INSERT INTO messages (id, order_id, sender_id, sender_name, text, timestamp, type, file_info, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO messages (id, order_id, sender_id, sender_name, text, timestamp, type, file_info, metadata, workspace_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        ON CONFLICT (id) DO UPDATE SET
          order_id = EXCLUDED.order_id,
          sender_id = EXCLUDED.sender_id,
@@ -1270,10 +1286,12 @@ export class PostgresAsyncStore implements StoreInterface {
          timestamp = EXCLUDED.timestamp,
          type = EXCLUDED.type,
          file_info = EXCLUDED.file_info,
-         metadata = EXCLUDED.metadata`,
+         metadata = EXCLUDED.metadata,
+         workspace_id = COALESCE(EXCLUDED.workspace_id, messages.workspace_id)`,
       [
-        message.id, message.orderId, message.senderId, message.senderName, message.text, message.timestamp,
-        message.type || 'message', JSON.stringify(message.fileInfo || null), JSON.stringify(message.metadata || null)
+        message.id, message.orderId || null, message.senderId, message.senderName, message.text, message.timestamp,
+        message.type || 'message', JSON.stringify(message.fileInfo || null), JSON.stringify(message.metadata || null),
+        wsId
       ]
     );
   }
@@ -1411,6 +1429,10 @@ export class PostgresAsyncStore implements StoreInterface {
 
   async listOffersForOrder(orderId: string, client?: any): Promise<WorkstreamOffer[]> {
     return await postgresStore.listOffersForOrder(orderId, client);
+  }
+
+  async listOffersForWorkspace(workspaceId: string, fallbackOrderId?: string, client?: any): Promise<WorkstreamOffer[]> {
+    return await postgresStore.listOffersForWorkspace(workspaceId, fallbackOrderId, client);
   }
 
   async saveOffer(offer: WorkstreamOffer, client?: any): Promise<void> {
@@ -1653,7 +1675,7 @@ export async function hydrateStoreFromPostgres() {
           rating: 4.9,
           reviewsCount: 124,
           hourlyRate: 95,
-          earned: 42500,
+          earned: 0,
           completedJobs: 48,
           bio: '10+ years building distributed systems, high-scale Node.js backends, React SPAs, and PostgreSQL architectures.',
           skills: ['React', 'Node.js', 'TypeScript', 'PostgreSQL', 'Cloud Architecture'],
@@ -1705,7 +1727,7 @@ export async function hydrateStoreFromPostgres() {
           rating: 5.0,
           reviewsCount: 89,
           hourlyRate: 120,
-          earned: 68400,
+          earned: 0,
           completedJobs: 62,
           bio: 'Specializing in production AI agents, RAG pipelines, and high-converting SaaS interfaces.',
           skills: ['AI Agents', 'Python', 'TypeScript', 'UI/UX Design', 'Next.js'],
@@ -1745,6 +1767,32 @@ export async function hydrateStoreFromPostgres() {
           sessionVersion: 1,
           knownDevices: ['dev_default_session'],
           isAvailableNow: true
+        },
+        {
+          id: 'u_rishi',
+          name: 'Rishi Arora',
+          username: 'rishiarora1204',
+          email: 'rishiarora1204@example.com',
+          role: 'freelancer',
+          avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+          title: 'SEO Specialist & High DA Link Building Expert',
+          rating: 5.0,
+          reviewsCount: 312,
+          hourlyRate: 50,
+          earned: 0,
+          completedJobs: 310,
+          bio: 'Top Rated SEO Specialist with 8+ years experience in White Hat link building, high DA backlinks, and technical SEO.',
+          skills: ['SEO', 'Backlinks', 'Link Building', 'Keyword Research', 'Google Ranking'],
+          status: 'active',
+          verified: true,
+          emailVerified: true,
+          mobileVerified: true,
+          walletBalance: 2150,
+          createdAt: nowIso,
+          password: defaultPass,
+          sessionVersion: 1,
+          knownDevices: ['dev_default_session'],
+          isAvailableNow: true
         }
       ];
 
@@ -1760,6 +1808,29 @@ export async function hydrateStoreFromPostgres() {
       }
 
       const seedGigs = [
+        {
+          id: 'g_seo_1',
+          freelancerId: 'u_rishi',
+          freelancerName: 'Rishi Arora',
+          freelancerUsername: 'rishiarora1204',
+          freelancerAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+          freelancerLevel: 'Top Rated ★★★',
+          title: 'I will build SEO backlinks on high domain authority website',
+          slug: 'build-seo-backlinks-on-high-domain-authority-website',
+          category: 'Digital Marketing',
+          subcategory: 'Search Engine Optimization (SEO)',
+          description: 'I will build high quality White Hat SEO backlinks on high domain authority (DA 80+) websites to boost your Google search ranking and organic traffic. Guaranteed high DA/DR contextually relevant dofollow links.',
+          price: 25,
+          deliveryDays: 3,
+          rating: 5.0,
+          reviewsCount: 312,
+          tags: ['SEO', 'Backlinks', 'Link Building', 'Digital Marketing', 'Domain Authority'],
+          image: 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=800&auto=format&fit=crop&q=80',
+          coverImage: 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=800&auto=format&fit=crop&q=80',
+          status: 'active',
+          featured: true,
+          createdAt: nowIso
+        },
         {
           id: 'g1',
           freelancerId: 'u1',
@@ -1802,6 +1873,53 @@ export async function hydrateStoreFromPostgres() {
           image: 'https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80',
           coverImage: 'https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80',
           status: 'active',
+          featured: true,
+          createdAt: nowIso
+        },
+        {
+          id: 'g3',
+          freelancerId: 'u1',
+          freelancerName: 'Sarah Jenkins',
+          freelancerUsername: 'sarah_j',
+          freelancerAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80',
+          freelancerLevel: 'Top Rated ★★★',
+          title: 'I will design modern SaaS brand identity, product UI UX design, and Figma design system',
+          slug: 'design-modern-saas-brand-identity-product-ui-ux-design-figma-system',
+          category: 'Design & Creative',
+          subcategory: 'UI/UX Design',
+          description: 'Complete brand identity system, responsive SaaS web app mockups, mobile UI design, design tokens, and developer handoff in Figma.',
+          price: 350,
+          deliveryDays: 4,
+          rating: 4.95,
+          reviewsCount: 67,
+          tags: ['UI/UX Design', 'Figma', 'SaaS', 'Brand Identity'],
+          image: 'https://images.unsplash.com/photo-1561070791-2526d30994b5?w=800&auto=format&fit=crop&q=80',
+          coverImage: 'https://images.unsplash.com/photo-1561070791-2526d30994b5?w=800&auto=format&fit=crop&q=80',
+          status: 'active',
+          featured: true,
+          createdAt: nowIso
+        },
+        {
+          id: 'g4',
+          freelancerId: 'u3',
+          freelancerName: 'Elena Rostova',
+          freelancerUsername: 'elena_r',
+          freelancerAvatar: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&auto=format&fit=crop&q=80',
+          freelancerLevel: 'Top Rated ★★★',
+          title: 'I will build high performance iOS and Android mobile app with React Native and Expo',
+          slug: 'build-high-performance-ios-android-mobile-app-react-native-expo',
+          category: 'Mobile Apps',
+          subcategory: 'Cross-Platform Development',
+          description: 'Full-stack cross-platform mobile application development for iOS & Android with Expo, Tailwind CSS, offline sync, and push notifications.',
+          price: 500,
+          deliveryDays: 6,
+          rating: 4.98,
+          reviewsCount: 42,
+          tags: ['Mobile Apps', 'React Native', 'Expo', 'iOS & Android'],
+          image: 'https://images.unsplash.com/photo-1512941937669-90a1b58e7e9c?w=800&auto=format&fit=crop&q=80',
+          coverImage: 'https://images.unsplash.com/photo-1512941937669-90a1b58e7e9c?w=800&auto=format&fit=crop&q=80',
+          status: 'active',
+          featured: false,
           createdAt: nowIso
         }
       ];
@@ -1811,13 +1929,13 @@ export async function hydrateStoreFromPostgres() {
           `INSERT INTO gigs (
             id, freelancer_id, freelancer_name, freelancer_username, freelancer_avatar, freelancer_level,
             title, slug, category, subcategory, description, price, delivery_days, rating, reviews_count,
-            tags, image, cover_image, gallery, status, created_at, extras
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+            tags, image, cover_image, gallery, status, featured, created_at, extras
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
           ON CONFLICT (id) DO NOTHING`,
           [
             g.id, g.freelancerId, g.freelancerName, g.freelancerUsername, g.freelancerAvatar, g.freelancerLevel,
             g.title, g.slug, g.category, g.subcategory, g.description, g.price, g.deliveryDays, g.rating, g.reviewsCount,
-            g.tags, g.image, g.coverImage, [], g.status, g.createdAt, JSON.stringify([])
+            g.tags, g.image, g.coverImage, [], g.status, Boolean(g.featured), g.createdAt, JSON.stringify([])
           ]
         );
       }
@@ -1838,6 +1956,182 @@ export async function hydrateStoreFromPostgres() {
       );
 
       await postgresStore.markInitialized();
+    }
+
+    if (!skipDemoSeeding) {
+      const existingRishi = await store.getUser('u_rishi');
+      if (!existingRishi) {
+        const defaultPass = await bcrypt.hash('Password123!', 10);
+        const rishiUser: User = {
+          id: 'u_rishi',
+          name: 'Rishi Arora',
+          username: 'rishiarora1204',
+          email: 'rishiarora1204@example.com',
+          role: 'freelancer',
+          avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+          title: 'SEO Specialist & High DA Link Building Expert',
+          rating: 5.0,
+          reviewsCount: 312,
+          hourlyRate: 50,
+          earned: 0,
+          completedJobs: 310,
+          bio: 'Top Rated SEO Specialist with 8+ years experience in White Hat link building, high DA backlinks, and technical SEO.',
+          skills: ['SEO', 'Backlinks', 'Link Building', 'Keyword Research', 'Google Ranking'],
+          status: 'active',
+          verified: true,
+          emailVerified: true,
+          mobileVerified: true,
+          walletBalance: 2150,
+          createdAt: new Date().toISOString(),
+          password: defaultPass,
+          sessionVersion: 1,
+          knownDevices: ['dev_default_session'],
+          isAvailableNow: true
+        };
+        await store.saveUser(rishiUser);
+        await financialTransactionService.ensureWallet({
+          userId: rishiUser.id,
+          name: rishiUser.name,
+          email: rishiUser.email,
+          role: rishiUser.role,
+          initialBalance: rishiUser.walletBalance
+        });
+      }
+    }
+
+    // Ensure standard seed gigs (g_seo_1, g1, g2, g3, g4) exist in database
+    const seedGigsCheck = [
+      {
+        id: 'g_seo_1',
+        freelancerId: 'u_rishi',
+        freelancerName: 'Rishi Arora',
+        freelancerUsername: 'rishiarora1204',
+        freelancerAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+        freelancerLevel: 'Top Rated ★★★',
+        title: 'I will build SEO backlinks on high domain authority website',
+        slug: 'build-seo-backlinks-on-high-domain-authority-website',
+        category: 'Digital Marketing',
+        subcategory: 'Search Engine Optimization (SEO)',
+        description: 'I will build high quality White Hat SEO backlinks on high domain authority (DA 80+) websites to boost your Google search ranking and organic traffic. Guaranteed high DA/DR contextually relevant dofollow links.',
+        price: 25,
+        deliveryDays: 3,
+        rating: 5.0,
+        reviewsCount: 312,
+        tags: ['SEO', 'Backlinks', 'Link Building', 'Digital Marketing', 'Domain Authority'],
+        image: 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=800&auto=format&fit=crop&q=80',
+        coverImage: 'https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=800&auto=format&fit=crop&q=80',
+        status: 'active',
+        featured: true,
+        createdAt: new Date().toISOString()
+      },
+      {
+        id: 'g1',
+        freelancerId: 'u1',
+        freelancerName: 'Sarah Jenkins',
+        freelancerUsername: 'sarah_j',
+        freelancerAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80',
+        freelancerLevel: 'Top Rated ★★★',
+        title: 'I will architect and build a production full-stack React, Node.js and PostgreSQL web application',
+        slug: 'architect-build-production-full-stack-react-nodejs-postgresql-web-app',
+        category: 'Technology & Programming',
+        subcategory: 'Web Development',
+        description: 'Complete end-to-end full-stack engineering with TypeScript, React, Express, and transactional PostgreSQL persistence.',
+        price: 450,
+        deliveryDays: 7,
+        rating: 4.9,
+        reviewsCount: 124,
+        tags: ['React', 'PostgreSQL', 'Node.js', 'TypeScript'],
+        image: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&auto=format&fit=crop&q=80',
+        coverImage: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&auto=format&fit=crop&q=80',
+        status: 'active',
+        featured: false,
+        createdAt: new Date().toISOString()
+      },
+      {
+        id: 'g2',
+        freelancerId: 'u3',
+        freelancerName: 'Elena Rostova',
+        freelancerUsername: 'elena_r',
+        freelancerAvatar: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&auto=format&fit=crop&q=80',
+        freelancerLevel: 'Top Rated ★★★',
+        title: 'I will build custom AI agents, RAG pipelines, and enterprise LLM integrations',
+        slug: 'build-custom-ai-agents-rag-pipelines-enterprise-llm-integrations',
+        category: 'AI Services',
+        subcategory: 'AI Agents',
+        description: 'Production-grade AI workflows, vector search, function calling, and automated reasoning pipelines.',
+        price: 650,
+        deliveryDays: 5,
+        rating: 5.0,
+        reviewsCount: 89,
+        tags: ['AI Agents', 'LLM', 'TypeScript', 'Python'],
+        image: 'https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80',
+        coverImage: 'https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80',
+        status: 'active',
+        featured: true,
+        createdAt: new Date().toISOString()
+      },
+      {
+        id: 'g3',
+        freelancerId: 'u1',
+        freelancerName: 'Sarah Jenkins',
+        freelancerUsername: 'sarah_j',
+        freelancerAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80',
+        freelancerLevel: 'Top Rated ★★★',
+        title: 'I will design modern SaaS brand identity, product UI UX design, and Figma design system',
+        slug: 'design-modern-saas-brand-identity-product-ui-ux-design-figma-system',
+        category: 'Design & Creative',
+        subcategory: 'UI/UX Design',
+        description: 'Complete brand identity system, responsive SaaS web app mockups, mobile UI design, design tokens, and developer handoff in Figma.',
+        price: 350,
+        deliveryDays: 4,
+        rating: 4.95,
+        reviewsCount: 67,
+        tags: ['UI/UX Design', 'Figma', 'SaaS', 'Brand Identity'],
+        image: 'https://images.unsplash.com/photo-1561070791-2526d30994b5?w=800&auto=format&fit=crop&q=80',
+        coverImage: 'https://images.unsplash.com/photo-1561070791-2526d30994b5?w=800&auto=format&fit=crop&q=80',
+        status: 'active',
+        featured: true,
+        createdAt: new Date().toISOString()
+      },
+      {
+        id: 'g4',
+        freelancerId: 'u3',
+        freelancerName: 'Elena Rostova',
+        freelancerUsername: 'elena_r',
+        freelancerAvatar: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&auto=format&fit=crop&q=80',
+        freelancerLevel: 'Top Rated ★★★',
+        title: 'I will build high performance iOS and Android mobile app with React Native and Expo',
+        slug: 'build-high-performance-ios-android-mobile-app-react-native-expo',
+        category: 'Mobile Apps',
+        subcategory: 'Cross-Platform Development',
+        description: 'Full-stack cross-platform mobile application development for iOS & Android with Expo, Tailwind CSS, offline sync, and push notifications.',
+        price: 500,
+        deliveryDays: 6,
+        rating: 4.98,
+        reviewsCount: 42,
+        tags: ['Mobile Apps', 'React Native', 'Expo', 'iOS & Android'],
+        image: 'https://images.unsplash.com/photo-1512941937669-90a1b58e7e9c?w=800&auto=format&fit=crop&q=80',
+        coverImage: 'https://images.unsplash.com/photo-1512941937669-90a1b58e7e9c?w=800&auto=format&fit=crop&q=80',
+        status: 'active',
+        featured: false,
+        createdAt: new Date().toISOString()
+      }
+    ];
+
+    for (const g of seedGigsCheck) {
+      await pool.query(
+        `INSERT INTO gigs (
+          id, freelancer_id, freelancer_name, freelancer_username, freelancer_avatar, freelancer_level,
+          title, slug, category, subcategory, description, price, delivery_days, rating, reviews_count,
+          tags, image, cover_image, gallery, status, featured, created_at, extras
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+        ON CONFLICT (id) DO NOTHING`,
+        [
+          g.id, g.freelancerId, g.freelancerName, g.freelancerUsername, g.freelancerAvatar, g.freelancerLevel,
+          g.title, g.slug, g.category, g.subcategory, g.description, g.price, g.deliveryDays, g.rating, g.reviewsCount,
+          g.tags, g.image, g.coverImage, [], g.status, Boolean(g.featured), g.createdAt, JSON.stringify([])
+        ]
+      );
     }
 
     await workspaceService.hydrateFromPostgres();
@@ -1944,6 +2238,19 @@ export async function hydrateStoreFromPostgres() {
         }
       }
     }
+
+    await pool.query(`
+      UPDATE users u
+      SET earned = COALESCE(ec.total_earned, 0)
+      FROM (
+        SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
+        FROM users u2
+        LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
+        GROUP BY u2.id
+      ) ec
+      WHERE u.id = ec.user_id
+        AND u.earned IS DISTINCT FROM ec.total_earned
+    `);
 
     console.log('[PostgresStore] Zero split-brain Cloud Run architecture initialized. PostgreSQL is the 100% source of truth.');
   } catch (err: any) {

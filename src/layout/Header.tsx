@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Bell, Briefcase, ChevronDown, FileText, Heart, HelpCircle, LayoutDashboard,
-  LogOut, Mail, Pencil, PlusCircle, Search, Settings, Sparkles, User, Users, Wallet,
-  Volume2, VolumeX
+  LogOut, Mail, Menu, Pencil, PlusCircle, Search, Settings, Sparkles, User, Users, Wallet,
+  Volume2, VolumeX, X
 } from 'lucide-react';
 import { PPH_CATEGORIES } from '../components/HeaderCategoriesNav';
 import { slugify } from '../utils/slugify';
@@ -44,6 +44,7 @@ export function Header({
   const [isWorkstreamsDropdownOpen, setIsWorkstreamsDropdownOpen] = useState(false);
   const [isHeaderSearchDropdownOpen, setIsHeaderSearchDropdownOpen] = useState(false);
   const [isHeaderCategoriesDropdownOpen, setIsHeaderCategoriesDropdownOpen] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const toggleAvailableNow = () => {
     if (!currentUser) return;
@@ -171,14 +172,15 @@ export function Header({
       if (isHeaderSearchDropdownOpen) setIsHeaderSearchDropdownOpen(false);
       if (isHeaderCategoriesDropdownOpen) setIsHeaderCategoriesDropdownOpen(false);
       if (isNotificationsDropdownOpen) setIsNotificationsDropdownOpen(false);
+      if (isMobileMenuOpen) setIsMobileMenuOpen(false);
     };
-    if (isUserDropdownOpen || isWorkstreamsDropdownOpen || isHeaderSearchDropdownOpen || isHeaderCategoriesDropdownOpen || isNotificationsDropdownOpen) {
+    if (isUserDropdownOpen || isWorkstreamsDropdownOpen || isHeaderSearchDropdownOpen || isHeaderCategoriesDropdownOpen || isNotificationsDropdownOpen || isMobileMenuOpen) {
       document.addEventListener('click', handleOutsideClick);
     }
     return () => {
       document.removeEventListener('click', handleOutsideClick);
     };
-  }, [isUserDropdownOpen, isWorkstreamsDropdownOpen, isHeaderSearchDropdownOpen, isHeaderCategoriesDropdownOpen]);
+  }, [isUserDropdownOpen, isWorkstreamsDropdownOpen, isHeaderSearchDropdownOpen, isHeaderCategoriesDropdownOpen, isNotificationsDropdownOpen, isMobileMenuOpen]);
 
   useEffect(() => {
     if (!currentUser) {
@@ -188,22 +190,40 @@ export function Header({
   }, [currentUser]);
 
   return (
-    <header className="sticky top-0 z-40 bg-white border-b border-slate-200/80 backdrop-blur-md px-4 sm:px-6 py-3.5 flex items-center justify-between shadow-xs w-full max-w-full">
+    <header className="sticky top-0 z-40 bg-white/95 border-b border-slate-200/80 backdrop-blur-md px-4 sm:px-6 py-3 flex items-center justify-between shadow-2xs w-full max-w-full">
       {/* Left Side: Brand & Nav Links */}
-      <div className="flex items-center gap-10">
+      <div className="flex items-center gap-3 sm:gap-8">
+        {/* Mobile Hamburger Menu Button */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setIsMobileMenuOpen(!isMobileMenuOpen);
+            setIsUserDropdownOpen(false);
+            setIsWorkstreamsDropdownOpen(false);
+            setIsHeaderSearchDropdownOpen(false);
+            setIsHeaderCategoriesDropdownOpen(false);
+            setIsNotificationsDropdownOpen(false);
+          }}
+          className="md:hidden p-2 text-slate-700 hover:text-emerald-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
+          aria-label="Toggle mobile menu"
+        >
+          {isMobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+        </button>
+
         <div className="flex items-center gap-3">
-          <a href="/" onClick={(e) => navigate('/', e)} className="flex items-center gap-2.5 text-left group">
-            <div className="w-9 h-9 rounded-xl bg-slate-900 text-emerald-400 flex items-center justify-center font-bold text-lg shadow-md group-hover:bg-slate-800 transition-colors">
+          <a href="/" onClick={(e) => navigate('/', e)} className="flex items-center gap-2.5 text-left group shrink-0">
+            <div className="w-8 h-8 rounded-xl bg-slate-900 text-emerald-400 flex items-center justify-center font-extrabold text-base shadow-xs group-hover:bg-slate-800 transition-colors ring-1 ring-slate-800">
               W
             </div>
             <div>
-              <span className="text-[17px] font-bold tracking-tight text-fiverr-dark block leading-none">WorkPerHour</span>
-              <span className="text-[9px] text-emerald-600 font-semibold uppercase tracking-wider">Secure Escrow Marketplace</span>
+              <span className="text-base font-extrabold tracking-tight text-slate-900 block leading-none">WorkPerHour</span>
+              <span className="text-xs text-emerald-600 font-bold uppercase tracking-wider block mt-0.5">Escrow Marketplace</span>
             </div>
           </a>
         </div>
 
-        <nav className="hidden lg:flex items-center gap-7 text-[13.5px] font-medium text-fiverr-dark">
+        <nav className="hidden lg:flex items-center gap-6 text-sm font-semibold text-slate-700">
           {/* CATEGORIES DROPDOWN LINK */}
           <div className="relative">
             <button 
@@ -254,7 +274,7 @@ export function Header({
                           <span>{cat.name}</span>
                           <span className="text-slate-300 group-hover:text-emerald-600 text-xs transition-colors">→</span>
                         </a>
-                        <div className="flex flex-wrap gap-x-2.5 gap-y-1 text-[11.5px] text-slate-500">
+                        <div className="flex flex-wrap gap-x-2.5 gap-y-1 text-xs text-slate-500">
                           {cat.subcategories.slice(0, 5).map((sub) => (
                             <a
                               key={sub.slug}
@@ -312,7 +332,7 @@ export function Header({
         <a 
           href="/post-project"
           onClick={(e) => navigate('/post-project', e)}
-          className="hidden sm:inline-flex items-center px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[12px] uppercase tracking-wider rounded-xl shadow-xs transition-colors cursor-pointer"
+          className="hidden sm:inline-flex items-center px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold !text-[12px] leading-[18px] uppercase tracking-wider rounded-xl shadow-xs transition-colors cursor-pointer"
         >
           Post Project
         </a>
@@ -327,7 +347,7 @@ export function Header({
               setIsWorkstreamsDropdownOpen(false);
               setIsUserDropdownOpen(false);
             }}
-            className="flex items-center gap-2 px-3.5 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-[12.5px] font-bold text-fiverr-dark transition-colors cursor-pointer"
+            className="flex items-center gap-2 px-3.5 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl !text-[12px] !leading-[18px] sm:text-sm font-bold text-fiverr-dark transition-colors cursor-pointer"
           >
             <Search className="w-3.5 h-3.5 text-fiverr-muted" />
             <span>Search</span>
@@ -347,8 +367,8 @@ export function Header({
                   }}
                   className="w-full text-left px-3 py-2 rounded-xl hover:bg-slate-50 transition-colors cursor-pointer"
                 >
-                  <div className="font-bold text-fiverr-dark">Search offers</div>
-                  <span className="text-[10px] text-fiverr-muted">to buy now</span>
+                  <div className="font-bold text-fiverr-dark text-sm">Search offers</div>
+                  <span className="text-xs text-fiverr-muted">to buy now</span>
                 </button>
                 <button
                   onClick={() => {
@@ -357,12 +377,12 @@ export function Header({
                   }}
                   className="w-full text-left px-3 py-2 rounded-xl hover:bg-slate-50 transition-colors cursor-pointer"
                 >
-                  <div className="font-bold text-fiverr-dark">Search freelancers</div>
-                  <span className="text-[10px] text-fiverr-muted">to request a proposal</span>
+                  <div className="font-bold text-fiverr-dark text-sm">Search freelancers</div>
+                  <span className="text-xs text-fiverr-muted">to request a proposal</span>
                 </button>
               </div>
 
-              <div className="px-4 pt-3 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-t border-slate-100 mt-1">
+              <div className="px-4 pt-3 pb-2 text-xs font-bold uppercase tracking-wider text-slate-400 border-t border-slate-100 mt-1">
                 Freelancers can
               </div>
               <div className="p-1">
@@ -373,8 +393,8 @@ export function Header({
                   }}
                   className="w-full text-left px-3 py-2 rounded-xl hover:bg-slate-50 transition-colors cursor-pointer"
                 >
-                  <div className="font-bold text-fiverr-dark">Search projects</div>
-                  <span className="text-[10px] text-fiverr-muted">to quote on</span>
+                  <div className="font-bold text-fiverr-dark text-sm">Search projects</div>
+                  <span className="text-xs text-fiverr-muted">to quote on</span>
                 </button>
               </div>
             </div>
@@ -388,7 +408,7 @@ export function Header({
         >
           <Heart className="w-5 h-5 text-fiverr-dark" />
           {likedGigIds.length > 0 && (
-            <span className="absolute top-1 right-1 w-4 h-4 bg-red-500 text-white rounded-full text-[10px] font-bold flex items-center justify-center shadow-xs">
+            <span className="absolute top-1 right-1 w-4 h-4 bg-red-500 text-white rounded-full text-[10px] leading-[14px] font-sans font-bold flex items-center justify-center shadow-xs">
               {likedGigIds.length}
             </span>
           )}
@@ -498,9 +518,9 @@ export function Header({
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between gap-2 mb-0.5">
                             <span className="font-bold text-fiverr-dark truncate">{partnerName}</span>
-                            <span className="text-[10px] text-slate-400 whitespace-nowrap font-mono">{formattedDate}</span>
+                            <span className="text-xs text-slate-400 whitespace-nowrap font-mono">{formattedDate}</span>
                           </div>
-                          <p className="text-[11px] text-fiverr-muted truncate">
+                          <p className="text-xs text-fiverr-muted truncate">
                             {previewText}
                           </p>
                         </div>
@@ -516,7 +536,7 @@ export function Header({
                     setIsWorkstreamsDropdownOpen(false);
                     navigate('/messages', e);
                   }}
-                  className="w-full py-2 bg-slate-50 hover:bg-slate-100 text-fiverr-dark font-bold text-[10px] uppercase tracking-wider rounded-xl transition-colors cursor-pointer"
+                  className="w-full py-2 bg-slate-50 hover:bg-slate-100 text-fiverr-dark font-bold !text-[12px] !leading-[18px] uppercase tracking-wider rounded-xl transition-colors cursor-pointer"
                 >
                   View All Workstreams
                 </button>
@@ -539,7 +559,7 @@ export function Header({
           >
             <Bell className="w-5 h-5 text-fiverr-dark" />
             {unreadCount > 0 && (
-              <span className="absolute top-1 right-1 px-1.5 py-0.5 bg-red-500 text-white font-bold text-[10px] rounded-full min-w-4 text-center leading-none">
+              <span className="absolute top-1 right-1 px-1.5 py-0.5 bg-red-500 text-white font-bold text-xs rounded-full min-w-4 text-center leading-none">
                 {unreadCount > 9 ? '9+' : unreadCount}
               </span>
             )}
@@ -551,7 +571,7 @@ export function Header({
                 <div className="flex items-center gap-2">
                   <h3 className="font-bold text-sm text-fiverr-dark">Notifications</h3>
                   {unreadCount > 0 && (
-                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[11px] font-bold rounded-full">
+                    <span className="px-2.5 py-0.5 bg-emerald-100 text-emerald-800 text-xs font-bold rounded-full">
                       {unreadCount} unread
                     </span>
                   )}
@@ -569,7 +589,7 @@ export function Header({
                     <button
                       type="button"
                       onClick={markAllAsRead}
-                      className="text-[11px] font-bold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer"
+                      className="text-xs font-bold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer"
                     >
                       Mark all read
                     </button>
@@ -846,6 +866,173 @@ export function Header({
           </div>
         )}
       </div>
+
+      {/* PPH-style Mobile Dropdown Menu */}
+      {isMobileMenuOpen && (
+        <div 
+          className="absolute left-0 top-full w-full bg-white border-b border-slate-200 shadow-2xl py-5 px-5 md:hidden z-[150] text-sm animate-in fade-in slide-in-from-top duration-150 max-h-[85vh] overflow-y-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="space-y-4">
+            {/* Search Box / Quick Links */}
+            <div className="space-y-2">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-1">Marketplace</p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={(e) => {
+                    setIsMobileMenuOpen(false);
+                    navigate('/gigs', e);
+                  }}
+                  className="w-full text-left px-3 py-2.5 rounded-xl bg-slate-50 hover:bg-emerald-50 text-slate-900 font-bold text-xs transition-colors"
+                >
+                  Explore Gigs
+                </button>
+                <button
+                  onClick={(e) => {
+                    setIsMobileMenuOpen(false);
+                    navigate('/projects', e);
+                  }}
+                  className="w-full text-left px-3 py-2.5 rounded-xl bg-slate-50 hover:bg-emerald-50 text-slate-900 font-bold text-xs transition-colors"
+                >
+                  Buyer Requests
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={(e) => {
+                    setIsMobileMenuOpen(false);
+                    navigate('/freelancers', e);
+                  }}
+                  className="w-full text-left px-3 py-2.5 rounded-xl bg-slate-50 hover:bg-emerald-50 text-slate-900 font-bold text-xs transition-colors"
+                >
+                  Find Freelancers
+                </button>
+                <button
+                  onClick={(e) => {
+                    setIsMobileMenuOpen(false);
+                    navigate('/wishlist', e);
+                  }}
+                  className="w-full text-left px-3 py-2.5 rounded-xl bg-slate-50 hover:bg-emerald-50 text-slate-900 font-bold text-xs transition-colors flex items-center justify-between"
+                >
+                  <span>Wishlist</span>
+                  <span className="w-5 h-5 bg-red-500 text-white rounded-full text-[10px] font-bold flex items-center justify-center">
+                    {likedGigIds.length}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Post Project Action */}
+            <div className="pt-2">
+              <button
+                onClick={(e) => {
+                  setIsMobileMenuOpen(false);
+                  navigate('/post-project', e);
+                }}
+                className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs uppercase tracking-wider rounded-xl shadow-xs transition-colors text-center cursor-pointer"
+              >
+                Post Project
+              </button>
+            </div>
+
+            {/* Top Categories */}
+            <div className="space-y-2 pt-2 border-t border-slate-100">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-1">Categories</p>
+              <div className="grid grid-cols-2 gap-1.5">
+                {PPH_CATEGORIES.slice(0, 6).map((cat) => (
+                  <button
+                    key={cat.slug}
+                    onClick={(e) => {
+                      setIsMobileMenuOpen(false);
+                      navigate(`/categories/${cat.slug}`, e);
+                    }}
+                    className="text-left px-3 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:bg-emerald-50 hover:text-emerald-600 transition-colors truncate"
+                  >
+                    {cat.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* User / Auth Section */}
+            <div className="space-y-2 pt-3 border-t border-slate-100">
+              {currentUser ? (
+                <div className="space-y-2.5">
+                  <div className="flex items-center gap-3 px-3 py-2.5 bg-slate-50 rounded-xl">
+                    <img
+                      src={currentUser.avatar || getUserInitialsAvatar(currentUser.name)}
+                      alt={currentUser.name}
+                      className="w-9 h-9 rounded-full object-cover border border-slate-200"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="font-bold text-sm text-slate-900 truncate">{currentUser.name}</p>
+                      <p className="text-xs text-emerald-600 uppercase font-semibold">{currentUser.role}</p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={(e) => {
+                        setIsMobileMenuOpen(false);
+                        navigate('/orders', e);
+                      }}
+                      className="py-2.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition cursor-pointer text-center"
+                    >
+                      Dashboard
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        setIsMobileMenuOpen(false);
+                        navigate('/messages', e);
+                      }}
+                      className="py-2.5 px-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs rounded-xl transition cursor-pointer text-center"
+                    >
+                      Workstreams ({orders.length})
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setIsMobileMenuOpen(false);
+                      setImpersonatedUser(null);
+                      updateCurrentUser(null);
+                      clearAuthToken();
+                      localStorage.removeItem('user');
+                      localStorage.removeItem('current_user');
+                      setPath('/gigs');
+                      window.history.pushState({}, '', '/gigs');
+                    }}
+                    className="w-full py-2.5 bg-red-50 hover:bg-red-100 text-red-600 font-bold text-xs rounded-xl transition text-center cursor-pointer"
+                  >
+                    Log Out
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={(e) => {
+                      setIsMobileMenuOpen(false);
+                      if (onOpenLogin) onOpenLogin();
+                      else navigate('/login', e);
+                    }}
+                    className="py-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition text-center cursor-pointer"
+                  >
+                    Login
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      setIsMobileMenuOpen(false);
+                      if (onOpenSignup) onOpenSignup();
+                      else navigate('/signup', e);
+                    }}
+                    className="py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition text-center cursor-pointer"
+                  >
+                    Sign Up
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   );
 }

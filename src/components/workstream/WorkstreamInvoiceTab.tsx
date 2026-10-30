@@ -175,13 +175,13 @@ export const WorkstreamInvoiceTab: React.FC<WorkstreamInvoiceTabProps> = ({ orde
         {/* PARTICIPANTS SECTION */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 p-4 rounded-xl bg-slate-50/60 border border-slate-100 text-xs">
           <div>
-            <span className="font-bold text-slate-400 uppercase tracking-wider text-[10px]">Issued To (Client)</span>
+            <span className="font-bold text-slate-400 uppercase tracking-wider text-xs">Issued To (Client)</span>
             <p className="font-bold text-slate-900 text-sm mt-0.5">{invoice.buyer.name}</p>
             <p className="text-slate-600 mt-0.5">{invoice.buyer.email}</p>
             <p className="text-slate-400 mt-0.5">Account ID: {invoice.buyer.id} • {invoice.buyer.country || 'Global'}</p>
           </div>
           <div className="sm:text-right">
-            <span className="font-bold text-slate-400 uppercase tracking-wider text-[10px]">Provided By (Freelancer)</span>
+            <span className="font-bold text-slate-400 uppercase tracking-wider text-xs">Provided By (Freelancer)</span>
             <p className="font-bold text-slate-900 text-sm mt-0.5">{invoice.seller.name}</p>
             <p className="text-slate-600 mt-0.5">{invoice.seller.email}</p>
             <p className="text-slate-400 mt-0.5">Account ID: {invoice.seller.id} • {invoice.seller.country || 'Global'}</p>
@@ -192,7 +192,7 @@ export const WorkstreamInvoiceTab: React.FC<WorkstreamInvoiceTabProps> = ({ orde
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead>
-              <tr className="border-b border-slate-200 text-slate-400 font-bold uppercase tracking-wider text-[10px]">
+              <tr className="border-b border-slate-200 text-slate-400 font-bold uppercase tracking-wider text-xs">
                 <th className="py-2.5">Description</th>
                 <th className="py-2.5 text-center">Qty</th>
                 <th className="py-2.5 text-right">Unit Price</th>
@@ -219,8 +219,8 @@ export const WorkstreamInvoiceTab: React.FC<WorkstreamInvoiceTabProps> = ({ orde
               <ShieldCheck className="w-4 h-4 text-emerald-600" />
               <span>100% Escrow Protection</span>
             </div>
-            <p className="text-[11px] leading-relaxed text-slate-400">
-              Payment was verified and held securely in FivePA Escrow. All funds are cleared in full accordance with FivePA Marketplace Terms of Service.
+            <p className="text-xs leading-relaxed text-slate-400">
+              Payment was verified and held securely in Escrow. All funds are cleared in full accordance with Marketplace Terms of Service.
             </p>
           </div>
 

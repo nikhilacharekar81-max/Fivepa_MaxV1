@@ -807,7 +807,7 @@ export class FinancialTransactionService {
         const initBal = Number(params.initialBalance || 0);
         await client.query(
           `INSERT INTO wallets (user_id, user_name, user_email, user_role, available_balance, funds_on_hold, pending_withdrawals, status)
-           VALUES ($1, $2, $3, $4, $5, 0.00, 0.00, 'active')`,
+           VALUES ($1, $2, $3, $4, $5, COALESCE((SELECT SUM(remaining) FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split')), 0.00), 0.00, 'active')`,
           [params.userId, resolvedName || `User ${params.userId}`, resolvedEmail || `${params.userId}@example.com`, resolvedRole, initBal]
         );
         if (initBal > 0) {
@@ -1085,32 +1085,59 @@ export class FinancialTransactionService {
         }
       }
 
-      const escRes = await client.query('SELECT * FROM escrows WHERE order_id = $1 FOR UPDATE', [params.orderId]);
-      if (escRes.rows.length === 0) {
+      const targetEscrowCheck = await client.query('SELECT * FROM escrows WHERE order_id = $1', [params.orderId]);
+      if (targetEscrowCheck.rows.length === 0) {
         throw new Error(`Escrow record not found in PostgreSQL for order ${params.orderId}`);
       }
-      const escrow = escRes.rows[0];
+      const buyerId = targetEscrowCheck.rows[0].buyer_id;
+
+      // Lock all active escrows for the buyer in deterministic order BEFORE locking wallets
+      const activeEscRows = await client.query(
+        "SELECT * FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE",
+        [buyerId]
+      );
+      const authoritativeHold = Number(activeEscRows.rows.reduce((sum: number, r: any) => sum + Number(r.remaining || 0), 0).toFixed(2));
+
+      let escrow = activeEscRows.rows.find((r: any) => String(r.order_id) === String(params.orderId));
+      if (!escrow) {
+        escrow = targetEscrowCheck.rows[0];
+        if (escrow.status === 'released') {
+          const prevIdemp = await client.query(
+            "SELECT result FROM financial_idempotency WHERE operation = 'releaseOrderFunds' AND request_fingerprint->>'orderId' = $1 AND status = 'completed' ORDER BY updated_at DESC LIMIT 1",
+            [params.orderId]
+          );
+          if (prevIdemp.rows.length > 0) {
+            const resVal = typeof prevIdemp.rows[0].result === 'string' ? JSON.parse(prevIdemp.rows[0].result) : prevIdemp.rows[0].result;
+            return resVal;
+          }
+          throw new Error('Escrow has already been released.');
+        }
+        if (escrow.status !== 'held' && escrow.status !== 'split') {
+          throw new Error(`Cannot release escrow in status "${escrow.status}"`);
+        }
+      }
 
       await this.ensureWallet({ userId: escrow.buyer_id, role: 'buyer' }, client);
       await this.ensureWallet({ userId: escrow.seller_id, role: 'freelancer' }, client);
 
-      if (escrow.status === 'released') {
-        const prevIdemp = await client.query(
-          "SELECT result FROM financial_idempotency WHERE operation = 'releaseOrderFunds' AND request_fingerprint->>'orderId' = $1 AND status = 'completed' ORDER BY updated_at DESC LIMIT 1",
-          [params.orderId]
-        );
-        if (prevIdemp.rows.length > 0) {
-          const resVal = typeof prevIdemp.rows[0].result === 'string' ? JSON.parse(prevIdemp.rows[0].result) : prevIdemp.rows[0].result;
-          return resVal;
-        }
-        throw new Error('Escrow has already been released.');
-      }
-      if (escrow.status !== 'held' && escrow.status !== 'split') {
-        throw new Error(`Cannot release escrow in status "${escrow.status}"`);
-      }
+      // Consistent Lock Order: Lock buyer & seller wallets in sorted order by user_id AFTER escrows are locked
+      const walletUserIds = Array.from(new Set([escrow.buyer_id, escrow.seller_id])).sort();
+      const lockedWalletsRes = await client.query('SELECT * FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE', [walletUserIds]);
+      const buyerWallet = lockedWalletsRes.rows.find((w: any) => w.user_id === escrow.buyer_id);
 
       const gross = Number(escrow.remaining);
       assertValidMoneyAmount(gross, 'escrow remaining balance');
+
+      // Verify buyer wallet hold invariant against authoritative held escrows locked above
+      let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
+      if (buyerHold < gross) {
+        if (authoritativeHold >= gross) {
+          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [authoritativeHold, escrow.buyer_id]);
+          buyerHold = authoritativeHold;
+        } else {
+          throw new Error(`Cannot release escrow for order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is insufficient for release ($${gross.toFixed(2)}).`);
+        }
+      }
 
       const rawComm = escrow.commission_percent !== null && escrow.commission_percent !== undefined
         ? Number(escrow.commission_percent)
@@ -1197,11 +1224,23 @@ export class FinancialTransactionService {
     assertPostgresAvailable();
     const run = async (client: any) => {
       const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [params.orderId]);
-      const escRes = await client.query('SELECT * FROM escrows WHERE order_id = $1 FOR UPDATE', [params.orderId]);
-      if (escRes.rows.length === 0) {
+      const targetEscrowCheck = await client.query('SELECT * FROM escrows WHERE order_id = $1', [params.orderId]);
+      if (targetEscrowCheck.rows.length === 0) {
         throw new Error(`Escrow record not found in PostgreSQL for order ${params.orderId}`);
       }
-      const escrow = escRes.rows[0];
+      const buyerId = targetEscrowCheck.rows[0].buyer_id;
+
+      // Lock all active escrows for the buyer in deterministic order BEFORE locking wallets
+      const activeEscRows = await client.query(
+        "SELECT * FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split') ORDER BY order_id ASC FOR UPDATE",
+        [buyerId]
+      );
+      const authoritativeHold = Number(activeEscRows.rows.reduce((sum: number, r: any) => sum + Number(r.remaining || 0), 0).toFixed(2));
+
+      let escrow = activeEscRows.rows.find((r: any) => String(r.order_id) === String(params.orderId));
+      if (!escrow) {
+        escrow = targetEscrowCheck.rows[0];
+      }
 
       const availableToRefund = Number(escrow.remaining);
       const refundAmount = params.amount !== undefined ? Number(params.amount.toFixed(2)) : availableToRefund;
@@ -1242,6 +1281,11 @@ export class FinancialTransactionService {
       await this.ensureWallet({ userId: escrow.buyer_id, role: 'buyer' }, client);
       await this.ensureWallet({ userId: escrow.seller_id, role: 'freelancer' }, client);
 
+      // Consistent Lock Order: Lock buyer & seller wallets in sorted order by user_id AFTER escrows are locked
+      const walletUserIds = Array.from(new Set([escrow.buyer_id, escrow.seller_id])).sort();
+      const lockedWalletsRes = await client.query('SELECT * FROM wallets WHERE user_id = ANY($1::text[]) ORDER BY user_id ASC FOR UPDATE', [walletUserIds]);
+      const buyerWallet = lockedWalletsRes.rows.find((w: any) => w.user_id === escrow.buyer_id);
+
       if (escrow.status === 'refunded') {
         const prevIdemp = await client.query(
           "SELECT result FROM financial_idempotency WHERE operation = 'refundOrderFunds' AND request_fingerprint->>'orderId' = $1 AND status = 'completed' ORDER BY updated_at DESC LIMIT 1",
@@ -1260,6 +1304,17 @@ export class FinancialTransactionService {
       if (refundAmount <= 0) throw new Error('Refund amount must be greater than zero.');
       if (refundAmount > availableToRefund) {
         throw new Error(`Refund amount ($${refundAmount}) exceeds available escrow remaining ($${availableToRefund}).`);
+      }
+
+      // Verify buyer wallet hold invariant and reconcile safely under lock if needed
+      let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
+      if (buyerHold < refundAmount) {
+        if (authoritativeHold >= refundAmount) {
+          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [authoritativeHold, escrow.buyer_id]);
+          buyerHold = authoritativeHold;
+        } else {
+          throw new Error(`Cannot refund order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is insufficient for refund ($${refundAmount.toFixed(2)}).`);
+        }
       }
 
       const completesFullRefund = (refundAmount === availableToRefund && Number(escrow.released_gross || 0) === 0);
@@ -1636,6 +1691,13 @@ export class FinancialTransactionService {
         throw new Error('User account is frozen. Financial transactions are restricted.');
       }
 
+      // Uniform Lock Sequence: 1. Lock active payouts for freelancer in deterministic order
+      const activePayoutsRes = await client.query(
+        "SELECT * FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE",
+        [params.freelancerId]
+      );
+
+      // 2. Lock freelancer wallet
       const walletRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [params.freelancerId]);
       if (walletRes.rows.length === 0) throw new Error('Freelancer wallet not found');
       const wallet = walletRes.rows[0];
@@ -1957,12 +2019,22 @@ export class FinancialTransactionService {
       const check = await checkOrRecordIdempotency(client, idempKey, 'settlePayout', payloadFingerprint);
       if (check.replayed) return check.result;
 
-      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [params.payoutId]);
-      if (pRes.rows.length === 0) throw new Error('Payout not found');
-      const payout = pRes.rows[0];
+      const targetPayoutCheck = await client.query('SELECT * FROM payouts WHERE id = $1', [params.payoutId]);
+      if (targetPayoutCheck.rows.length === 0) throw new Error('Payout not found');
+      const freelancerId = targetPayoutCheck.rows[0].freelancer_id;
 
-      if (payout.status !== 'pending' && payout.status !== 'approved') {
-        throw new Error(`Cannot settle payout in status "${payout.status}".`);
+      // Lock all active payouts for the freelancer in deterministic order BEFORE locking wallet
+      const activePayoutRows = await client.query(
+        "SELECT * FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE",
+        [freelancerId]
+      );
+
+      let payout = activePayoutRows.rows.find((r: any) => String(r.id) === String(params.payoutId));
+      if (!payout) {
+        payout = targetPayoutCheck.rows[0];
+        if (payout.status !== 'pending' && payout.status !== 'approved') {
+          throw new Error(`Cannot settle payout in status "${payout.status}".`);
+        }
       }
 
       if (Number(payout.amount) >= 500 && payout.status !== 'approved') {
@@ -1983,10 +2055,24 @@ export class FinancialTransactionService {
         throw new Error('Payout method changed concurrently during settlement verification.');
       }
 
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
+      const walletLockRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [freelancerId]);
+      const freelancerWallet = walletLockRes.rows[0];
 
       const amount = Number(payout.amount);
-      await client.query('UPDATE wallets SET pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
+      let pendingBal = Number(freelancerWallet?.pending_withdrawals || 0);
+
+      // Verify pending_withdrawals invariant and reconcile safely under lock if needed
+      if (pendingBal < amount) {
+        const reconciledPending = Number(activePayoutRows.rows.reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0).toFixed(2));
+        if (reconciledPending >= amount) {
+          await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, freelancerId]);
+          pendingBal = reconciledPending;
+        } else {
+          throw new Error(`Cannot settle payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
+        }
+      }
+
+      await client.query('UPDATE wallets SET pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, freelancerId]);
       await client.query("UPDATE payouts SET status = 'processed', processed_at = NOW(), updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
       const journalId = 'jnl_' + randomUUID().slice(0, 12);
@@ -2022,23 +2108,48 @@ export class FinancialTransactionService {
       const check = await checkOrRecordIdempotency(client, idempKey, 'cancelPayout', payloadFingerprint);
       if (check.replayed) return check.result;
 
-      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [params.payoutId]);
-      if (pRes.rows.length === 0) throw new Error('Payout not found');
-      const payout = pRes.rows[0];
+      const targetPayoutCheck = await client.query('SELECT * FROM payouts WHERE id = $1', [params.payoutId]);
+      if (targetPayoutCheck.rows.length === 0) throw new Error('Payout not found');
+      const freelancerId = targetPayoutCheck.rows[0].freelancer_id;
 
-      if (payout.status !== 'pending' && payout.status !== 'approved') {
-        throw new Error(`Cannot cancel payout in status "${payout.status}".`);
+      // Lock all active payouts for the freelancer in deterministic order BEFORE locking wallet
+      const activePayoutRows = await client.query(
+        "SELECT * FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE",
+        [freelancerId]
+      );
+
+      let payout = activePayoutRows.rows.find((r: any) => String(r.id) === String(params.payoutId));
+      if (!payout) {
+        payout = targetPayoutCheck.rows[0];
+        if (payout.status !== 'pending' && payout.status !== 'approved') {
+          throw new Error(`Cannot cancel payout in status "${payout.status}".`);
+        }
       }
 
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
+      const walletLockRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [freelancerId]);
+      const freelancerWallet = walletLockRes.rows[0];
+
       const amount = Number(payout.amount);
-      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
-      await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
+      let pendingBal = Number(freelancerWallet?.pending_withdrawals || 0);
+
+      // Verify pending_withdrawals invariant and reconcile safely under lock if needed
+      if (pendingBal < amount) {
+        const reconciledPending = Number(activePayoutRows.rows.reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0).toFixed(2));
+        if (reconciledPending >= amount) {
+          await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, freelancerId]);
+          pendingBal = reconciledPending;
+        } else {
+          throw new Error(`Cannot cancel payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
+        }
+      }
+
+      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, freelancerId]);
+      await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [freelancerId]);
       await client.query("UPDATE payouts SET status = 'cancelled', updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
       await client.query(
         'INSERT INTO wallet_movements (id, user_id, amount, type, description) VALUES ($1, $2, $3, $4, $5)',
-        [randomUUID(), payout.freelancer_id, amount, 'payout_cancellation', `Cancelled withdrawal #${params.payoutId}: ${params.reason}`]
+        [randomUUID(), freelancerId, amount, 'payout_cancellation', `Cancelled withdrawal #${params.payoutId}: ${params.reason}`]
       );
 
       const journalId = 'jnl_' + randomUUID().slice(0, 12);
@@ -2049,10 +2160,10 @@ export class FinancialTransactionService {
       );
       const entries = [
         { account_code: '2040', debit: amount, credit: 0, description: 'Release pending payout liability back to wallet', user_id: null },
-        { account_code: '2020', debit: 0, credit: amount, description: 'Restore freelancer wallet payable balance', user_id: payout.freelancer_id }
+        { account_code: '2020', debit: 0, credit: amount, description: 'Restore freelancer wallet payable balance', user_id: freelancerId }
       ];
       await this.assertJournalBalanced(client, entries);
-      for (const e of entries) await client.query('INSERT INTO ledger_entries (id, journal_id, account_code, debit, credit, description, user_id, payout_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [randomUUID(), journalId, e.account_code, e.debit, e.credit, e.description, payout.freelancer_id, params.payoutId]);
+      for (const e of entries) await client.query('INSERT INTO ledger_entries (id, journal_id, account_code, debit, credit, description, user_id, payout_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [randomUUID(), journalId, e.account_code, e.debit, e.credit, e.description, freelancerId, params.payoutId]);
 
       const result = { success: true };
       await recordIdempotencyResult(client, idempKey, 'cancelPayout', result, payloadFingerprint);
@@ -2074,26 +2185,51 @@ export class FinancialTransactionService {
       const check = await checkOrRecordIdempotency(client, idempKey, 'failPayout', payloadFingerprint);
       if (check.replayed) return check.result;
 
-      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [params.payoutId]);
-      if (pRes.rows.length === 0) throw new Error('Payout not found');
-      const payout = pRes.rows[0];
+      const targetPayoutCheck = await client.query('SELECT * FROM payouts WHERE id = $1', [params.payoutId]);
+      if (targetPayoutCheck.rows.length === 0) throw new Error('Payout not found');
+      const freelancerId = targetPayoutCheck.rows[0].freelancer_id;
 
-      if (payout.status === 'failed') {
-        const alreadyFailedResult = { success: true, alreadyFailed: true };
-        await recordIdempotencyResult(client, idempKey, 'failPayout', alreadyFailedResult, payloadFingerprint);
-        return alreadyFailedResult;
-      }
-      if (payout.status === 'processed') {
-        throw new Error('Cannot fail payout: Payout has already been processed.');
-      }
-      if (payout.status !== 'pending' && payout.status !== 'approved') {
-        throw new Error(`Cannot fail payout in status "${payout.status}".`);
+      // Lock all active payouts for the freelancer in deterministic order BEFORE locking wallet
+      const activePayoutRows = await client.query(
+        "SELECT * FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE",
+        [freelancerId]
+      );
+
+      let payout = activePayoutRows.rows.find((r: any) => String(r.id) === String(params.payoutId));
+      if (!payout) {
+        payout = targetPayoutCheck.rows[0];
+        if (payout.status === 'failed') {
+          const alreadyFailedResult = { success: true, alreadyFailed: true };
+          await recordIdempotencyResult(client, idempKey, 'failPayout', alreadyFailedResult, payloadFingerprint);
+          return alreadyFailedResult;
+        }
+        if (payout.status === 'processed') {
+          throw new Error('Cannot fail payout: Payout has already been processed.');
+        }
+        if (payout.status !== 'pending' && payout.status !== 'approved') {
+          throw new Error(`Cannot fail payout in status "${payout.status}".`);
+        }
       }
 
-      await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
+      const walletLockRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [freelancerId]);
+      const freelancerWallet = walletLockRes.rows[0];
+
       const amount = Number(payout.amount);
-      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
-      await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
+      let pendingBal = Number(freelancerWallet?.pending_withdrawals || 0);
+
+      // Verify pending_withdrawals invariant and reconcile safely under lock if needed
+      if (pendingBal < amount) {
+        const reconciledPending = Number(activePayoutRows.rows.reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0).toFixed(2));
+        if (reconciledPending >= amount) {
+          await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, freelancerId]);
+          pendingBal = reconciledPending;
+        } else {
+          throw new Error(`Cannot fail payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
+        }
+      }
+
+      await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, freelancerId]);
+      await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [freelancerId]);
       await client.query("UPDATE payouts SET status = 'failed', updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
       await client.query(
@@ -2125,15 +2261,26 @@ export class FinancialTransactionService {
   async retryPayout(params: { payoutId: string; actor: string; idempotencyKey?: string }, externalClient?: any) {
     assertPostgresAvailable();
     const run = async (client: any) => {
-      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [params.payoutId]);
-      if (pRes.rows.length === 0) throw new Error('Payout not found');
-      const payout = pRes.rows[0];
+      // Step 1: Resolve freelancer ID without locking target payout row
+      const targetPayoutCheck = await client.query('SELECT freelancer_id FROM payouts WHERE id = $1', [params.payoutId]);
+      if (targetPayoutCheck.rows.length === 0) throw new Error('Payout not found');
+      const freelancerId = targetPayoutCheck.rows[0].freelancer_id;
+
+      // Step 2: Lock active payouts for freelancer AND target payout in deterministic ORDER BY id ASC FOR UPDATE
+      const lockedPayoutsRes = await client.query(
+        "SELECT * FROM payouts WHERE (freelancer_id = $1 AND status IN ('pending', 'approved')) OR id = $2 ORDER BY id ASC FOR UPDATE",
+        [freelancerId, params.payoutId]
+      );
+
+      // Step 3: Re-read target payout from locked rows and validate status under row lock
+      const payout = lockedPayoutsRes.rows.find((r: any) => String(r.id) === String(params.payoutId));
+      if (!payout) throw new Error('Payout not found');
 
       if (payout.status !== 'failed') {
         throw new Error('Only failed payouts can be retried.');
       }
 
-      if (params.actor && !params.actor.startsWith('admin') && !params.actor.startsWith('system') && params.actor !== payout.freelancer_id) {
+      if (params.actor && !params.actor.startsWith('admin') && !params.actor.startsWith('system') && params.actor !== freelancerId) {
         throw new Error('Unauthorized: You can only retry your own payouts.');
       }
 
@@ -2171,6 +2318,7 @@ export class FinancialTransactionService {
       const check = await checkOrRecordIdempotency(client, idempKey, 'retryPayout', payloadFingerprint);
       if (check.replayed) return check.result;
 
+      // Step 4: Lock freelancer wallet
       const wRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [payout.freelancer_id]);
       if (wRes.rows.length === 0) throw new Error('Freelancer wallet not found');
       const wallet = wRes.rows[0];
@@ -2217,9 +2365,18 @@ export class FinancialTransactionService {
         throw new Error('Insufficient wallet balance to retry payout.');
       }
 
+      // Step 5: Atomically transition status from failed to pending in PostgreSQL
+      const updatePayoutRes = await client.query(
+        "UPDATE payouts SET status = 'pending', updated_at = NOW() WHERE id = $1 AND status = 'failed' RETURNING *",
+        [params.payoutId]
+      );
+      if (updatePayoutRes.rows.length === 0) {
+        throw new Error('Only failed payouts can be retried.');
+      }
+
+      // Step 6: Debit wallet balance & sync users.wallet_balance
       await client.query('UPDATE wallets SET available_balance = available_balance - $1, pending_withdrawals = pending_withdrawals + $1 WHERE user_id = $2', [amount, payout.freelancer_id]);
       await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [payout.freelancer_id]);
-      await client.query("UPDATE payouts SET status = 'pending', updated_at = NOW() WHERE id = $1", [params.payoutId]);
 
       await client.query(
         'INSERT INTO wallet_movements (id, user_id, amount, type, description) VALUES ($1, $2, $3, $4, $5)',
@@ -2492,7 +2649,14 @@ export class FinancialTransactionService {
             const buyerId = escRes.rows[0].buyer_id;
             const holdDiff = re.credit - re.debit;
             if (holdDiff !== 0) {
-              await client.query('UPDATE wallets SET funds_on_hold = GREATEST(0, funds_on_hold + $1) WHERE user_id = $2', [holdDiff, buyerId]);
+              if (holdDiff < 0) {
+                const wRes = await client.query('SELECT funds_on_hold FROM wallets WHERE user_id = $1 FOR UPDATE', [buyerId]);
+                const curHold = Number(wRes.rows[0]?.funds_on_hold || 0);
+                if (curHold + holdDiff < 0) {
+                  throw new Error(`Cannot reverse escrow journal for user ${buyerId}: Wallet hold ($${curHold.toFixed(2)}) is insufficient for hold reversal ($${Math.abs(holdDiff).toFixed(2)}).`);
+                }
+              }
+              await client.query('UPDATE wallets SET funds_on_hold = funds_on_hold + $1 WHERE user_id = $2', [holdDiff, buyerId]);
             }
           }
         }

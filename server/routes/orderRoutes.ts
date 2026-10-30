@@ -80,31 +80,108 @@ router.get('/orders', requireAuth, requireActiveStatus, async (req: Request, res
     const caller = await store.getUser(authUserId);
     const isAdmin = caller?.role === 'admin' || caller?.role === 'super_admin' || caller?.role === 'support';
 
-    const ordersList = isAdmin ? await store.listOrders() : await store.listOrdersForUser(authUserId);
+    const pool = postgresStore.getPool();
+    const inqRes = await pool.query(
+      isAdmin
+        ? `SELECT * FROM workspaces WHERE (metadata->>'isInquiry') = 'true'`
+        : `SELECT * FROM workspaces WHERE (buyer_id = $1 OR seller_id = $1) AND (metadata->>'isInquiry') = 'true'`,
+      isAdmin ? [] : [authUserId]
+    );
+
+    const dbOrders = isAdmin ? await store.listOrders() : await store.listOrdersForUser(authUserId);
+    const wsIdsWithRealOrders = new Set(dbOrders.map(o => o.workspaceId).filter(Boolean));
+
+    const inqOrders: Order[] = inqRes.rows
+      .filter(ws => !wsIdsWithRealOrders.has(ws.workspace_id))
+      .map(ws => {
+        const meta = typeof ws.metadata === 'string' ? JSON.parse(ws.metadata) : (ws.metadata || {});
+        return {
+          id: ws.workspace_id,
+          workspaceId: ws.workspace_id,
+          title: ws.title || 'Inquiry',
+          buyerId: ws.buyer_id,
+          sellerId: ws.seller_id,
+          amount: 0,
+          status: 'in_progress' as const,
+          createdAt: ws.created_at,
+          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
+          isInquiry: true,
+          gigId: meta.originType === 'gig' ? meta.originId : undefined,
+          projectId: meta.originType === 'project' ? meta.originId : undefined,
+          originType: meta.originType
+        } as any;
+      });
+
+    const ordersList = [...dbOrders, ...inqOrders];
     const orderIds = ordersList.map(o => o.id);
+    const wsIds = Array.from(new Set(ordersList.map(o => o.workspaceId).filter(Boolean))) as string[];
     const userIds = Array.from(new Set(ordersList.flatMap(o => [o.buyerId, o.sellerId]).filter(Boolean)));
 
     if (ordersList.length === 0) {
       return res.json([]);
     }
 
-    const pool = postgresStore.getPool();
-    const [usersList, latestMsgsRes] = await Promise.all([
+    const [usersList, msgsRes] = await Promise.all([
       userIds.length > 0
         ? Promise.all(userIds.map(id => store.getUser(id)))
         : Promise.resolve([]),
-      orderIds.length > 0
+      (orderIds.length > 0 || wsIds.length > 0)
         ? pool.query(`
-            SELECT DISTINCT ON (order_id) order_id, text, timestamp
+            SELECT id, order_id, workspace_id, metadata->>'workspaceId' AS meta_ws_id, text, timestamp
             FROM messages
-            WHERE order_id = ANY($1)
-            ORDER BY order_id, timestamp DESC
-          `, [orderIds])
+            WHERE (order_id IS NOT NULL AND order_id = ANY($1::text[]))
+               OR (order_id IS NULL AND (workspace_id = ANY($2::text[]) OR (metadata->>'workspaceId') = ANY($2::text[])))
+            ORDER BY timestamp DESC
+          `, [
+            orderIds.length > 0 ? orderIds : ['__none__'],
+            wsIds.length > 0 ? wsIds : ['__none__']
+          ])
         : Promise.resolve({ rows: [] as any[] })
     ]);
 
+    const latestMsgMap = new Map<string, { text: string; timestamp: string }>();
+    const orderIdSet = new Set(orderIds);
+
+    const ordersByWs = new Map<string, Order[]>();
+    for (const ord of ordersList) {
+      if (ord.workspaceId) {
+        const list = ordersByWs.get(ord.workspaceId) || [];
+        list.push(ord);
+        ordersByWs.set(ord.workspaceId, list);
+      }
+    }
+
+    for (const msgRow of msgsRes.rows) {
+      const msgTime = new Date(msgRow.timestamp || 0).getTime();
+      if (msgRow.order_id && orderIdSet.has(msgRow.order_id)) {
+        const current = latestMsgMap.get(msgRow.order_id);
+        const currTime = current ? new Date(current.timestamp || 0).getTime() : -1;
+        if (!current || msgTime > currTime) {
+          latestMsgMap.set(msgRow.order_id, { text: msgRow.text, timestamp: msgRow.timestamp });
+        }
+      } else if (!msgRow.order_id) {
+        const targetWsId = msgRow.workspace_id || msgRow.meta_ws_id;
+        if (targetWsId) {
+          if (orderIdSet.has(targetWsId)) {
+            const current = latestMsgMap.get(targetWsId);
+            const currTime = current ? new Date(current.timestamp || 0).getTime() : -1;
+            if (!current || msgTime > currTime) {
+              latestMsgMap.set(targetWsId, { text: msgRow.text, timestamp: msgRow.timestamp });
+            }
+          }
+          const matchingOrders = ordersByWs.get(targetWsId) || [];
+          for (const ord of matchingOrders) {
+            const current = latestMsgMap.get(ord.id);
+            const currTime = current ? new Date(current.timestamp || 0).getTime() : -1;
+            if (!current || msgTime > currTime) {
+              latestMsgMap.set(ord.id, { text: msgRow.text, timestamp: msgRow.timestamp });
+            }
+          }
+        }
+      }
+    }
+
     const userMap = new Map((usersList.filter(Boolean) as User[]).map(u => [u.id, u]));
-    const latestMsgMap = new Map((latestMsgsRes.rows as any[]).map(m => [m.order_id, m]));
 
     const userOrders: Order[] = ordersList.map(order => {
       const buyerUser = userMap.get(order.buyerId);
@@ -134,7 +211,33 @@ router.get('/orders', requireAuth, requireActiveStatus, async (req: Request, res
 // Single Order Workspace Detail - Directly querying PostgreSQL
 router.get('/orders/:id', requireAuth, async (req: Request, res: Response) => {
   try {
-    const order = await store.getOrder(req.params.id);
+    let order = await store.getOrder(req.params.id);
+    if (!order) {
+      const ws = await workspaceService.getWorkspaceAsync(req.params.id);
+      if (ws?.activeOrderId) {
+        order = (await store.getOrder(ws.activeOrderId)) || undefined;
+      }
+      if (!order && ws && ((ws as any).metadata?.isInquiry || (ws as any).metadata?.isInquiry === 'true')) {
+        const meta = typeof (ws as any).metadata === 'string' ? JSON.parse((ws as any).metadata) : ((ws as any).metadata || {});
+        order = {
+          id: ws.workspaceId,
+          workspaceId: ws.workspaceId,
+          title: (ws as any).title || 'Inquiry',
+          buyerId: ws.buyerId,
+          sellerId: ws.sellerId,
+          amount: 0,
+          status: 'in_progress',
+          createdAt: ws.createdAt,
+          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
+          isInquiry: true,
+          gigId: meta.originType === 'gig' ? meta.originId : undefined,
+          projectId: meta.originType === 'project' ? meta.originId : undefined,
+          originType: meta.originType
+        } as any;
+      } else if (!order) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+    }
     if (!order) return res.status(404).json({ error: 'Order not found' });
 
     const authUserId = resolveAuthenticatedUserId(req)!;
@@ -145,12 +248,14 @@ router.get('/orders/:id', requireAuth, async (req: Request, res: Response) => {
     }
 
     const enriched = enrichOrderWithServiceInfo(order, isAdmin);
-    const [buyer, seller, orderMessages, dispute] = await Promise.all([
+    const [buyer, seller, wsMessages, directMessages, dispute] = await Promise.all([
       store.getUser(order.buyerId),
       store.getUser(order.sellerId),
+      order.workspaceId ? store.listMessagesForWorkspace(order.workspaceId) : Promise.resolve([]),
       store.listMessages(order.id),
       store.getDisputeByOrderId(order.id)
     ]);
+    const orderMessages = wsMessages.length > 0 ? wsMessages : directMessages;
 
     res.json({
       ...enriched,
@@ -288,7 +393,47 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
     }
 
     let rawAmount = Number(req.body?.amount);
-    const isInquiry = rawAmount === 0 && /^inquiry:/i.test(title);
+    const isInquiry = Boolean(req.body?.isInquiry === true || req.body?.type === 'inquiry' || req.body?.metadata?.isInquiry === true);
+    if (isInquiry) rawAmount = 0;
+
+    const resolvedOriginType: 'gig' | 'project' | 'profile' = req.body?.projectId
+      ? 'project'
+      : (req.body?.gigId ? 'gig' : 'profile');
+    const resolvedOriginId = req.body?.projectId || req.body?.gigId || sellerId;
+
+    if (isInquiry && !req.body?.workspaceId && !req.body?.forceNew) {
+      const existingInqRes = await postgresStore.getPool().query(
+        `SELECT * FROM workspaces
+         WHERE buyer_id = $1
+           AND seller_id = $2
+           AND (metadata->>'originType') = $3
+           AND (metadata->>'originId') = $4
+           AND (metadata->>'isInquiry') = 'true'
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1`,
+        [buyerId, sellerId, resolvedOriginType, resolvedOriginId]
+      );
+      if (existingInqRes.rows.length > 0) {
+        const matchedWs = existingInqRes.rows[0];
+        const inqItem: any = {
+          id: matchedWs.workspace_id,
+          workspaceId: matchedWs.workspace_id,
+          title: matchedWs.title,
+          buyerId: matchedWs.buyer_id,
+          sellerId: matchedWs.seller_id,
+          amount: 0,
+          status: 'in_progress',
+          createdAt: matchedWs.created_at,
+          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
+          isInquiry: true,
+          originType: resolvedOriginType,
+          originId: resolvedOriginId,
+          gigId: req.body?.gigId,
+          projectId: req.body?.projectId
+        };
+        return res.status(200).json(enrichOrderWithServiceInfo(inqItem));
+      }
+    }
 
     const rawIdempKey = String(
       req.headers['idempotency-key'] ||
@@ -366,8 +511,8 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
     }
 
     if (!isInquiry) {
-      if (!Number.isFinite(rawAmount) || rawAmount < 1.00) {
-        return res.status(400).json({ error: 'Minimum order amount is $1.00.' });
+      if (!Number.isFinite(rawAmount) || rawAmount < 10.00) {
+        return res.status(400).json({ error: 'Minimum order amount is $10.00.' });
       }
     }
 
@@ -417,6 +562,95 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
         }
       }
 
+      if (isInquiry) {
+        const lockKey = `inquiry:${buyerId}:${sellerId}:${resolvedOriginType}:${resolvedOriginId}`;
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
+
+        if (!req.body?.workspaceId && !req.body?.forceNew) {
+          const inqLockRes = await client.query(
+            `SELECT * FROM workspaces
+             WHERE buyer_id = $1
+               AND seller_id = $2
+               AND (metadata->>'originType') = $3
+               AND (metadata->>'originId') = $4
+               AND (metadata->>'isInquiry') = 'true'
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1
+             FOR UPDATE`,
+            [buyerId, sellerId, resolvedOriginType, resolvedOriginId]
+          );
+          if (inqLockRes.rows.length > 0) {
+            const matchedWs = inqLockRes.rows[0];
+            const inqItem: any = {
+              id: matchedWs.workspace_id,
+              workspaceId: matchedWs.workspace_id,
+              title: matchedWs.title,
+              buyerId: matchedWs.buyer_id,
+              sellerId: matchedWs.seller_id,
+              amount: 0,
+              status: 'in_progress',
+              createdAt: matchedWs.created_at,
+              dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
+              isInquiry: true,
+              originType: resolvedOriginType,
+              originId: resolvedOriginId,
+              gigId: req.body?.gigId,
+              projectId: req.body?.projectId
+            };
+            return { replayed: true, result: enrichOrderWithServiceInfo(inqItem) };
+          }
+        }
+
+        const workspaceId = req.body?.workspaceId || ('ws_' + randomUUID().slice(0, 12));
+        const metadata = {
+          originType: resolvedOriginType,
+          originId: resolvedOriginId,
+          isInquiry: true,
+          status: 'active'
+        };
+
+        const insertWsRes = await client.query(
+          `INSERT INTO workspaces (workspace_id, buyer_id, seller_id, order_ids, title, created_at, updated_at, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (buyer_id, seller_id, (metadata->>'originType'), (metadata->>'originId')) WHERE (metadata->>'isInquiry') = 'true'
+           DO UPDATE SET updated_at = EXCLUDED.updated_at
+           RETURNING *`,
+          [
+            workspaceId,
+            buyerId,
+            sellerId,
+            JSON.stringify([]),
+            title,
+            today,
+            new Date().toISOString(),
+            JSON.stringify(metadata)
+          ]
+        );
+        const createdWs = insertWsRes.rows[0];
+        const inqItem: any = {
+          id: createdWs.workspace_id,
+          workspaceId: createdWs.workspace_id,
+          title: createdWs.title,
+          buyerId: createdWs.buyer_id,
+          sellerId: createdWs.seller_id,
+          amount: 0,
+          status: 'in_progress',
+          createdAt: createdWs.created_at,
+          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
+          isInquiry: true,
+          originType: resolvedOriginType,
+          originId: resolvedOriginId,
+          gigId: req.body?.gigId,
+          projectId: req.body?.projectId
+        };
+
+        if (scopedIdempKey) {
+          await recordIdempotencyResult(client, scopedIdempKey, 'createOrder', inqItem, orderPayloadFingerprint);
+        }
+
+        return { replayed: false, result: enrichOrderWithServiceInfo(inqItem) };
+      }
+
       let workspaceId: string;
       if (isGig) {
         workspaceId = 'ws_' + randomUUID().slice(0, 12);
@@ -424,8 +658,19 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
           `INSERT INTO workspaces (workspace_id, buyer_id, seller_id, order_ids, title, created_at, updated_at, metadata)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (workspace_id) DO UPDATE SET
-             order_ids = (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM (SELECT jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) AS elem UNION SELECT jsonb_array_elements_text(EXCLUDED.order_ids) AS elem) s)`,
-          [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: 'gig', originId: req.body?.gigId || id, status: 'active', activeOrderId: id })]
+             order_ids = (
+               SELECT COALESCE(jsonb_agg(elem ORDER BY min_ord), '[]'::jsonb)
+               FROM (
+                 SELECT elem, MIN(ord) AS min_ord
+                 FROM (
+                   SELECT elem, ord FROM jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) WITH ORDINALITY AS t1(elem, ord)
+                   UNION ALL
+                   SELECT elem, ord + 1000000 FROM jsonb_array_elements_text(EXCLUDED.order_ids) WITH ORDINALITY AS t2(elem, ord)
+                 ) combined
+                 GROUP BY elem
+               ) deduped
+             )`,
+           [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: 'gig', originId: req.body?.gigId || id, status: 'active', activeOrderId: id, isInquiry: false })]
         );
       } else if (req.body?.workspaceId) {
         const wsRes = await client.query('SELECT * FROM workspaces WHERE workspace_id = $1 FOR UPDATE', [req.body.workspaceId]);
@@ -440,12 +685,16 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
         await client.query(
           `UPDATE workspaces SET
              order_ids = (
-               SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
+               SELECT COALESCE(jsonb_agg(elem ORDER BY min_ord), '[]'::jsonb)
                FROM (
-                 SELECT jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) AS elem
-                 UNION
-                 SELECT jsonb_array_elements_text($1::jsonb) AS elem
-               ) s
+                 SELECT elem, MIN(ord) AS min_ord
+                 FROM (
+                   SELECT elem, ord FROM jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) WITH ORDINALITY AS t1(elem, ord)
+                   UNION ALL
+                   SELECT elem, ord + 1000000 FROM jsonb_array_elements_text($1::jsonb) WITH ORDINALITY AS t2(elem, ord)
+                 ) combined
+                 GROUP BY elem
+               ) deduped
              ),
              updated_at = $2,
              last_activity_at = $2,
@@ -455,58 +704,54 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
         );
       } else {
         workspaceId = 'ws_' + randomUUID().slice(0, 12);
+        const resolvedOriginType: 'gig' | 'project' | 'profile' = isProject
+          ? 'project'
+          : (req.body?.originType === 'profile' || (!isGig && !isProject) ? 'profile' : 'gig');
+        const resolvedOriginId = isProject
+          ? (req.body?.projectId || id)
+          : (resolvedOriginType === 'profile' ? sellerId : (req.body?.gigId || id));
+
         await client.query(
           `INSERT INTO workspaces (workspace_id, buyer_id, seller_id, order_ids, title, created_at, updated_at, metadata)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (workspace_id) DO UPDATE SET
-             order_ids = (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM (SELECT jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) AS elem UNION SELECT jsonb_array_elements_text(EXCLUDED.order_ids) AS elem) s)`,
-          [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: isProject ? 'project' : 'gig', originId: req.body?.projectId || id, status: 'active', activeOrderId: id })]
+             order_ids = (
+               SELECT COALESCE(jsonb_agg(elem ORDER BY min_ord), '[]'::jsonb)
+               FROM (
+                 SELECT elem, MIN(ord) AS min_ord
+                 FROM (
+                   SELECT elem, ord FROM jsonb_array_elements_text(COALESCE(workspaces.order_ids, '[]'::jsonb)) WITH ORDINALITY AS t1(elem, ord)
+                   UNION ALL
+                   SELECT elem, ord + 1000000 FROM jsonb_array_elements_text(EXCLUDED.order_ids) WITH ORDINALITY AS t2(elem, ord)
+                 ) combined
+                 GROUP BY elem
+               ) deduped
+             )`,
+          [workspaceId, buyerId, sellerId, JSON.stringify([id]), title, today, new Date().toISOString(), JSON.stringify({ originType: resolvedOriginType, originId: resolvedOriginId, status: 'active', activeOrderId: id, isInquiry: false })]
         );
       }
 
-      let newOrd: any;
-      if (isInquiry) {
-        newOrd = {
-          id,
-          workspaceId,
-          ...(orderType ? { orderType } : {}),
-          ...(gigOrderId ? { gigOrderId } : {}),
-          ...(projectOrderId ? { projectOrderId } : {}),
-          title,
-          buyerId,
-          sellerId,
-          amount: 0,
-          status: 'in_progress',
-          createdAt: today,
-          dueDate: new Date(Date.now() + 7 * 86400000).toISOString(),
-          gigId: req.body.gigId,
-          projectId: req.body.projectId,
-          ...(requirements ? { requirements } : {}),
-          selectedExtras: selectedExtrasDetails
-        };
-      } else {
-        newOrd = {
-          id,
-          workspaceId,
-          ...(orderType ? { orderType } : {}),
-          ...(gigOrderId ? { gigOrderId } : {}),
-          ...(projectOrderId ? { projectOrderId } : {}),
-          title,
-          buyerId,
-          sellerId,
-          amount: rawAmount,
-          status: 'payment_pending',
-          createdAt: today,
-          dueDate: serverDerivedDueDate,
-          escrowProtectionStartDate: today,
-          escrowProtectionEndDate: new Date(Date.now() + (siteSettings.getSettings().commission.escrowProtectionDays || DEFAULT_SITE_SETTINGS.commission.escrowProtectionDays) * 86400000).toISOString().split('T')[0],
-          gigId: req.body.gigId,
-          projectId: req.body.projectId,
-          feeBreakdown: await quoteOrderWithLiveSettings(rawAmount).catch(() => calculateOrderFees(rawAmount)),
-          ...(requirements ? { requirements } : {}),
-          selectedExtras: selectedExtrasDetails
-        };
-      }
+      const newOrd: Order = {
+        id,
+        workspaceId,
+        ...(orderType ? { orderType } : {}),
+        ...(gigOrderId ? { gigOrderId } : {}),
+        ...(projectOrderId ? { projectOrderId } : {}),
+        title,
+        buyerId,
+        sellerId,
+        amount: rawAmount,
+        status: 'payment_pending',
+        createdAt: today,
+        dueDate: serverDerivedDueDate,
+        escrowProtectionStartDate: today,
+        escrowProtectionEndDate: new Date(Date.now() + (siteSettings.getSettings().commission.escrowProtectionDays || DEFAULT_SITE_SETTINGS.commission.escrowProtectionDays) * 86400000).toISOString().split('T')[0],
+        gigId: req.body.gigId,
+        projectId: req.body.projectId,
+        feeBreakdown: await quoteOrderWithLiveSettings(rawAmount).catch(() => calculateOrderFees(rawAmount)),
+        ...(requirements ? { requirements } : {}),
+        selectedExtras: selectedExtrasDetails
+      };
 
       const serviceFee = newOrd.serviceFee ?? (newOrd.feeBreakdown as any)?.buyerFee ?? 0;
       const smallOrderFee = newOrd.smallOrderFee ?? (newOrd.feeBreakdown as any)?.smallOrderFee ?? 0;
@@ -610,7 +855,18 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
     }
 
     if (isInquiry) {
-      await emitSystemEvent(enriched.id, 'order_created', `Inquiry thread opened: ${title}.`);
+      try {
+        await emitSystemEvent(enriched.id, 'order_created', `Inquiry thread opened: ${title}.`);
+      } catch {}
+      createNotification({
+        userId: sellerId,
+        type: 'message',
+        title: 'New Inquiry',
+        message: `${buyer.name} opened an inquiry: "${title}".`,
+        link: `/workstream/${enriched.id}`,
+        dedupKey: `inq_${enriched.id}_${sellerId}`,
+        actorId: buyerId
+      });
     } else {
       await emitSystemEvent(enriched.id, 'order_created', `Order placed: ${title}. Payment is held in escrow until the work is approved.`);
       if (requirements) {
@@ -1147,7 +1403,9 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
           ...prevMeta,
           note: trimmedNotes || prevMeta.note,
           files: uploadedFiles.length > 0 ? uploadedFiles : prevMeta.files,
-          reference: trimmedReference || prevMeta.reference
+          reference: trimmedReference || prevMeta.reference,
+          originOrderId: prevMeta.originOrderId || order.id,
+          ...(order.workspaceId ? { workspaceId: order.workspaceId } : {})
         };
         await postgresStore.getPool().query(
           `UPDATE workstream_offers 
@@ -1159,6 +1417,8 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
           id: row.id,
           number: row.number,
           orderId: row.order_id,
+          originOrderId: updatedMeta.originOrderId,
+          workspaceId: order.workspaceId,
           kind: row.kind,
           title: invTitle,
           amount: invAmt,
@@ -1175,7 +1435,9 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
         const meta = {
           note: trimmedNotes || undefined,
           files: uploadedFiles.length > 0 ? uploadedFiles : undefined,
-          reference: trimmedReference || undefined
+          reference: trimmedReference || undefined,
+          originOrderId: order.id,
+          ...(order.workspaceId ? { workspaceId: order.workspaceId } : {})
         };
         await postgresStore.getPool().query(
           `INSERT INTO workstream_offers (id, order_id, kind, number, title, amount, status, created_by, created_at, metadata)
@@ -1186,6 +1448,8 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
           id: newInvId,
           number: invNum,
           orderId: order.id,
+          originOrderId: order.id,
+          workspaceId: order.workspaceId,
           kind: 'invoice',
           title: invTitle,
           amount: invAmt,
@@ -1792,7 +2056,20 @@ router.post('/orders/:id/cancel-request/respond', requireAuth, requireActiveStat
         }
 
         let refundedAmt = 0;
-        if (order.amount === 0 || /^inquiry:/i.test(order.title)) {
+        const orderMeta = typeof (order as any).metadata === 'string'
+          ? (() => { try { return JSON.parse((order as any).metadata); } catch { return {}; } })()
+          : ((order as any).metadata || {});
+        const isCustomOrder = Boolean((order as any).isCustomOrder || orderMeta.isCustomOrder || orderMeta.customOrderFromInquiry);
+        const escRow = await financialRepository.getEscrow(order.id, client);
+        const hasEscrowRecord = Boolean(escRow && (Number(escRow.remaining || 0) > 0 || escRow.status === 'held' || Number(escRow.amount || 0) > 0));
+
+        const isAuthoritativeInquiryOnly = Boolean(
+          ((order as any).isInquiry === true || orderMeta.isInquiry === true) &&
+          !isCustomOrder &&
+          !hasEscrowRecord
+        );
+
+        if (isAuthoritativeInquiryOnly) {
           order.status = 'cancelled';
           await client.query(
             "UPDATE orders SET status = 'cancelled', cancellation_type = 'inquiry_cancelled', cancellation_request = $1, cancellation_history = $2 WHERE id = $3",

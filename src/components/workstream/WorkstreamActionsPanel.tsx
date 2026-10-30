@@ -3,7 +3,7 @@ import {
   ShieldCheck, ArrowRight, FileText, Paperclip, AlertTriangle, 
   RotateCcw, CheckCircle2, PlusCircle, Settings, Send, Video, Star, Receipt, FileSignature
 } from 'lucide-react';
-import { WorkstreamItem, WorkstreamOffer } from './types';
+import { WorkstreamItem, WorkstreamOffer, isInquiryWorkstream } from './types';
 import { UserAccount } from '../../types';
 import { isOrderVeryLate } from '../../utils/deadlineUtils';
 
@@ -48,6 +48,7 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
   onAcceptCancelRequest,
   onOpenVeryLateCancelModal
 }) => {
+  const isCustomOrderStream = isInquiryWorkstream(order);
   const isBuyer = currentUser?.id === order.buyerId;
   const isSeller = currentUser?.id === order.sellerId;
   const isCompleted = order.status === 'completed';
@@ -57,26 +58,12 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
   const sellerReview = (order as any).sellerReview;
 
   return (
-    <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-xs space-y-4">
-      <h4 className="text-xs font-bold text-fiverr-dark uppercase tracking-wider flex items-center gap-2">
-        <Settings className="w-4 h-4 text-slate-400" />
-        <span>Workstream Actions</span>
+    <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4 forced-13-17">
+      <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-400 border-b border-slate-100 pb-3">
+        Workstream Actions
       </h4>
 
       <div className="space-y-2.5">
-        {/* IN-BROWSER MEETING BUTTON (WEB-RTC VIDEO CALL) */}
-        {onStartVideoCall && (
-          <button
-            onClick={onStartVideoCall}
-            className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl text-xs font-bold text-left flex items-center justify-between transition shadow-xs cursor-pointer border border-indigo-500/80"
-          >
-            <div className="flex items-center gap-2.5">
-              <Video className="w-4 h-4 text-emerald-400 animate-pulse" />
-              <span>Start Video Call</span>
-            </div>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
-        )}
 
         {/* BUYER ACTIONS */}
         {isBuyer && activeEscrow > 0 && isDelivered && (
@@ -86,23 +73,23 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
           >
             <div className="flex items-center gap-2.5">
               <ShieldCheck className="w-4 h-4" />
-              <span>{pendingInvoice ? `Pay Invoice (${pendingInvoice.number})` : 'Approve & Release Escrow'}</span>
+              <span>{pendingInvoice ? (isCustomOrderStream ? `Pay Custom Order Invoice (${pendingInvoice.number})` : `Pay Invoice (${pendingInvoice.number})`) : (isCustomOrderStream ? 'Approve & Release Custom Order Escrow' : 'Approve & Release Escrow')}</span>
             </div>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         )}
 
         {isBuyer && activeEscrow > 0 && !isDelivered && (order.status === 'in_progress' || order.status === 'funded_in_escrow') && (
-          <div className="p-3 bg-blue-50/70 border border-blue-200 rounded-2xl text-[11px] text-blue-800 flex items-center gap-2">
+          <div className="text-xs text-blue-800 flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0" />
-            <span>Escrow funded (${activeEscrow.toLocaleString()}). Awaiting seller delivery & invoice.</span>
+            <span>{isCustomOrderStream ? `Escrow funded ($${activeEscrow.toLocaleString()}). Awaiting seller delivery & Custom Order Invoice.` : `Escrow funded ($${activeEscrow.toLocaleString()}). Awaiting seller delivery & invoice.`}</span>
           </div>
         )}
 
         {isBuyer && !isCompleted && order.status === 'revision' && (
-          <div className="p-3 bg-purple-50/70 border border-purple-200 rounded-2xl text-[11px] text-purple-800 flex items-center gap-2">
+          <div className="text-xs text-purple-800 flex items-center gap-2">
             <RotateCcw className="w-4 h-4 text-purple-600 shrink-0" />
-            <span>Revision requested. Seller is updating deliverables & invoice.</span>
+            <span>{isCustomOrderStream ? 'Revision requested. Seller is updating deliverables & Custom Order Invoice.' : 'Revision requested. Seller is updating deliverables & invoice.'}</span>
           </div>
         )}
 
@@ -136,26 +123,26 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
 
         {/* BUYER REVIEW SUMMARY */}
         {order.review && (
-          <div className="p-3.5 bg-amber-50/80 border border-amber-200 rounded-2xl text-xs space-y-2 animate-in fade-in">
+          <div className="space-y-2 animate-in fade-in">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1 font-bold text-amber-900">
                 <Star className="w-4 h-4 fill-amber-400 text-amber-400" />
                 <span>{order.review.isCancelledOrder ? 'Post-Cancellation Review' : 'Buyer Review'}</span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="font-mono font-bold text-amber-800 text-[11px] bg-amber-100/70 px-2 py-0.5 rounded-full">
+                <span className="font-mono font-bold text-amber-800 text-xs bg-amber-100/70 px-2 py-0.5 rounded-full">
                   {order.review.rating}.0 / 5.0
                 </span>
                 {isBuyer && (
-                  <button onClick={onOpenReviewModal} className="text-[10px] text-amber-800 underline font-semibold hover:text-amber-950 cursor-pointer">
+                  <button onClick={onOpenReviewModal} className="text-xs text-amber-800 underline font-semibold hover:text-amber-950 cursor-pointer">
                     Edit
                   </button>
                 )}
               </div>
             </div>
-            <p className="text-[11px] text-amber-800 italic line-clamp-3">"{order.review.comment}"</p>
+            <p className="text-xs text-amber-800 italic line-clamp-3">"{order.review.comment}"</p>
             {order.review.reply && (
-              <div className="mt-2 pt-2 border-t border-amber-200 text-[11px] text-amber-900">
+              <div className="mt-2 pt-2 border-t border-amber-200 text-xs text-amber-900">
                 <span className="font-bold">Seller Public Response: </span>
                 <span className="italic">"{order.review.reply.text}"</span>
               </div>
@@ -165,24 +152,24 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
 
         {/* SELLER REVIEW OF BUYER SUMMARY */}
         {sellerReview && (
-          <div className="p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-2xl text-xs space-y-1.5 animate-in fade-in">
+          <div className="space-y-1.5 animate-in fade-in">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1 font-bold text-emerald-900">
                 <Star className="w-3.5 h-3.5 fill-emerald-500 text-emerald-500" />
                 <span>Seller Review of Buyer</span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="font-mono font-bold text-emerald-800 text-[11px] bg-emerald-100/70 px-2 py-0.5 rounded-full">
+                <span className="font-mono font-bold text-emerald-800 text-xs bg-emerald-100/70 px-2 py-0.5 rounded-full">
                   {sellerReview.rating}.0 / 5.0
                 </span>
                 {isSeller && (
-                  <button onClick={onOpenReviewModal} className="text-[10px] text-emerald-800 underline font-semibold hover:text-emerald-950 cursor-pointer">
+                  <button onClick={onOpenReviewModal} className="text-xs text-emerald-800 underline font-semibold hover:text-emerald-950 cursor-pointer">
                     Edit
                   </button>
                 )}
               </div>
             </div>
-            <p className="text-[11px] text-emerald-800 italic line-clamp-3">"{sellerReview.comment}"</p>
+            <p className="text-xs text-emerald-800 italic line-clamp-3">"{sellerReview.comment}"</p>
           </div>
         )}
 
@@ -208,11 +195,17 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
             <div className="flex items-center gap-2.5">
               <Receipt className="w-4 h-4 text-emerald-400" />
               <span>
-                {order.status === 'revision'
-                  ? 'Submit Revised Invoice & Work'
-                  : pendingInvoice
-                    ? 'Update Delivery & Invoice'
-                    : 'Raise Invoice & Deliver Work'}
+                {isCustomOrderStream
+                  ? (order.status === 'revision'
+                      ? 'Submit Revised Custom Order Invoice & Work'
+                      : pendingInvoice
+                        ? 'Update Custom Order Invoice & Delivery'
+                        : 'Raise Custom Order Invoice & Deliver Work')
+                  : (order.status === 'revision'
+                      ? 'Submit Revised Invoice & Work'
+                      : pendingInvoice
+                        ? 'Update Delivery & Invoice'
+                        : 'Raise Invoice & Deliver Work')}
               </span>
             </div>
             <ArrowRight className="w-3.5 h-3.5" />
@@ -220,33 +213,37 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
         )}
 
         {/* PEOPLEPERHOUR GIG PROPOSAL LOCK / UNLOCK INDICATOR */}
-        {isSeller && order.type === 'gig' && !invoiceAlreadyPaid && (
-          <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-2xl text-[11px] text-amber-800 leading-relaxed">
+        {isSeller && order.type === 'gig' && !invoiceAlreadyPaid && !isCustomOrderStream && (
+          <div className="text-xs text-amber-800 leading-relaxed forced-13-17">
             <strong>Pre-Funded Gig WorkStream:</strong> New proposals are locked while the initial Gig escrow is active. Deliver the work and get your first invoice paid to unlock follow-on proposals.
           </div>
         )}
 
         {isSeller && invoiceAlreadyPaid && canSendProposal && (
-          <div className="p-3 bg-emerald-50/80 border border-emerald-200 rounded-2xl text-xs font-medium text-emerald-800 flex items-center gap-2">
+          <div className="text-xs font-medium text-emerald-800 flex items-center gap-2">
             <FileSignature className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>
-              <strong>Invoice Paid!</strong> WorkStream remains open for chat and you can now send a <strong>New Proposal</strong> in the composer below for follow-on work.
+              {isCustomOrderStream ? (
+                <><strong>Custom Order Completed!</strong> WorkStream remains open for chat and you can now send a <strong>Custom Order Proposal</strong> in the composer below for follow-on work.</>
+              ) : (
+                <><strong>Invoice Paid!</strong> WorkStream remains open for chat and you can now send a <strong>New Proposal</strong> in the composer below for follow-on work.</>
+              )}
             </span>
           </div>
         )}
 
         {/* COMPLETED BANNER */}
         {isCompleted && activeEscrow <= 0 && (
-          <div className="p-3 bg-emerald-50 rounded-2xl border border-emerald-200 text-emerald-800 text-xs font-medium flex items-center gap-2">
+          <div className="text-emerald-800 text-xs font-medium flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>Invoice paid & funds credited to seller wallet. Chat remains open.</span>
+            <span>{isCustomOrderStream ? 'Custom Order Completed • Invoice paid & funds credited to seller wallet. Chat remains open.' : 'Invoice paid & funds credited to seller wallet. Chat remains open.'}</span>
           </div>
         )}
 
         {/* GIG CANCELLATION ACTIONS */}
-        {((order.orderType === 'gig' || (order as any).gigOrderId) && (order.status as string) !== 'completed' && (order.status as string) !== 'cancelled') && (
+        {((order?.orderType === 'gig' || (order as any)?.gigOrderId) && (order?.status as string) !== 'completed' && (order?.status as string) !== 'cancelled') && (
           <div className="space-y-2 pt-2 border-t border-slate-100">
-            {((order.orderType === 'gig' || (order as any).gigOrderId) && isBuyer && (order.status as string) !== 'completed' && (order.status as string) !== 'cancelled' && isOrderVeryLate(order)) && onOpenVeryLateCancelModal && (
+            {((order?.orderType === 'gig' || (order as any)?.gigOrderId) && isBuyer && (order?.status as string) !== 'completed' && (order?.status as string) !== 'cancelled' && isOrderVeryLate(order)) && onOpenVeryLateCancelModal && (
               <button
                 onClick={onOpenVeryLateCancelModal}
                 className="w-full py-2.5 px-4 bg-rose-600 hover:bg-rose-500 text-white rounded-2xl text-xs font-bold text-left flex items-center justify-between transition shadow-xs cursor-pointer"
@@ -273,28 +270,28 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
             )}
 
             {((order as any).cancellationRequest && (order as any).cancellationRequest.status === 'pending') && (
-              <div className="p-3.5 bg-rose-50/80 border border-rose-200 rounded-2xl text-xs space-y-2">
+              <div className="space-y-2">
                 <div className="flex items-center justify-between font-bold text-rose-900">
                   <span className="flex items-center gap-1.5">
                     <AlertTriangle className="w-4 h-4 text-rose-600" />
                     <span>Cancellation Requested</span>
                   </span>
-                  <span className="text-[10px] font-mono bg-rose-100 px-2 py-0.5 rounded-full text-rose-800">
+                  <span className="text-xs font-mono font-semibold bg-rose-100 px-2 py-0.5 rounded-full text-rose-800">
                     48h response window
                   </span>
                 </div>
-                <p className="text-[11px] text-rose-800">
+                <p className="text-xs text-rose-800">
                   Reason: <strong>{(order as any).cancellationRequest.reason}</strong>
                   {(order as any).cancellationRequest.details && ` — "${(order as any).cancellationRequest.details}"`}
                 </p>
                 {currentUser?.id === (order as any).cancellationRequest.requesterId ? (
-                  <p className="text-[11px] text-rose-700 italic">Awaiting response from other party...</p>
+                  <p className="text-xs text-rose-700 italic">Awaiting response from other party...</p>
                 ) : (
                   <div className="flex items-center gap-2 pt-1">
                     {onAcceptCancelRequest && (
                       <button
                         onClick={onAcceptCancelRequest}
-                        className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-center text-[11px] cursor-pointer shadow-xs transition"
+                        className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-center text-xs cursor-pointer shadow-xs transition"
                       >
                         Accept & Refund
                       </button>
@@ -302,7 +299,7 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
                     {onOpenRejectCancelModal && (
                       <button
                         onClick={onOpenRejectCancelModal}
-                        className="flex-1 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold rounded-xl text-center text-[11px] cursor-pointer transition"
+                        className="flex-1 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold rounded-xl text-center text-xs cursor-pointer transition"
                       >
                         Reject
                       </button>
@@ -342,7 +339,7 @@ export const WorkstreamActionsPanel: React.FC<WorkstreamActionsPanelProps> = ({
         {onDisputeAssistance && (
           <button
             onClick={onDisputeAssistance}
-            className="w-full py-2 px-3 text-slate-400 hover:text-red-600 rounded-xl text-[11px] font-medium text-left flex items-center gap-2 transition cursor-pointer mt-1"
+            className="w-full py-2 px-3 text-slate-400 hover:text-red-600 rounded-xl text-xs font-medium text-left flex items-center gap-2 transition cursor-pointer mt-1"
           >
             <AlertTriangle className="w-3.5 h-3.5" />
             <span>Escrow Dispute Assistance</span>

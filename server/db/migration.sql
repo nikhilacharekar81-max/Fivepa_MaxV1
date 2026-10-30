@@ -173,7 +173,8 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()
 
 CREATE TABLE IF NOT EXISTS messages (
   id VARCHAR(64) PRIMARY KEY,
-  order_id VARCHAR(64) NOT NULL,
+  order_id VARCHAR(64),
+  workspace_id VARCHAR(64),
   sender_id VARCHAR(64) NOT NULL,
   sender_name VARCHAR(255) NOT NULL,
   text TEXT NOT NULL,
@@ -182,6 +183,9 @@ CREATE TABLE IF NOT EXISTS messages (
   file_info JSONB,
   metadata JSONB
 );
+
+ALTER TABLE messages ALTER COLUMN order_id DROP NOT NULL;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS workspace_id VARCHAR(64);
 
 CREATE TABLE IF NOT EXISTS reviews (
   id VARCHAR(64) PRIMARY KEY,
@@ -239,6 +243,8 @@ CREATE TABLE IF NOT EXISTS workstream_offers (
   resolved_by VARCHAR(64),
   metadata JSONB
 );
+
+ALTER TABLE workstream_offers ALTER COLUMN order_id DROP NOT NULL;
 
 CREATE TABLE IF NOT EXISTS custom_invoices (
   id VARCHAR(64) PRIMARY KEY,
@@ -946,8 +952,235 @@ CREATE INDEX IF NOT EXISTS idx_workspaces_seller ON workspaces (seller_id);
 CREATE INDEX IF NOT EXISTS idx_workspaces_parties ON workspaces (buyer_id, seller_id);
 CREATE INDEX IF NOT EXISTS idx_workspaces_updated ON workspaces (updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_workspace_id ON orders (workspace_id);
+CREATE INDEX IF NOT EXISTS idx_orders_workspace_updated ON orders (workspace_id, updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_buyer_seller ON orders (buyer_id, seller_id);
 CREATE INDEX IF NOT EXISTS idx_workstream_offers_workspace ON workstream_offers (workspace_id);
+CREATE INDEX IF NOT EXISTS idx_uploads_workspace_id ON uploads (workspace_id);
+CREATE INDEX IF NOT EXISTS idx_uploads_order_id ON uploads (order_id);
+DO $$
+DECLARE
+  _dup RECORD;
+  _conflict_count INT;
+  _unresolvable_diag TEXT := '';
+BEGIN
+  -- Inspect for conflicting existing records before enforcing uniqueness
+  SELECT COUNT(*) INTO _conflict_count
+  FROM (
+    SELECT buyer_id, seller_id, (metadata->>'originType') AS o_type, (metadata->>'originId') AS o_id
+    FROM workspaces
+    WHERE (metadata->>'isInquiry') = 'true'
+    GROUP BY buyer_id, seller_id, (metadata->>'originType'), (metadata->>'originId')
+    HAVING COUNT(*) > 1
+  ) dups;
 
+  IF _conflict_count > 0 THEN
+    FOR _dup IN (
+      SELECT buyer_id, seller_id, (metadata->>'originType') AS o_type, (metadata->>'originId') AS o_id,
+             array_agg(workspace_id ORDER BY updated_at DESC, created_at DESC) AS ws_ids,
+             COUNT(*) AS cnt
+      FROM workspaces
+      WHERE (metadata->>'isInquiry') = 'true'
+      GROUP BY buyer_id, seller_id, (metadata->>'originType'), (metadata->>'originId')
+      HAVING COUNT(*) > 1
+    ) LOOP
+      DECLARE
+        _primary_ws_id TEXT := _dup.ws_ids[1];
+        _other_ws_id TEXT;
+        _associated_order_ids TEXT[];
+        _recorded_order_count INT := 0;
+        _is_order_ids_malformed BOOLEAN := FALSE;
+        _msg_count INT := 0;
+        _ord_count INT := 0;
+        _offer_count INT := 0;
+        _upload_count INT := 0;
+        _escrow_count INT := 0;
+        _invoice_count INT := 0;
+        _dispute_count INT := 0;
+        _refund_count INT := 0;
+        _review_count INT := 0;
+        _ledger_entry_count INT := 0;
+        _earnings_clearing_count INT := 0;
+        _clearing_earnings_count INT := 0;
+        _checkout_session_count INT := 0;
+        _has_unresolvable BOOLEAN := FALSE;
+        _conflict_reasons TEXT := '';
+      BEGIN
+        FOR i IN 2..array_length(_dup.ws_ids, 1) LOOP
+          _other_ws_id := _dup.ws_ids[i];
+          _conflict_reasons := '';
+
+          -- Check if order_ids is non-null and not a JSON array
+          SELECT 
+            CASE 
+              WHEN order_ids IS NULL THEN FALSE
+              WHEN jsonb_typeof(order_ids) = 'array' THEN FALSE
+              ELSE TRUE
+            END INTO _is_order_ids_malformed
+          FROM workspaces
+          WHERE workspace_id = _other_ws_id;
+
+          -- 1. Identify all direct and indirect Order associations for this workspace
+          -- Accounts for:
+          -- a) orders.workspace_id = _other_ws_id
+          -- b) Order IDs recorded in workspaces.order_ids (only when order_ids is a valid JSON array)
+          -- c) Order ID stored in workspaces.metadata->>'activeOrderId'
+          SELECT ARRAY(
+            SELECT DISTINCT ord_id
+            FROM (
+              SELECT id AS ord_id FROM orders WHERE workspace_id = _other_ws_id
+              UNION
+              SELECT elem AS ord_id
+              FROM workspaces w,
+                   jsonb_array_elements_text(w.order_ids) AS elem
+              WHERE w.workspace_id = _other_ws_id 
+                AND w.order_ids IS NOT NULL 
+                AND jsonb_typeof(w.order_ids) = 'array'
+                AND elem IS NOT NULL AND elem <> ''
+              UNION
+              SELECT (metadata->>'activeOrderId') AS ord_id
+              FROM workspaces
+              WHERE workspace_id = _other_ws_id 
+                AND (metadata->>'activeOrderId') IS NOT NULL 
+                AND (metadata->>'activeOrderId') <> ''
+            ) sub
+          ) INTO _associated_order_ids;
+
+          -- Check recorded order IDs count in workspaces.order_ids JSON array
+          SELECT COALESCE(
+            CASE 
+              WHEN order_ids IS NOT NULL AND jsonb_typeof(order_ids) = 'array' THEN jsonb_array_length(order_ids)
+              ELSE 0
+            END, 0
+          ) INTO _recorded_order_count
+          FROM workspaces
+          WHERE workspace_id = _other_ws_id;
+
+          -- 2. Count associated orders
+          SELECT COUNT(*) INTO _ord_count
+          FROM orders
+          WHERE workspace_id = _other_ws_id
+             OR (array_length(_associated_order_ids, 1) > 0 AND id = ANY(_associated_order_ids));
+
+          -- 3. Count messages associated directly or indirectly through associated orders
+          SELECT COUNT(*) INTO _msg_count
+          FROM messages
+          WHERE workspace_id = _other_ws_id
+             OR metadata->>'workspaceId' = _other_ws_id
+             OR order_id = _other_ws_id
+             OR (array_length(_associated_order_ids, 1) > 0 AND (
+                  order_id = ANY(_associated_order_ids)
+                  OR metadata->>'orderId' = ANY(_associated_order_ids)
+                  OR metadata->>'order_id' = ANY(_associated_order_ids)
+                ));
+
+          -- 4. Count workstream offers associated directly or indirectly through associated orders
+          SELECT COUNT(*) INTO _offer_count
+          FROM workstream_offers
+          WHERE workspace_id = _other_ws_id
+             OR metadata->>'workspaceId' = _other_ws_id
+             OR order_id = _other_ws_id
+             OR (array_length(_associated_order_ids, 1) > 0 AND (
+                  order_id = ANY(_associated_order_ids)
+                  OR metadata->>'originOrderId' = ANY(_associated_order_ids)
+                  OR metadata->>'resultingOrderId' = ANY(_associated_order_ids)
+                  OR metadata->>'orderId' = ANY(_associated_order_ids)
+                ));
+
+          -- 5. Count uploads associated directly or indirectly through associated orders
+          SELECT COUNT(*) INTO _upload_count
+          FROM uploads
+          WHERE workspace_id = _other_ws_id
+             OR order_id = _other_ws_id
+             OR (array_length(_associated_order_ids, 1) > 0 AND order_id = ANY(_associated_order_ids));
+
+          -- 6. Count escrows, custom invoices, disputes, refunds, reviews, ledger_entries, earnings_clearing, clearing_earnings, and payment_checkout_sessions
+          IF array_length(_associated_order_ids, 1) > 0 THEN
+            SELECT COUNT(*) INTO _escrow_count FROM escrows WHERE order_id = ANY(_associated_order_ids);
+            SELECT COUNT(*) INTO _invoice_count FROM custom_invoices WHERE related_order_id = ANY(_associated_order_ids);
+            SELECT COUNT(*) INTO _dispute_count FROM disputes WHERE order_id = ANY(_associated_order_ids);
+            SELECT COUNT(*) INTO _refund_count FROM refunds WHERE order_id = ANY(_associated_order_ids);
+            SELECT COUNT(*) INTO _review_count FROM reviews WHERE order_id = ANY(_associated_order_ids);
+            SELECT COUNT(*) INTO _ledger_entry_count FROM ledger_entries WHERE order_id = ANY(_associated_order_ids);
+            SELECT COUNT(*) INTO _earnings_clearing_count FROM earnings_clearing WHERE order_id = ANY(_associated_order_ids);
+            SELECT COUNT(*) INTO _clearing_earnings_count FROM clearing_earnings WHERE order_id = ANY(_associated_order_ids);
+            SELECT COUNT(*) INTO _checkout_session_count FROM payment_checkout_sessions WHERE order_id = ANY(_associated_order_ids);
+          ELSE
+            _escrow_count := 0;
+            _invoice_count := 0;
+            _dispute_count := 0;
+            _refund_count := 0;
+            _review_count := 0;
+            _ledger_entry_count := 0;
+            _earnings_clearing_count := 0;
+            _clearing_earnings_count := 0;
+            _checkout_session_count := 0;
+          END IF;
+
+          -- Non-destructive reconciliation ONLY when the duplicate workspace is proven to have NO direct or indirect historical associations AND order_ids is not malformed
+          IF NOT _is_order_ids_malformed 
+             AND _recorded_order_count = 0 
+             AND _ord_count = 0 
+             AND _msg_count = 0 
+             AND _offer_count = 0 
+             AND _upload_count = 0 
+             AND _escrow_count = 0 
+             AND _invoice_count = 0 
+             AND _dispute_count = 0 
+             AND _refund_count = 0 
+             AND _review_count = 0 
+             AND _ledger_entry_count = 0
+             AND _earnings_clearing_count = 0
+             AND _clearing_earnings_count = 0
+             AND _checkout_session_count = 0
+             AND COALESCE(array_length(_associated_order_ids, 1), 0) = 0 THEN
+            UPDATE workspaces
+            SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{isInquiry}', '"false"'::jsonb, true)
+            WHERE workspace_id = _other_ws_id;
+          ELSE
+            _has_unresolvable := TRUE;
+            _conflict_reasons := format(
+              'orders=%s, recorded_order_ids=%s, malformed_order_ids=%s, msgs=%s, offers=%s, uploads=%s, escrows=%s, invoices=%s, disputes=%s, ledger_entries=%s, earnings_clearing=%s, clearing_earnings=%s, checkout_sessions=%s',
+              _ord_count, _recorded_order_count, _is_order_ids_malformed, _msg_count, _offer_count, _upload_count, _escrow_count, _invoice_count, _dispute_count,
+              _ledger_entry_count, _earnings_clearing_count, _clearing_earnings_count, _checkout_session_count
+            );
+            _unresolvable_diag := _unresolvable_diag || format(
+              ' [Workspace %s: %s (buyer: %s, seller: %s, originType: %s, originId: %s)]',
+              _other_ws_id, _conflict_reasons, _dup.buyer_id, _dup.seller_id, _dup.o_type, _dup.o_id
+            );
+          END IF;
+        END LOOP;
+
+        IF _has_unresolvable THEN
+          _unresolvable_diag := _unresolvable_diag || format(
+            ' [Duplicate group for Buyer: %s, Seller: %s, OriginType: %s, OriginId: %s, Workspaces: %s]',
+            _dup.buyer_id, _dup.seller_id, _dup.o_type, _dup.o_id, array_to_string(_dup.ws_ids, ', ')
+          );
+        END IF;
+      END;
+    END LOOP;
+
+    IF _unresolvable_diag <> '' THEN
+      RAISE EXCEPTION 'Cannot safely enforce idx_workspaces_inquiry_unique: Duplicate active inquiry workspaces with existing direct or indirect historical associations exist:%', _unresolvable_diag;
+    END IF;
+  END IF;
+
+  EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_inquiry_unique ON workspaces (buyer_id, seller_id, ((metadata->>''originType'')), ((metadata->>''originId''))) WHERE (metadata->>''isInquiry'') = ''true''';
+END $$;
+
+-- Ensure no clamping trigger exists so check constraints enforce strict invariants
+DROP TRIGGER IF EXISTS trg_clamp_wallet_fields_before ON wallets;
+DROP FUNCTION IF EXISTS trg_clamp_wallet_fields();
+
+-- Self-heal any existing wallets where funds_on_hold is out of sync with active escrows
+UPDATE wallets w
+SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
+FROM (
+  SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
+  FROM wallets w2
+  LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
+  GROUP BY w2.user_id
+) e
+WHERE w.user_id = e.user_id
+  AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00);
 
 

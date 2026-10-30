@@ -13,12 +13,12 @@ export function Footer({ navigate }: FooterProps) {
         {/* Col 1: Brand */}
         <div>
           <a href="/gigs" onClick={(e) => navigate('/gigs', e)} className="flex items-center gap-2.5 mb-4">
-            <div className="w-8 h-8 rounded-xl bg-slate-900 text-emerald-400 flex items-center justify-center font-bold text-base">
+            <div className="w-8 h-8 rounded-xl bg-slate-900 text-emerald-400 flex items-center justify-center font-extrabold text-base ring-1 ring-slate-800 shadow-xs">
               W
             </div>
-            <span className="text-base font-semibold tracking-tight text-fiverr-dark">WorkPerHour</span>
+            <span className="text-base font-extrabold tracking-tight text-slate-900">WorkPerHour</span>
           </a>
-          <p className="text-sm text-fiverr-muted leading-relaxed mb-6">
+          <p className="text-sm text-slate-500 leading-relaxed mb-6 font-normal">
             WorkPerHour is a secure freelance marketplace with 100% Escrow payment protection, real-time Workstream collaboration, and Gemini AI proposal generation.
           </p>
           <div className="flex items-center gap-2 text-sm text-emerald-600 font-semibold">

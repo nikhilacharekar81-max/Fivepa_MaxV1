@@ -158,9 +158,9 @@ export const HeaderCategoriesNav: React.FC<HeaderCategoriesNavProps> = ({
 
 
   return (
-    <nav className="relative z-40 bg-white border-b border-slate-200/80 shadow-2xs text-xs">
+    <nav className="relative z-40 bg-white/90 border-b border-slate-200/80 backdrop-blur-xs shadow-2xs text-xs">
       <div className="max-w-7xl mx-auto px-4 sm:px-6">
-        <div className="flex items-center justify-between gap-1 overflow-x-auto lg:overflow-visible py-2.5 scrollbar-none">
+        <div className="flex items-center justify-between gap-1 overflow-x-auto lg:overflow-visible py-2 scrollbar-none">
           {PPH_CATEGORIES.map((cat, idx) => {
             const hasDropdown = !DISABLED_DROPDOWN_CATEGORIES.has(cat.name) && cat.subcategories.length > 0;
             const isOpen = hasDropdown && activeCategory === cat.slug;
@@ -182,15 +182,15 @@ export const HeaderCategoriesNav: React.FC<HeaderCategoriesNavProps> = ({
                       navigate(`/categories/${cat.slug}`, e);
                     }
                   }}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all text-xs font-medium whitespace-nowrap cursor-pointer ${
+                  className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg transition-all text-xs sm:text-sm font-semibold whitespace-nowrap cursor-pointer ${
                     isOpen || isCurrent
-                      ? 'text-emerald-700 font-semibold bg-emerald-50/80 shadow-2xs'
-                      : 'text-slate-700 hover:text-slate-950 hover:bg-slate-100/80'
+                      ? 'text-emerald-700 bg-emerald-50/90 ring-1 ring-emerald-600/20'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
                   }`}
                 >
                   <span>{cat.name}</span>
                   {hasDropdown && (
-                    <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform duration-200 ${isOpen ? 'rotate-180 text-emerald-600 font-bold' : ''}`} />
+                    <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform duration-200 ${isOpen ? 'rotate-180 text-emerald-600' : ''}`} />
                   )}
                 </button>
 
@@ -220,7 +220,7 @@ export const HeaderCategoriesNav: React.FC<HeaderCategoriesNavProps> = ({
                             setActiveCategory(null);
                             navigate(`/categories/${cat.slug}`, e);
                           }}
-                          className="w-full text-left px-3 py-2 rounded-xl text-emerald-700 hover:bg-emerald-50 font-semibold text-xs transition-colors flex items-center justify-between cursor-pointer mb-2 border border-emerald-100/80 bg-emerald-50/40"
+                          className="w-full text-left px-3 py-2 rounded-xl text-emerald-700 hover:bg-emerald-50 font-semibold text-sm transition-colors flex items-center justify-between cursor-pointer mb-2 border border-emerald-100/80 bg-emerald-50/40"
                         >
                           <span>Explore All {cat.name}</span>
                           <ArrowRight className="w-3.5 h-3.5" />
@@ -235,7 +235,7 @@ export const HeaderCategoriesNav: React.FC<HeaderCategoriesNavProps> = ({
                               setActiveCategory(null);
                               navigate(`/categories/${sub.slug}`, e);
                             }}
-                            className="w-full text-left px-3 py-1.5 rounded-lg text-slate-700 hover:text-slate-950 hover:bg-slate-100 font-medium text-[12.5px] transition-colors cursor-pointer flex items-center justify-between group"
+                            className="w-full text-left px-3 py-1.5 rounded-lg text-slate-700 hover:text-slate-950 hover:bg-slate-100 font-medium text-sm transition-colors cursor-pointer flex items-center justify-between group"
                           >
                             <span>{sub.name}</span>
                             <span className="text-slate-300 group-hover:text-emerald-600 text-xs transition-colors">→</span>

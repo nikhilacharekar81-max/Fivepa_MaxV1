@@ -82,6 +82,14 @@ export {
 
 dotenv.config();
 
+function safeDecodeURIComponent(str: string): string {
+  try {
+    return decodeURIComponent(str);
+  } catch {
+    return str;
+  }
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) {
@@ -159,6 +167,17 @@ app.use('/', rootRouter);
 // Global Error Handler
 app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const status = Number(err?.status || err?.statusCode || 500);
+  const isUriError = err instanceof URIError || err?.name === 'URIError' || (err?.message && String(err.message).includes('URI'));
+
+  if (isUriError && !req.path?.startsWith('/api') && !req.originalUrl?.startsWith('/api')) {
+    const clientDistHtml = path.resolve(__dirname, 'dist/client/index.html');
+    const devHtml = path.resolve(__dirname, 'index.html');
+    const htmlPath = fs.existsSync(clientDistHtml) ? clientDistHtml : devHtml;
+    if (fs.existsSync(htmlPath)) {
+      return res.status(200).setHeader('Content-Type', 'text/html').sendFile(htmlPath);
+    }
+  }
+
   console.error(`[Error] ${req.method} ${req.path}:`, err);
   if (process.env.NODE_ENV === 'production' && status >= 500) {
     return res.status(500).json({ error: 'Internal server error' });
@@ -199,133 +218,141 @@ if (process.env.NODE_ENV !== 'test' && !server.listening) {
     await hydrateStoreFromPostgres();
     runBackgroundJobs();
   } catch (err) {
-    console.error('[FATAL] Postgres hydration failed; refusing to start:', err);
-    process.exit(1);
+    if (IS_PROD) {
+      console.error('[FATAL] Postgres hydration failed; refusing to start:', err);
+      process.exit(1);
+    } else {
+      console.warn('[DEV] Postgres hydration notice (continuing in dev mode):', err);
+    }
   }
 
-  await setupSSR(app, IS_PROD, __dirname, async (pathname?: string) => {
-    try {
-      const pool = postgresStore.getPool();
-      const pathParts = (pathname || '').split('/').filter(Boolean).map(p => decodeURIComponent(p));
-      const candidateTokens = Array.from(new Set(pathParts.filter(p => p.length > 0 && p.length <= 120)));
+  try {
+    await setupSSR(app, IS_PROD, __dirname, async (pathname?: string) => {
+      try {
+        const pool = postgresStore.getPool();
+        const pathParts = (pathname || '').split('/').filter(Boolean).map(p => safeDecodeURIComponent(p));
+        const candidateTokens = Array.from(new Set(pathParts.filter(p => p.length > 0 && p.length <= 120)));
 
-      const [gigsRes, usersRes, projectsRes] = await Promise.all([
-        candidateTokens.length > 0
-          ? pool.query(
-              `SELECT * FROM gigs
-               WHERE status IN ('active', 'published')
-                 AND (id = ANY($1::text[]) OR LOWER(COALESCE(slug, '')) = ANY($2::text[]))
-               UNION
-               (SELECT * FROM gigs WHERE status IN ('active', 'published') ORDER BY created_at DESC NULLS LAST LIMIT 50)`,
-              [candidateTokens, candidateTokens.map(t => t.toLowerCase())]
-            )
-          : pool.query("SELECT * FROM gigs WHERE status IN ('active', 'published') ORDER BY created_at DESC NULLS LAST LIMIT 50"),
-        candidateTokens.length > 0
-          ? pool.query(
-              `SELECT id, name, username, role, avatar, title, rating, reviews_count, hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, mobile_verified, created_at, is_flagged, is_available_now
-               FROM users
-               WHERE status = 'active'
-                 AND (id = ANY($1::text[]) OR LOWER(COALESCE(username, '')) = ANY($2::text[]))
-               UNION
-               (SELECT id, name, username, role, avatar, title, rating, reviews_count, hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, mobile_verified, created_at, is_flagged, is_available_now
-                FROM users WHERE status = 'active' ORDER BY created_at DESC NULLS LAST LIMIT 50)`,
-              [candidateTokens, candidateTokens.map(t => t.toLowerCase())]
-            )
-          : pool.query(
-              `SELECT id, name, username, role, avatar, title, rating, reviews_count, hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, mobile_verified, created_at, is_flagged, is_available_now
-               FROM users WHERE status = 'active' ORDER BY created_at DESC NULLS LAST LIMIT 50`
-            ),
-        candidateTokens.length > 0
-          ? pool.query(
-              `SELECT * FROM projects
-               WHERE status = 'open'
-                 AND (id = ANY($1::text[]) OR LOWER(COALESCE(slug, '')) = ANY($2::text[]))
-               UNION
-               (SELECT * FROM projects WHERE status = 'open' ORDER BY created_at DESC NULLS LAST LIMIT 50)`,
-              [candidateTokens, candidateTokens.map(t => t.toLowerCase())]
-            )
-          : pool.query("SELECT * FROM projects WHERE status = 'open' ORDER BY created_at DESC NULLS LAST LIMIT 50")
-      ]);
-      
-      const gigs = gigsRes.rows.map(r => ({
-          id: r.id,
-          freelancerId: r.freelancer_id,
-          freelancerName: r.freelancer_name,
-          freelancerUsername: r.freelancer_username || r.freelancer_name?.toLowerCase().replace(/\s+/g, '_'),
-          freelancerAvatar: r.freelancer_avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
-          freelancerLevel: r.freelancer_level || 'Level 1 ★',
-          title: r.title,
-          slug: r.slug || r.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, ''),
-          category: r.category,
-          subcategory: r.subcategory || 'General',
-          description: r.description,
-          price: Number(r.price),
-          deliveryDays: Number(r.delivery_days || 7),
-          rating: Number(r.rating || 5.0),
-          reviewsCount: Number(r.reviews_count || 0),
-          image: r.image || 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&h=500&fit=crop',
-          coverImage: r.cover_image || '',
-          gallery: r.gallery || [],
-          tags: r.tags || [],
-          status: r.status === 'published' ? 'active' : (r.status || 'active'),
-          moderationStatus: r.moderation_status || 'approved',
-          createdAt: r.created_at,
-          extras: r.extras || []
-        }));
+        const [gigsRes, usersRes, projectsRes] = await Promise.all([
+          candidateTokens.length > 0
+            ? pool.query(
+                `SELECT * FROM gigs
+                 WHERE status IN ('active', 'published')
+                   AND (id = ANY($1::text[]) OR LOWER(COALESCE(slug, '')) = ANY($2::text[]))
+                 UNION
+                 (SELECT * FROM gigs WHERE status IN ('active', 'published') ORDER BY created_at DESC NULLS LAST LIMIT 50)`,
+                [candidateTokens, candidateTokens.map(t => t.toLowerCase())]
+              )
+            : pool.query("SELECT * FROM gigs WHERE status IN ('active', 'published') ORDER BY created_at DESC NULLS LAST LIMIT 50"),
+          candidateTokens.length > 0
+            ? pool.query(
+                `SELECT id, name, username, role, avatar, title, rating, reviews_count, hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, mobile_verified, created_at, is_flagged, is_available_now
+                 FROM users
+                 WHERE status = 'active'
+                   AND (id = ANY($1::text[]) OR LOWER(COALESCE(username, '')) = ANY($2::text[]))
+                 UNION
+                 (SELECT id, name, username, role, avatar, title, rating, reviews_count, hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, mobile_verified, created_at, is_flagged, is_available_now
+                  FROM users WHERE status = 'active' ORDER BY created_at DESC NULLS LAST LIMIT 50)`,
+                [candidateTokens, candidateTokens.map(t => t.toLowerCase())]
+              )
+            : pool.query(
+                `SELECT id, name, username, role, avatar, title, rating, reviews_count, hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, mobile_verified, created_at, is_flagged, is_available_now
+                 FROM users WHERE status = 'active' ORDER BY created_at DESC NULLS LAST LIMIT 50`
+              ),
+          candidateTokens.length > 0
+            ? pool.query(
+                `SELECT * FROM projects
+                 WHERE status = 'open'
+                   AND (id = ANY($1::text[]) OR LOWER(COALESCE(slug, '')) = ANY($2::text[]))
+                 UNION
+                 (SELECT * FROM projects WHERE status = 'open' ORDER BY created_at DESC NULLS LAST LIMIT 50)`,
+                [candidateTokens, candidateTokens.map(t => t.toLowerCase())]
+              )
+            : pool.query("SELECT * FROM projects WHERE status = 'open' ORDER BY created_at DESC NULLS LAST LIMIT 50")
+        ]);
+        
+        const gigs = gigsRes.rows.map(r => ({
+            id: r.id,
+            freelancerId: r.freelancer_id,
+            freelancerName: r.freelancer_name,
+            freelancerUsername: r.freelancer_username || r.freelancer_name?.toLowerCase().replace(/\s+/g, '_'),
+            freelancerAvatar: r.freelancer_avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
+            freelancerLevel: r.freelancer_level || 'Level 1 ★',
+            title: r.title,
+            slug: r.slug || r.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, ''),
+            category: r.category,
+            subcategory: r.subcategory || 'General',
+            description: r.description,
+            price: Number(r.price),
+            deliveryDays: Number(r.delivery_days || 7),
+            rating: Number(r.rating || 5.0),
+            reviewsCount: Number(r.reviews_count || 0),
+            image: r.image || 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&h=500&fit=crop',
+            coverImage: r.cover_image || '',
+            gallery: r.gallery || [],
+            tags: r.tags || [],
+            status: r.status === 'published' ? 'active' : (r.status || 'active'),
+            moderationStatus: r.moderation_status || 'approved',
+            createdAt: r.created_at,
+            extras: r.extras || []
+          }));
 
-      const users = usersRes.rows.map(r => ({
-          id: r.id,
-          name: r.name,
-          username: r.username,
-          role: r.role,
-          avatar: r.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
-          title: r.title || '',
-          rating: Number(r.rating || 5.0),
-          reviewsCount: Number(r.reviews_count || 0),
-          hourlyRate: Number(r.hourly_rate || 0),
-          earned: Number(r.earned || 0),
-          completedJobs: Number(r.completed_jobs || 0),
-          bio: r.bio || '',
-          skills: r.skills || [],
-          status: r.status,
-          verified: Boolean(r.verified),
-          emailVerified: Boolean(r.email_verified),
-          mobileVerified: Boolean(r.mobile_verified),
-          createdAt: r.created_at,
-          isFlagged: Boolean(r.is_flagged),
-          isAvailableNow: Boolean(r.is_available_now)
-        }));
+        const users = usersRes.rows.map(r => ({
+            id: r.id,
+            name: r.name,
+            username: r.username,
+            role: r.role,
+            avatar: r.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
+            title: r.title || '',
+            rating: Number(r.rating || 5.0),
+            reviewsCount: Number(r.reviews_count || 0),
+            hourlyRate: Number(r.hourly_rate || 0),
+            earned: Number(r.earned || 0),
+            completedJobs: Number(r.completed_jobs || 0),
+            bio: r.bio || '',
+            skills: r.skills || [],
+            status: r.status,
+            verified: Boolean(r.verified),
+            emailVerified: Boolean(r.email_verified),
+            mobileVerified: Boolean(r.mobile_verified),
+            createdAt: r.created_at,
+            isFlagged: Boolean(r.is_flagged),
+            isAvailableNow: Boolean(r.is_available_now)
+          }));
 
-      const projects = projectsRes.rows.map(r => ({
-          id: r.id,
-          buyerId: r.buyer_id,
-          buyerName: r.buyer_name,
-          buyerAvatar: r.buyer_avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
-          title: r.title,
-          slug: r.slug || r.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, ''),
-          description: r.description,
-          category: r.category,
-          budgetType: r.budget_type,
-          budget: Number(r.budget),
-          budgetMin: Number(r.budget_min),
-          budgetMax: Number(r.budget_max),
-          deadlineDays: Number(r.deadline_days),
-          duration: r.duration,
-          status: r.status,
-          proposalsCount: Number(r.proposals_count || 0),
-          skills: r.skills || [],
-          createdAt: r.created_at,
-          acceptedProposalId: r.accepted_proposal_id || undefined
-        }));
-      
-      return { gigs, users, projects, categories };
-    } catch (err) {
-      console.error('[SSR] Error fetching data for SSR:', err);
-      return { gigs: [], users: [], projects: [], categories };
-    }
-  });
-
-  resolveStartupReady();
+        const projects = projectsRes.rows.map(r => ({
+            id: r.id,
+            buyerId: r.buyer_id,
+            buyerName: r.buyer_name,
+            buyerAvatar: r.buyer_avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80',
+            title: r.title,
+            slug: r.slug || r.title?.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, ''),
+            description: r.description,
+            category: r.category,
+            budgetType: r.budget_type,
+            budget: Number(r.budget),
+            budgetMin: Number(r.budget_min),
+            budgetMax: Number(r.budget_max),
+            deadlineDays: Number(r.deadline_days),
+            duration: r.duration,
+            status: r.status,
+            proposalsCount: Number(r.proposals_count || 0),
+            skills: r.skills || [],
+            createdAt: r.created_at,
+            acceptedProposalId: r.accepted_proposal_id || undefined
+          }));
+        
+        return { gigs, users, projects, categories };
+      } catch (err) {
+        console.error('[SSR] Error fetching data for SSR:', err);
+        return { gigs: [], users: [], projects: [], categories };
+      }
+    });
+  } catch (ssrSetupErr) {
+    console.error('[SSR Setup Error]', ssrSetupErr);
+  } finally {
+    resolveStartupReady();
+  }
 })();
 
 // Graceful shutdown

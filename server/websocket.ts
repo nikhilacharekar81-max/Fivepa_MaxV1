@@ -176,10 +176,18 @@ export async function broadcastMessage(message: Message, orderId: string) {
   });
 
   const order = await store.getOrder(orderId);
-  if (!order) return;
+  let buyerId = order?.buyerId;
+  let sellerId = order?.sellerId;
+  if (!order) {
+    const ws = await postgresStore.getWorkspace(orderId);
+    if (ws) {
+      buyerId = ws.buyerId;
+      sellerId = ws.sellerId;
+    } else {
+      return;
+    }
+  }
 
-  const buyerId = order.buyerId;
-  const sellerId = order.sellerId;
   const senderId = message.senderId;
 
   for (const client of clients) {

@@ -163,32 +163,130 @@ export class OrdersRepo {
   }
 
   async listOrders(): Promise<Order[]> {
-    const res = await this.ctx.getPool().query('SELECT * FROM orders ORDER BY created_at DESC');
+    const res = await this.ctx.getPool().query('SELECT * FROM orders ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC');
     return res.rows.map(mapRowToOrder);
   }
 
-  async getOrder(id: string, client?: any): Promise<Order | null> {
+  async getOrderById(id: string, client?: any): Promise<Order | null> {
     if (!id) return null;
     const dbRunner = client || this.ctx.getPool();
     const res = await dbRunner.query(
       `SELECT * FROM orders
-       WHERE id = $1 OR gig_order_id = $1 OR project_order_id = $1 OR workspace_id = $1
+       WHERE id = $1 OR gig_order_id = $1 OR project_order_id = $1
        ORDER BY
          CASE
            WHEN id = $1 THEN 0
-           WHEN gig_order_id = $1 OR project_order_id = $1 THEN 1
-           ELSE 2
+           ELSE 1
          END ASC,
-         created_at DESC
+         updated_at DESC NULLS LAST,
+         created_at DESC,
+         id DESC
        LIMIT 1`,
       [id]
     );
     return res.rows.length > 0 ? mapRowToOrder(res.rows[0]) : null;
   }
 
+  async listOrdersByWorkspaceId(workspaceId: string, client?: any): Promise<Order[]> {
+    if (!workspaceId) return [];
+    const dbRunner = client || this.ctx.getPool();
+    const wsRes = await dbRunner.query(
+      'SELECT workspace_id, buyer_id, seller_id, order_ids FROM workspaces WHERE workspace_id = $1',
+      [workspaceId]
+    );
+    const wsRow = wsRes.rows[0];
+    let rows: any[] = [];
+    let orderIdsList: string[] = [];
+    if (wsRow) {
+      orderIdsList = Array.isArray(wsRow.order_ids)
+        ? wsRow.order_ids.map(String)
+        : (typeof wsRow.order_ids === 'string' ? JSON.parse(wsRow.order_ids || '[]').map(String) : []);
+      const res = await dbRunner.query(
+        `SELECT * FROM orders
+         WHERE buyer_id = $2 AND seller_id = $3
+           AND (workspace_id = $1 OR (workspace_id IS NULL AND id = ANY($4::text[])))
+         ORDER BY updated_at ASC NULLS LAST, created_at ASC, id ASC`,
+        [workspaceId, wsRow.buyer_id, wsRow.seller_id, orderIdsList]
+      );
+      rows = res.rows;
+    } else {
+      const res = await dbRunner.query(
+        `SELECT * FROM orders
+         WHERE workspace_id = $1
+         ORDER BY updated_at ASC NULLS LAST, created_at ASC, id ASC`,
+        [workspaceId]
+      );
+      rows = res.rows;
+    }
+
+    const mapped = rows.map(mapRowToOrder);
+    if (orderIdsList.length > 0) {
+      const indexMap = new Map<string, number>();
+      orderIdsList.forEach((oid, idx) => indexMap.set(oid, idx));
+      mapped.sort((a, b) => {
+        const idxA = indexMap.has(a.id) ? indexMap.get(a.id)! : Number.MAX_SAFE_INTEGER;
+        const idxB = indexMap.has(b.id) ? indexMap.get(b.id)! : Number.MAX_SAFE_INTEGER;
+        if (idxA !== idxB) return idxA - idxB;
+        const tA = new Date((a as any).updatedAt || a.createdAt || 0).getTime() || 0;
+        const tB = new Date((b as any).updatedAt || b.createdAt || 0).getTime() || 0;
+        if (tA !== tB) return tA - tB;
+        return a.id.localeCompare(b.id);
+      });
+    }
+    return mapped;
+  }
+
+  async resolveWorkspaceActiveOrder(workspaceId: string, client?: any): Promise<Order | null> {
+    if (!workspaceId) return null;
+    const dbRunner = client || this.ctx.getPool();
+    const wsOrders = await this.listOrdersByWorkspaceId(workspaceId, dbRunner);
+    if (wsOrders.length === 0) return null;
+
+    const wsRes = await dbRunner.query(
+      'SELECT workspace_id, metadata, order_ids FROM workspaces WHERE workspace_id = $1',
+      [workspaceId]
+    );
+    const wsRow = wsRes.rows[0];
+    const meta = wsRow
+      ? (typeof wsRow.metadata === 'string' ? JSON.parse(wsRow.metadata || '{}') : (wsRow.metadata || {}))
+      : {};
+    const requestedActiveId = meta?.activeOrderId ? String(meta.activeOrderId) : undefined;
+
+    if (requestedActiveId) {
+      const matched = wsOrders.find(
+        o => o.id === requestedActiveId && (!o.workspaceId || o.workspaceId === workspaceId)
+      );
+      if (matched) {
+        return matched;
+      }
+    }
+
+    // Deterministic fallback: prefer the last added verified order in wsOrders (which is sorted chronologically / by order_ids sequence)
+    const fallbackOrder = wsOrders[wsOrders.length - 1];
+
+    if (wsRow && fallbackOrder && requestedActiveId !== fallbackOrder.id) {
+      try {
+        const updatedMeta = { ...meta, activeOrderId: fallbackOrder.id };
+        await dbRunner.query(
+          'UPDATE workspaces SET metadata = $2, updated_at = $3 WHERE workspace_id = $1',
+          [workspaceId, JSON.stringify(updatedMeta), new Date().toISOString()]
+        );
+      } catch {}
+    }
+
+    return fallbackOrder || null;
+  }
+
+  async getOrder(id: string, client?: any): Promise<Order | null> {
+    if (!id) return null;
+    const direct = await this.getOrderById(id, client);
+    if (direct) return direct;
+    return this.resolveWorkspaceActiveOrder(id, client);
+  }
+
   async listOrdersForUser(userId: string): Promise<Order[]> {
     const res = await this.ctx.getPool().query(
-      'SELECT * FROM orders WHERE buyer_id = $1 OR seller_id = $1 ORDER BY created_at DESC',
+      'SELECT * FROM orders WHERE buyer_id = $1 OR seller_id = $1 ORDER BY updated_at DESC NULLS LAST, created_at DESC, id DESC',
       [userId]
     );
     return res.rows.map(mapRowToOrder);
