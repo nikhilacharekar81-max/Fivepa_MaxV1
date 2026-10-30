@@ -283,11 +283,12 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
       }
     }
 
-    // 2. Authoritative Seller Earnings from earnings_clearing
+    // 2. Authoritative Seller Earnings from earnings_clearing (strictly status 'clearing' or 'completed')
     const clearingRes = await pool.query(
       `SELECT id, order_id, seller_id, amount, clearance_start, clearance_end, status, payout_eligible
        FROM earnings_clearing
-       WHERE seller_id = $1 OR order_id = ANY($2::varchar[])`,
+       WHERE status IN ('clearing', 'completed')
+         AND (seller_id = $1 OR order_id = ANY($2::varchar[]))`,
       [userId, userOrderIds]
     );
 
@@ -303,20 +304,23 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
     let userProjectEarnedThisMonthCents = 0;
 
     for (const row of clearingRes.rows) {
+      const rowStatus = String(row.status || '').toLowerCase();
+      if (rowStatus !== 'clearing' && rowStatus !== 'completed') continue;
+
       const ordId = String(row.order_id || '');
       const amountCents = Math.round(Number(row.amount || 0) * 100);
       if (amountCents <= 0) continue;
 
       if (ordId) {
         orderSellerEarnedCents.set(ordId, (orderSellerEarnedCents.get(ordId) || 0) + amountCents);
-        if (row.status === 'clearing') {
+        if (rowStatus === 'clearing') {
           orderSellerPendingClearanceCents.set(ordId, (orderSellerPendingClearanceCents.get(ordId) || 0) + amountCents);
         }
       }
 
       if (row.seller_id === userId) {
         userEarnedToDateCents += amountCents;
-        if (row.status === 'clearing') {
+        if (rowStatus === 'clearing') {
           userPendingClearanceCents += amountCents;
         }
 
@@ -407,7 +411,7 @@ router.get('/payments/user/:userId', requireAuth, async (req: Request, res: Resp
 
       const depositRequests = offers.filter(off => (off.kind === 'deposit' || off.kind === 'proposal') && off.status === 'pending');
       const pendingInvoices = offers.filter(off => off.kind === 'invoice' && off.status === 'pending');
-      const paidInvoiceOffers = offers.filter(off => off.kind === 'invoice' && (off.status === 'paid' || off.status === 'accepted'));
+      const paidInvoiceOffers = offers.filter(off => off.kind === 'invoice' && off.status === 'paid');
       const paidOffersSum = paidInvoiceOffers.reduce((s, off) => s + Number(off.amount || 0), 0);
       const paidInvoiceAmount = Number(Math.max(paidOffersSum, releasedGross).toFixed(2));
       const hasPaidInvoice = releasedGross > 0 || paidInvoiceOffers.length > 0;

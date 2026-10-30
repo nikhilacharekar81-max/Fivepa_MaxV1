@@ -15,7 +15,7 @@ export interface FreelancerProjectActivityItem {
   amountLabel?: string;
   location: string;
   refNumber: string;
-  statusCategory: 'pending_proposals' | 'in_progress' | 'completed';
+  statusCategory: 'pending_proposals' | 'in_progress' | 'completed' | 'cancelled';
   order?: Order;
   workstreamOrderId?: string;
   projectId?: string;
@@ -36,20 +36,43 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
 }) => {
   const resolvedItems: FreelancerProjectActivityItem[] = items ?? orders.map(ord => {
     const isOrdCompleted = ord.status === 'completed';
-    const netEarned = typeof (ord as any).freelancerNetEarned === 'number' ? (ord as any).freelancerNetEarned : 0;
-    const inEscrowVal = typeof (ord as any).inEscrow === 'number' ? (ord as any).inEscrow : Number(ord.amount || 0);
+    const isOrdCancelled = ord.status === 'cancelled' || (ord.status as string) === 'refunded';
+    const netEarned =
+      typeof (ord as any).freelancerNetEarned === 'number' && Number.isFinite((ord as any).freelancerNetEarned)
+        ? Math.max(0, (ord as any).freelancerNetEarned)
+        : 0;
+    const hasRecognizedEarnings = netEarned > 0;
+    const confirmedEscrowVal =
+      typeof (ord as any).inEscrow === 'number' && Number.isFinite((ord as any).inEscrow)
+        ? Math.max(0, (ord as any).inEscrow)
+        : 0;
+    const contractVal = Number(ord.amount || 0);
+
+    let earningsAmount = contractVal;
+    let amountLabel = 'CONTRACT VALUE';
+    if (hasRecognizedEarnings || isOrdCompleted) {
+      earningsAmount = netEarned;
+      amountLabel = 'EARNINGS';
+    } else if (isOrdCancelled) {
+      earningsAmount = 0;
+      amountLabel = 'CANCELLED';
+    } else if (confirmedEscrowVal > 0) {
+      earningsAmount = confirmedEscrowVal;
+      amountLabel = 'IN ESCROW';
+    }
+
     return {
       id: ord.id,
       title: ord.title,
       buyerName: (ord as any).buyerName || ord.buyerUsername || 'Client',
       buyerAvatar: (ord as any).buyerAvatar || DEFAULT_AVATAR,
       awardedDate: ord.createdAt,
-      proposalAmount: Number(ord.amount || 0),
-      earningsAmount: isOrdCompleted ? netEarned : inEscrowVal,
-      amountLabel: isOrdCompleted ? 'EARNINGS' : (inEscrowVal > 0 ? 'IN ESCROW' : 'CONTRACT VALUE'),
+      proposalAmount: contractVal,
+      earningsAmount,
+      amountLabel,
       location: 'Remote',
       refNumber: ord.id.replace(/\D/g, '').slice(0, 7) || ord.id.replace(/^ord_/, '').slice(0, 7).toUpperCase(),
-      statusCategory: isOrdCompleted ? 'completed' : 'in_progress',
+      statusCategory: isOrdCompleted || hasRecognizedEarnings ? 'completed' : isOrdCancelled ? 'cancelled' : 'in_progress',
       order: ord,
       workstreamOrderId: ord.id,
       projectId: ord.projectId
@@ -69,12 +92,23 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
     <div className="bg-white divide-y divide-slate-200/80 font-sans">
       {resolvedItems.map(item => {
         const isPendingProposal = item.statusCategory === 'pending_proposals';
-        const isCompleted = item.statusCategory === 'completed';
+        const isCancelledOrder =
+          item.statusCategory === 'cancelled' ||
+          item.order?.status === 'cancelled' ||
+          (item.order?.status as string) === 'refunded';
+        const isCompleted =
+          !isCancelledOrder && (item.statusCategory === 'completed' || item.order?.status === 'completed');
         const targetOrderId = item.workstreamOrderId || item.order?.id || '';
         const rightSideAmount = isPendingProposal ? item.proposalAmount : item.earningsAmount;
         const rightSideLabel =
           item.amountLabel ||
-          (isCompleted ? 'EARNINGS' : isPendingProposal ? 'PROPOSAL' : 'CONTRACT VALUE');
+          (item.statusCategory === 'completed'
+            ? 'EARNINGS'
+            : isPendingProposal
+              ? 'PROPOSAL'
+              : isCancelledOrder
+                ? 'CANCELLED'
+                : 'CONTRACT VALUE');
 
         return (
           <div
@@ -123,8 +157,10 @@ export const UserFreelanceProjectsList: React.FC<UserFreelanceProjectsListProps>
 
                 <span className="text-slate-400 font-medium">#{item.refNumber}</span>
 
-                {isCompleted && (
-                  <span className="text-emerald-600 font-semibold">· Completed</span>
+                {isCancelledOrder ? (
+                  <span className="text-rose-600 font-semibold">· Cancelled</span>
+                ) : (
+                  isCompleted && <span className="text-emerald-600 font-semibold">· Completed</span>
                 )}
               </div>
             </div>

@@ -125,8 +125,13 @@ gigRouter.post('/gigs', requireAuth, requireActiveStatus, async (req: Request, r
   if (Math.abs(Math.round(gigPrice * 100) - gigPrice * 100) > 1e-6) {
     return res.status(400).json({ error: 'Gig price can have at most 2 decimal places.' });
   }
-  const minGigPrice = Math.max(5, Number(activeSettings.marketplace.minimumGigPrice ?? 5));
-  const maxGigPrice = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
+  const rawMinGig = Number(activeSettings.marketplace.minimumGigPrice ?? 5);
+  const minGigPrice = Number.isFinite(rawMinGig) ? Math.min(10000, Math.max(5, rawMinGig)) : 5;
+  const rawMaxGig = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
+  const maxGigPrice =
+    Number.isFinite(rawMaxGig) && rawMaxGig > 0
+      ? Math.min(10000, Math.max(minGigPrice, rawMaxGig))
+      : 10000;
   if (gigPrice < minGigPrice) {
     return res.status(400).json({ error: `Gig price ($${gigPrice}) cannot be lower than the platform minimum of $${minGigPrice}.` });
   }
@@ -201,7 +206,7 @@ gigRouter.post('/gigs', requireAuth, requireActiveStatus, async (req: Request, r
     category,
     subcategory,
     description: String(req.body.description || '').trim(),
-    price: gigPrice,
+    price: Math.round(gigPrice * 100) / 100,
     deliveryDays,
     rating: 0,
     reviewsCount: 0,
@@ -242,6 +247,14 @@ const handleGigUpdate = async (req: Request, res: Response) => {
     }
 
     const updates: Record<string, any> = {};
+    const activeSettings = siteSettings.getSettings();
+    const rawMinGig = Number(activeSettings.marketplace.minimumGigPrice ?? 5);
+    const minGigPrice = Number.isFinite(rawMinGig) ? Math.min(10000, Math.max(5, rawMinGig)) : 5;
+    const rawMaxGig = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
+    const maxGigPrice =
+      Number.isFinite(rawMaxGig) && rawMaxGig > 0
+        ? Math.min(10000, Math.max(minGigPrice, rawMaxGig))
+        : 10000;
 
     if (req.body.title !== undefined) {
       const newTitle = String(req.body.title).trim().slice(0, 300);
@@ -268,24 +281,18 @@ const handleGigUpdate = async (req: Request, res: Response) => {
       if (Math.abs(Math.round(newPrice * 100) - newPrice * 100) > 1e-6) {
         return res.status(400).json({ error: 'Gig price can have at most 2 decimal places.' });
       }
-      const activeSettings = siteSettings.getSettings();
-      const minGigPrice = Math.max(5, Number(activeSettings.marketplace.minimumGigPrice ?? 5));
-      const maxGigPrice = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
       if (newPrice < minGigPrice) {
         return res.status(400).json({ error: `Gig price ($${newPrice}) cannot be lower than the platform minimum of $${minGigPrice}.` });
       }
       if (newPrice > maxGigPrice) {
         return res.status(400).json({ error: `Gig price ($${newPrice}) cannot exceed the platform maximum of $${maxGigPrice}.` });
       }
-      updates.price = newPrice;
+      updates.price = Math.round(newPrice * 100) / 100;
     }
     if (req.body.deliveryDays !== undefined) {
       updates.deliveryDays = Math.min(365, Math.max(1, Math.round(Number(req.body.deliveryDays)) || 7));
     }
     if (req.body.packages !== undefined && typeof req.body.packages === 'object') {
-      const activeSettings = siteSettings.getSettings();
-      const minGigPrice = Math.max(5, Number(activeSettings.marketplace.minimumGigPrice ?? 5));
-      const maxGigPrice = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
       for (const tier of ['basic', 'standard', 'premium']) {
         if (req.body.packages[tier]) {
           const p = Number(req.body.packages[tier].price);
@@ -298,6 +305,19 @@ const handleGigUpdate = async (req: Request, res: Response) => {
         }
       }
       updates.packages = req.body.packages;
+    }
+    if (Array.isArray(req.body.tiers)) {
+      for (const tier of req.body.tiers) {
+        if (tier && tier.price !== undefined) {
+          const p = Number(tier.price);
+          if (!Number.isFinite(p) || p < minGigPrice || p > maxGigPrice) {
+            return res.status(400).json({ error: `Package tier price must be between $${minGigPrice} and $${maxGigPrice}.` });
+          }
+          if (Math.abs(Math.round(p * 100) - p * 100) > 1e-6) {
+            return res.status(400).json({ error: 'Package tier price can have at most 2 decimal places.' });
+          }
+        }
+      }
     }
     if (req.body.extras !== undefined && Array.isArray(req.body.extras)) {
       const parsedExtras: { id: string; title: string; price: number; deliveryDays: number }[] = [];
@@ -323,7 +343,6 @@ const handleGigUpdate = async (req: Request, res: Response) => {
       updates.image = /^\s*(javascript:|vbscript:|data:(?!image\/))/i.test(req.body.image) ? defaultImage : req.body.image;
     }
 
-    const activeSettings = siteSettings.getSettings();
     const isMaterialEdit = (updates.title !== undefined && updates.title !== g.title) ||
       (updates.description !== undefined && updates.description !== g.description) ||
       (updates.image !== undefined && updates.image !== g.image) ||

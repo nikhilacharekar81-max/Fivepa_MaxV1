@@ -245,12 +245,35 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
     [onOpenWorkstream, navigate]
   );
 
+  const resolveOrderFinancial = useCallback(
+    (ord: Order) => {
+      const fromMap = financialSnapshot?.orderFinancials?.[ord.id];
+      const fromList = Array.isArray(financialSnapshot?.buyerOrdersSummary)
+        ? financialSnapshot.buyerOrdersSummary.find((r: any) => r.id === ord.id)
+        : null;
+      const fin = fromMap || fromList || (ord as any);
+      return {
+        inEscrow: Number(fin?.inEscrow ?? 0),
+        releasedGross: Number(fin?.releasedGross ?? 0),
+        refundedGross: Number(fin?.refundedGross ?? 0),
+        buyerGrossFunded: Number(fin?.buyerGrossFunded ?? 0),
+        buyerRefundedAmount: Number(fin?.buyerRefundedAmount ?? 0),
+        netPaidByBuyer: Number(fin?.netPaidByBuyer ?? 0),
+        feesRefunded: Boolean(fin?.feesRefunded),
+        escrowStatus: String(fin?.escrowStatus || 'not_funded'),
+        isDisputed: Boolean(fin?.isDisputed || ord.status === 'disputed')
+      };
+    },
+    [financialSnapshot]
+  );
+
   // Build unified items for PROJECTS tab (strictly Buyer's own posted projects)
   const buyerProjectItems = useMemo(() => {
     return myProjects.map((proj, idx) => {
       const linkedOrders = myWorkstreams.filter(o => o.projectId === proj.id);
       const primaryOrder = linkedOrders[0];
       const sellerInfo = primaryOrder ? resolveOrderSeller(primaryOrder) : null;
+      const primaryFin = primaryOrder ? resolveOrderFinancial(primaryOrder) : null;
       const isCompleted = proj.status === 'completed' || primaryOrder?.status === 'completed';
       const isInProgress =
         proj.status === 'in_progress' ||
@@ -260,7 +283,6 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
               primaryOrder.status
             )
         );
-      const isOpen = proj.status === 'open' || proj.status === 'published' || (!isCompleted && !isInProgress);
 
       let subCat: ProjectSubTab = 'open';
       if (isCompleted) subCat = 'completed';
@@ -273,6 +295,16 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
         ? Number(primaryOrder.amount || 0)
         : Number(proj.budgetMax || proj.budgetMin || 0);
 
+      let amountLabel = 'Budget:';
+      let amountValue = budgetVal;
+      if (primaryFin && primaryFin.inEscrow > 0 && primaryOrder?.status !== 'cancelled') {
+        amountLabel = 'Escrow:';
+        amountValue = primaryFin.inEscrow;
+      } else if (primaryFin && primaryFin.releasedGross > 0) {
+        amountLabel = 'Released:';
+        amountValue = primaryFin.releasedGross;
+      }
+
       return {
         id: proj.id,
         title: proj.title,
@@ -283,8 +315,8 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
         counterpartyAvatar: sellerInfo ? sellerInfo.sellerAvatar : currentUser.avatar || DEFAULT_AVATAR,
         dateLabel: primaryOrder ? 'Awarded:' : 'Posted:',
         dateValue: formatActivityDate(proj.createdAt),
-        amountLabel: primaryOrder ? 'Escrow:' : 'Budget:',
-        amountValue: budgetVal,
+        amountLabel,
+        amountValue,
         proposalsCount: proj.proposalsCount || 0,
         status: proj.status,
         subCategory: subCat,
@@ -295,7 +327,7 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
         sortTimestamp: new Date(proj.createdAt || 0).getTime() || 0
       };
     });
-  }, [myProjects, myWorkstreams, resolveOrderSeller, currentUser.avatar]);
+  }, [myProjects, myWorkstreams, resolveOrderSeller, resolveOrderFinancial, currentUser.avatar]);
 
   const filteredProjectItems = useMemo(() => {
     if (projectSubTab === 'all') return buyerProjectItems;
@@ -326,79 +358,44 @@ export const BuyerActivityView: React.FC<BuyerActivityViewProps> = ({
     });
   }, [myGigOrders, gigSubTab]);
 
-  const resolveOrderFinancial = useCallback(
-    (ord: Order) => {
-      const fromMap = financialSnapshot?.orderFinancials?.[ord.id];
-      const fromList = Array.isArray(financialSnapshot?.buyerOrdersSummary)
-        ? financialSnapshot.buyerOrdersSummary.find((r: any) => r.id === ord.id)
-        : null;
-      const fin = fromMap || fromList || (ord as any);
-      return {
-        inEscrow: Number(fin?.inEscrow ?? 0),
-        releasedGross: Number(fin?.releasedGross ?? 0),
-        refundedGross: Number(fin?.refundedGross ?? 0),
-        buyerGrossFunded: Number(fin?.buyerGrossFunded ?? 0),
-        buyerRefundedAmount: Number(fin?.buyerRefundedAmount ?? 0),
-        netPaidByBuyer: Number(fin?.netPaidByBuyer ?? 0),
-        feesRefunded: Boolean(fin?.feesRefunded),
-        escrowStatus: String(fin?.escrowStatus || 'not_funded'),
-        isDisputed: Boolean(fin?.isDisputed || ord.status === 'disputed')
-      };
-    },
-    [financialSnapshot]
-  );
-
   const resolveBuyerOrderCardFinancialDisplay = useCallback(
     (ord: Order): { label: string; amount: number } => {
       const fin = resolveOrderFinancial(ord);
       const st = (ord.status || '').toLowerCase();
-      const refundedAmt = fin.buyerRefundedAmount > 0 ? fin.buyerRefundedAmount : fin.refundedGross;
-
-      if (st === 'payment_pending' || st === 'pending') {
-        if (fin.inEscrow <= 0 && fin.releasedGross <= 0 && refundedAmt <= 0) {
-          return { label: 'AWAITING PAYMENT', amount: Number(ord.amount || 0) };
-        }
-      }
+      const confirmedRefund = fin.buyerRefundedAmount > 0 ? fin.buyerRefundedAmount : 0;
+      const isCancelledOrRefundedStatus = st === 'cancelled' || st === 'refunded';
 
       if (fin.isDisputed || st === 'disputed') {
         return { label: 'DISPUTED', amount: fin.inEscrow };
       }
 
-      if (
-        fin.escrowStatus === 'partially_refunded' ||
-        (fin.refundedGross > 0 && (fin.inEscrow > 0 || fin.releasedGross > 0))
-      ) {
-        return { label: 'PARTIALLY REFUNDED', amount: refundedAmt };
+      if (confirmedRefund > 0) {
+        const isPartialRefund =
+          fin.escrowStatus === 'partially_refunded' ||
+          fin.inEscrow > 0 ||
+          fin.releasedGross > 0 ||
+          (fin.buyerGrossFunded > 0 &&
+            confirmedRefund + 0.009 < fin.buyerGrossFunded &&
+            fin.refundedGross + 0.009 < Number(ord.amount || 0));
+        if (isPartialRefund) {
+          return { label: 'PARTIALLY REFUNDED', amount: confirmedRefund };
+        }
+        return { label: 'REFUNDED', amount: confirmedRefund };
       }
 
-      if (refundedAmt > 0 || fin.refundedGross > 0 || fin.escrowStatus === 'refunded') {
-        return { label: 'REFUNDED', amount: refundedAmt > 0 ? refundedAmt : fin.refundedGross };
+      if (isCancelledOrRefundedStatus) {
+        return { label: 'CANCELLED / REFUND PROCESSING', amount: 0 };
       }
 
-      if (st === 'completed' || fin.escrowStatus === 'released' || (fin.releasedGross > 0 && fin.inEscrow <= 0)) {
-        return { label: 'RELEASED', amount: fin.releasedGross };
+      if (fin.releasedGross > 0 && (st === 'completed' || fin.escrowStatus === 'released' || fin.inEscrow <= 0)) {
+        return { label: 'PAID / RELEASED', amount: fin.releasedGross };
       }
 
-      if (
-        [
-          'funded_in_escrow',
-          'in_progress',
-          'work_in_progress',
-          'delivered',
-          'revision',
-          'revision_requested',
-          'draft_review'
-        ].includes(st) ||
-        fin.inEscrow > 0
-      ) {
+      if (fin.inEscrow > 0) {
         return { label: 'ESCROW', amount: fin.inEscrow };
       }
 
-      if (st === 'cancelled') {
-        return { label: 'CANCELLED', amount: 0 };
-      }
-
-      return { label: 'AWAITING PAYMENT', amount: Number(ord.amount || 0) };
+      return { label: 'AWAITING PAYMENT', amount: 0 };
     },
     [resolveOrderFinancial]
   );

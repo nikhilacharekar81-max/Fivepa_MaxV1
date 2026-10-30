@@ -231,15 +231,27 @@ export class SiteSettingsService {
     this.syncFeesToLedger();
   }
 
+  private normalizeMarketplaceGigLimits(marketplace: GigsProjectsOrdersSettings): GigsProjectsOrdersSettings {
+    const rawMin = Number(marketplace.minimumGigPrice);
+    const normalizedMin = Number.isFinite(rawMin) ? Math.min(10000, Math.max(5, rawMin)) : 5;
+    const rawMax = Number(marketplace.maximumGigPrice);
+    const normalizedMax =
+      Number.isFinite(rawMax) && rawMax > 0
+        ? Math.min(10000, Math.max(normalizedMin, rawMax))
+        : 10000;
+    return {
+      ...marketplace,
+      minimumGigPrice: normalizedMin,
+      maximumGigPrice: normalizedMax
+    };
+  }
+
   public loadFromState(parsed: any) {
     if (parsed && typeof parsed === 'object') {
-      const mergedMarketplace = { ...DEFAULT_SITE_SETTINGS.marketplace, ...(parsed.marketplace || {}) };
-      if (!Number.isFinite(Number(mergedMarketplace.minimumGigPrice)) || Number(mergedMarketplace.minimumGigPrice) < 5) {
-        mergedMarketplace.minimumGigPrice = 5;
-      }
-      if (!Number.isFinite(Number(mergedMarketplace.maximumGigPrice)) || Number(mergedMarketplace.maximumGigPrice) <= 0) {
-        mergedMarketplace.maximumGigPrice = 10000;
-      }
+      const mergedMarketplace = this.normalizeMarketplaceGigLimits({
+        ...DEFAULT_SITE_SETTINGS.marketplace,
+        ...(parsed.marketplace || {})
+      });
       this.settings = {
         website: { ...DEFAULT_SITE_SETTINGS.website, ...(parsed.website || {}) },
         commission: { ...DEFAULT_SITE_SETTINGS.commission, ...(parsed.commission || {}) },
@@ -353,10 +365,14 @@ export class SiteSettingsService {
     }
 
     // Apply updates
-    this.settings[section] = {
+    const mergedSection = {
       ...currentSection,
       ...updates
     };
+    this.settings[section] =
+      section === 'marketplace'
+        ? (this.normalizeMarketplaceGigLimits(mergedSection as GigsProjectsOrdersSettings) as SiteSettingsState[K])
+        : mergedSection;
 
     // If any fee rule changed, sync immediately to the double-entry finance ledger
     if (section === 'commission') {

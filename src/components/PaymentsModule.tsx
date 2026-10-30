@@ -326,7 +326,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
 
   // Build authoritative Buyer Orders list for "My Buyer Escrow"
   const buyerOrderRows = useMemo<EnrichedOrderFinancialRow[]>(() => {
-    if (Array.isArray(activeSnapshot?.buyerOrdersSummary) && activeSnapshot.buyerOrdersSummary.length > 0) {
+    if (Array.isArray(activeSnapshot?.buyerOrdersSummary)) {
       return activeSnapshot.buyerOrdersSummary;
     }
     if (!currentUser?.id) return [];
@@ -335,30 +335,33 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
       .map(o => {
         const ordOffers = allOffers.filter(off => off.orderId === o.id);
         const seller = userMap.get(o.sellerId);
-        const inEscrow = activeEscrowStatuses.has(o.status) ? Number(o.amount || 0) : 0;
         const depositRequests = ordOffers.filter(off => (off.kind === 'deposit' || off.kind === 'proposal') && off.status === 'pending');
         const pendingInvoices = ordOffers.filter(off => off.kind === 'invoice' && off.status === 'pending');
-        const paidInvoices = ordOffers.filter(off => off.kind === 'invoice' && (off.status === 'paid' || off.status === 'accepted'));
-        const paidInvoiceAmount = o.status === 'completed'
-          ? Number(o.amount || 0)
-          : paidInvoices.reduce((s, off) => s + Number(off.amount || 0), 0);
+        const paidInvoices = ordOffers.filter(off => off.kind === 'invoice' && off.status === 'paid');
+        const paidInvoiceAmount = Number(paidInvoices.reduce((s, off) => s + Number(off.amount || 0), 0).toFixed(2));
         return {
           ...o,
           sellerName: seller?.name || (o as any).sellerName || o.sellerUsername || 'Freelancer',
           buyerName: currentUser.name,
-          inEscrow,
-          escrowFunded: o.status !== 'payment_pending' ? Number(o.amount || 0) : 0,
+          inEscrow: 0,
+          escrowFunded: 0,
+          releasedGross: 0,
+          refundedGross: 0,
+          buyerGrossFunded: 0,
+          buyerRefundedAmount: 0,
+          netPaidByBuyer: 0,
+          freelancerNetEarned: 0,
           depositRequests,
           pendingInvoices,
           paidInvoiceAmount,
-          hasPaidInvoice: o.status === 'completed' || paidInvoices.length > 0
+          hasPaidInvoice: paidInvoiceAmount > 0
         };
       });
-  }, [activeSnapshot?.buyerOrdersSummary, currentUser, orders, allOffers, userMap, activeEscrowStatuses]);
+  }, [activeSnapshot?.buyerOrdersSummary, currentUser, orders, allOffers, userMap]);
 
   // Build authoritative Freelancer Orders list for "My Freelancer Escrow"
   const freelancerOrderRows = useMemo<EnrichedOrderFinancialRow[]>(() => {
-    if (Array.isArray(activeSnapshot?.freelancerOrdersSummary) && activeSnapshot.freelancerOrdersSummary.length > 0) {
+    if (Array.isArray(activeSnapshot?.freelancerOrdersSummary)) {
       return activeSnapshot.freelancerOrdersSummary;
     }
     if (!currentUser?.id) return [];
@@ -367,26 +370,29 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
       .map(o => {
         const ordOffers = allOffers.filter(off => off.orderId === o.id);
         const buyer = userMap.get(o.buyerId);
-        const inEscrow = activeEscrowStatuses.has(o.status) ? Number(o.amount || 0) : 0;
         const depositRequests = ordOffers.filter(off => (off.kind === 'deposit' || off.kind === 'proposal') && off.status === 'pending');
         const pendingInvoices = ordOffers.filter(off => off.kind === 'invoice' && off.status === 'pending');
-        const paidInvoices = ordOffers.filter(off => off.kind === 'invoice' && (off.status === 'paid' || off.status === 'accepted'));
-        const paidInvoiceAmount = o.status === 'completed'
-          ? Number(o.amount || 0)
-          : paidInvoices.reduce((s, off) => s + Number(off.amount || 0), 0);
+        const paidInvoices = ordOffers.filter(off => off.kind === 'invoice' && off.status === 'paid');
+        const paidInvoiceAmount = Number(paidInvoices.reduce((s, off) => s + Number(off.amount || 0), 0).toFixed(2));
         return {
           ...o,
           buyerName: buyer?.name || (o as any).buyerName || o.buyerUsername || 'Buyer',
           sellerName: currentUser.name,
-          inEscrow,
-          escrowFunded: o.status !== 'payment_pending' ? Number(o.amount || 0) : 0,
+          inEscrow: 0,
+          escrowFunded: 0,
+          releasedGross: 0,
+          refundedGross: 0,
+          buyerGrossFunded: 0,
+          buyerRefundedAmount: 0,
+          netPaidByBuyer: 0,
+          freelancerNetEarned: 0,
           depositRequests,
           pendingInvoices,
           paidInvoiceAmount,
-          hasPaidInvoice: o.status === 'completed' || paidInvoices.length > 0
+          hasPaidInvoice: paidInvoiceAmount > 0
         };
       });
-  }, [activeSnapshot?.freelancerOrdersSummary, currentUser, orders, allOffers, userMap, activeEscrowStatuses]);
+  }, [activeSnapshot?.freelancerOrdersSummary, currentUser, orders, allOffers, userMap]);
 
   const effectivePlatformFee = useMemo(() => {
     if (
@@ -460,36 +466,39 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
     return 5000;
   }, [activeSnapshot?.maximumWithdrawalPerTransaction]);
 
-  // Live balances & metrics (strictly $ USD)
+  // Live balances & metrics (strictly $ USD from authoritative financial snapshot)
   const availableBalance = useMemo(() => {
-    if (typeof activeSnapshot?.availableBalance === 'number') return activeSnapshot.availableBalance;
-    return Number(currentUser?.walletBalance ?? 0);
-  }, [activeSnapshot?.availableBalance, currentUser?.walletBalance]);
+    if (typeof activeSnapshot?.availableBalance === 'number' && Number.isFinite(activeSnapshot.availableBalance)) {
+      return activeSnapshot.availableBalance;
+    }
+    return 0;
+  }, [activeSnapshot?.availableBalance]);
 
   const buyerEscrowTotal = useMemo(() => {
-    if (typeof activeSnapshot?.buyerEscrowAmount === 'number') return activeSnapshot.buyerEscrowAmount;
+    if (typeof activeSnapshot?.buyerEscrowAmount === 'number' && Number.isFinite(activeSnapshot.buyerEscrowAmount)) {
+      return activeSnapshot.buyerEscrowAmount;
+    }
     return buyerOrderRows.reduce((sum, r) => sum + Number(r.inEscrow || 0), 0);
   }, [activeSnapshot?.buyerEscrowAmount, buyerOrderRows]);
 
   const freelancerEscrowTotal = useMemo(() => {
-    if (typeof activeSnapshot?.freelancerEscrowAmount === 'number') return activeSnapshot.freelancerEscrowAmount;
+    if (typeof activeSnapshot?.freelancerEscrowAmount === 'number' && Number.isFinite(activeSnapshot.freelancerEscrowAmount)) {
+      return activeSnapshot.freelancerEscrowAmount;
+    }
     return freelancerOrderRows.reduce((sum, r) => sum + Number(r.inEscrow || 0), 0);
   }, [activeSnapshot?.freelancerEscrowAmount, freelancerOrderRows]);
 
   const paidThisMonth = useMemo(() => {
-    if (typeof activeSnapshot?.paidThisMonth === 'number') return activeSnapshot.paidThisMonth;
-    const ym = new Date().toISOString().slice(0, 7);
-    return buyerOrderRows
-      .filter(o => {
-        const actMonth = String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 7);
-        const crtMonth = String(o.createdAt || '').slice(0, 7);
-        return actMonth === ym || crtMonth === ym;
-      })
-      .reduce((sum, o) => sum + Number(o.netPaidByBuyer || 0), 0);
-  }, [activeSnapshot?.paidThisMonth, buyerOrderRows]);
+    if (typeof activeSnapshot?.paidThisMonth === 'number' && Number.isFinite(activeSnapshot.paidThisMonth)) {
+      return activeSnapshot.paidThisMonth;
+    }
+    return 0;
+  }, [activeSnapshot?.paidThisMonth]);
 
   const paidToDate = useMemo(() => {
-    if (typeof activeSnapshot?.paidToDate === 'number') return activeSnapshot.paidToDate;
+    if (typeof activeSnapshot?.paidToDate === 'number' && Number.isFinite(activeSnapshot.paidToDate)) {
+      return activeSnapshot.paidToDate;
+    }
     return buyerOrderRows.reduce((sum, o) => sum + Number(o.netPaidByBuyer || 0), 0);
   }, [activeSnapshot?.paidToDate, buyerOrderRows]);
 
@@ -501,29 +510,25 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
   }, []);
 
   const earnedThisMonth = useMemo(() => {
-    if (typeof activeSnapshot?.earnedThisMonth === 'number') return activeSnapshot.earnedThisMonth;
-    const ym = new Date().toISOString().slice(0, 7);
-    return freelancerOrderRows
-      .filter(o => {
-        const compMonth = String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 7);
-        const crtMonth = String(o.createdAt || '').slice(0, 7);
-        return compMonth === ym || crtMonth === ym;
-      })
-      .reduce((sum, o) => sum + resolveRowNetEarnings(o), 0);
-  }, [activeSnapshot?.earnedThisMonth, freelancerOrderRows, resolveRowNetEarnings]);
+    if (typeof activeSnapshot?.earnedThisMonth === 'number' && Number.isFinite(activeSnapshot.earnedThisMonth)) {
+      return activeSnapshot.earnedThisMonth;
+    }
+    return 0;
+  }, [activeSnapshot?.earnedThisMonth]);
 
   const earnedToDate = useMemo(() => {
-    if (typeof activeSnapshot?.earnedToDate === 'number') return activeSnapshot.earnedToDate;
+    if (typeof activeSnapshot?.earnedToDate === 'number' && Number.isFinite(activeSnapshot.earnedToDate)) {
+      return activeSnapshot.earnedToDate;
+    }
     return freelancerOrderRows.reduce((sum, o) => sum + resolveRowNetEarnings(o), 0);
   }, [activeSnapshot?.earnedToDate, freelancerOrderRows, resolveRowNetEarnings]);
 
   const earnedPastTwoMonths = useMemo(() => {
-    if (typeof activeSnapshot?.earnedPastTwoMonths === 'number') return activeSnapshot.earnedPastTwoMonths;
-    const twoMonthsAgoDate = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
-    return freelancerOrderRows
-      .filter(o => String(o.completedAt || (o as any).updatedAt || o.createdAt || '').slice(0, 10) >= twoMonthsAgoDate)
-      .reduce((sum, o) => sum + resolveRowNetEarnings(o), 0);
-  }, [activeSnapshot?.earnedPastTwoMonths, freelancerOrderRows, resolveRowNetEarnings]);
+    if (typeof activeSnapshot?.earnedPastTwoMonths === 'number' && Number.isFinite(activeSnapshot.earnedPastTwoMonths)) {
+      return activeSnapshot.earnedPastTwoMonths;
+    }
+    return 0;
+  }, [activeSnapshot?.earnedPastTwoMonths]);
 
   const clearingDays = useMemo(() => {
     return Number(activeSnapshot?.clearingPeriodDays || escrowProtectionDays || 14);
@@ -1733,12 +1738,12 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                                     {processingOfferId === pendingInv.id ? '...' : 'Pay'}
                                   </button>
                                 </div>
-                              ) : row.hasPaidInvoice || (row.paidInvoiceAmount && row.paidInvoiceAmount > 0) ? (
+                              ) : row.hasPaidInvoice && typeof row.paidInvoiceAmount === 'number' && row.paidInvoiceAmount > 0 ? (
                                 <span className="inline-flex items-center justify-center gap-1 text-slate-700 font-medium whitespace-nowrap text-[11px]">
                                   <span className="w-3.5 h-3.5 rounded-full bg-emerald-600 text-white inline-flex items-center justify-center shrink-0">
                                     <Check className="w-2.5 h-2.5 stroke-[3]" />
                                   </span>
-                                  <span className="font-mono tabular-nums">{formatUsd(row.paidInvoiceAmount || row.amount)}</span>
+                                  <span className="font-mono tabular-nums">{formatUsd(row.paidInvoiceAmount)}</span>
                                 </span>
                               ) : (
                                 <span className="text-slate-400">-</span>

@@ -155,24 +155,6 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     return () => window.removeEventListener('click', handleOutsideClick);
   }, []);
 
-  // All seller orders belonging to current freelancer
-  const mySellerOrders = useMemo(() => {
-    if (!currentUser) return [];
-    return orders.filter(o => o.sellerId === currentUser.id && o.status !== 'cancelled');
-  }, [orders, currentUser]);
-
-  // Identify Gig orders vs Project orders
-  const myGigIds = useMemo(() => new Set(myGigs.map(g => g.id)), [myGigs]);
-
-  const myGigOrders = useMemo(() => {
-    return mySellerOrders.filter(o => {
-      if (o.orderType === 'gig' || o.type === 'gig') return true;
-      if (o.orderType === 'project' || o.type === 'project') return false;
-      if (o.projectId || o.proposalId) return false;
-      return Boolean(o.gigId && myGigIds.has(o.gigId)) || Boolean(o.gigId);
-    });
-  }, [mySellerOrders, myGigIds]);
-
   const resolveSellerOrderFinancial = useCallback(
     (ord?: Order) => {
       if (!ord) {
@@ -201,6 +183,28 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     [financialSnapshot]
   );
 
+  // All seller orders belonging to current freelancer (including cancelled orders that have recognized clearing earnings)
+  const mySellerOrders = useMemo(() => {
+    if (!currentUser) return [];
+    return orders.filter(
+      o =>
+        o.sellerId === currentUser.id &&
+        (o.status !== 'cancelled' || resolveSellerOrderFinancial(o).freelancerNetEarned > 0)
+    );
+  }, [orders, currentUser, resolveSellerOrderFinancial]);
+
+  // Identify Gig orders vs Project orders
+  const myGigIds = useMemo(() => new Set(myGigs.map(g => g.id)), [myGigs]);
+
+  const myGigOrders = useMemo(() => {
+    return mySellerOrders.filter(o => {
+      if (o.orderType === 'gig' || o.type === 'gig') return true;
+      if (o.orderType === 'project' || o.type === 'project') return false;
+      if (o.projectId || o.proposalId) return false;
+      return Boolean(o.gigId && myGigIds.has(o.gigId)) || Boolean(o.gigId);
+    });
+  }, [mySellerOrders, myGigIds]);
+
   const myProjectOrders = useMemo(() => {
     return mySellerOrders.filter(
       o => o.orderType === 'project' || o.type === 'project' || Boolean(o.projectId) || Boolean(o.proposalId) || !o.gigId
@@ -215,7 +219,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       soldMap[gig.id] = 0;
     }
     for (const order of myGigOrders) {
-      if (order.gigId && isOrderCompletedOrActive(order)) {
+      if (order.gigId && (isOrderCompletedOrActive(order) || resolveSellerOrderFinancial(order).freelancerNetEarned > 0)) {
         soldMap[order.gigId] = (soldMap[order.gigId] || 0) + 1;
         if (order.createdAt && !activityMap[order.gigId]) {
           activityMap[order.gigId] = formatActivityDate(order.createdAt);
@@ -223,7 +227,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       }
     }
     return { gigSoldCounts: soldMap, lastActivityByGigId: activityMap };
-  }, [myGigs, myGigOrders]);
+  }, [myGigs, myGigOrders, resolveSellerOrderFinancial]);
 
   // Non-deleted gigs for normal views, declined shows deleted/rejected
   const filteredGigs = useMemo(() => {
@@ -271,7 +275,9 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
 
       const buyer = users.find(u => u.id === order.buyerId);
       const isCompleted = order.status === 'completed';
+      const isCancelled = order.status === 'cancelled' || (order.status as string) === 'refunded';
       const fin = resolveSellerOrderFinancial(order);
+      const hasRecognizedEarnings = fin.freelancerNetEarned > 0;
       const orderContractAmount =
         Number(order.amount) ||
         linkedProposal?.bidAmount ||
@@ -279,16 +285,25 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
         linkedProject?.budgetMax ||
         0;
 
-      const displayAmount = isCompleted
-        ? fin.freelancerNetEarned
-        : fin.inEscrow > 0
-          ? fin.inEscrow
-          : orderContractAmount;
-      const amountLabel = isCompleted
-        ? 'EARNINGS'
-        : fin.inEscrow > 0
-          ? 'IN ESCROW'
-          : 'CONTRACT VALUE';
+      let displayAmount = orderContractAmount;
+      let amountLabel = 'CONTRACT VALUE';
+      if (hasRecognizedEarnings || isCompleted) {
+        displayAmount = fin.freelancerNetEarned;
+        amountLabel = 'EARNINGS';
+      } else if (isCancelled) {
+        displayAmount = 0;
+        amountLabel = 'CANCELLED';
+      } else if (fin.inEscrow > 0) {
+        displayAmount = fin.inEscrow;
+        amountLabel = 'IN ESCROW';
+      }
+
+      const statusCategory: FreelancerProjectActivityItem['statusCategory'] =
+        isCompleted || hasRecognizedEarnings
+          ? 'completed'
+          : isCancelled
+            ? 'cancelled'
+            : 'in_progress';
 
       items.push({
         id: `order-${order.id}`,
@@ -301,14 +316,14 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
         amountLabel,
         location: linkedProject?.location || 'Remote',
         refNumber: toNumericRef(order.projectId || order.id, index),
-        statusCategory: isCompleted ? 'completed' : 'in_progress',
+        statusCategory,
         order,
         workstreamOrderId: order.id,
         projectId: linkedProject?.id || order.projectId
       });
     });
 
-    // 2. Proposals submitted by this freelancer that don't yet have an order
+    // 2. Proposals submitted by this freelancer that don't yet have an order in myProjectOrders
     const myProposals = proposals.filter(
       pr => pr.freelancerId === currentUser.id && !coveredProposalIds.has(pr.id)
     );
@@ -320,36 +335,55 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       const linkedProject = projects.find(p => p.id === proposal.projectId);
       const buyer = linkedProject ? users.find(u => u.id === linkedProject.buyerId) : undefined;
 
-      const matchingOrder = mySellerOrders.find(
+      const matchingOrder = orders.find(
         o =>
-          o.id === proposal.workstreamOrderId ||
-          o.projectId === proposal.projectId ||
-          o.proposalId === proposal.id
+          o.sellerId === currentUser.id &&
+          (o.id === proposal.workstreamOrderId ||
+            o.projectId === proposal.projectId ||
+            o.proposalId === proposal.id)
       );
 
-      const isAccepted =
-        proposal.status === 'accepted' ||
-        Boolean(matchingOrder) ||
-        linkedProject?.status === 'in_progress' ||
-        linkedProject?.status === 'in-progress' ||
-        linkedProject?.status === 'completed';
-      const isCompleted = matchingOrder?.status === 'completed';
+      const isCancelled =
+        matchingOrder?.status === 'cancelled' ||
+        (matchingOrder?.status as string) === 'refunded' ||
+        (linkedProject?.status as string) === 'cancelled';
+      const isCompleted = matchingOrder?.status === 'completed' || linkedProject?.status === 'completed';
 
       const bidAmount = Number(proposal.bidAmount) || linkedProject?.budget || linkedProject?.budgetMax || 0;
       const fin = resolveSellerOrderFinancial(matchingOrder);
+      const hasRecognizedEarnings = fin.freelancerNetEarned > 0;
       const contractAmount = Number(matchingOrder?.amount ?? bidAmount);
 
-      let displayAmount = 0;
+      const isAccepted =
+        !isCancelled &&
+        (proposal.status === 'accepted' ||
+          Boolean(matchingOrder) ||
+          linkedProject?.status === 'in_progress' ||
+          linkedProject?.status === 'in-progress' ||
+          linkedProject?.status === 'completed');
+
+      let displayAmount = bidAmount;
       let amountLabel = 'PROPOSAL';
-      if (isCompleted) {
+      let statusCategory: FreelancerProjectActivityItem['statusCategory'] = 'pending_proposals';
+
+      if (hasRecognizedEarnings || isCompleted) {
         displayAmount = fin.freelancerNetEarned;
         amountLabel = 'EARNINGS';
+        statusCategory = 'completed';
+      } else if (isCancelled) {
+        if (matchingOrder || proposal.status === 'accepted') {
+          displayAmount = 0;
+          amountLabel = 'CANCELLED';
+          statusCategory = 'cancelled';
+        } else {
+          displayAmount = bidAmount;
+          amountLabel = 'PROPOSAL';
+          statusCategory = 'pending_proposals';
+        }
       } else if (isAccepted) {
         displayAmount = fin.inEscrow > 0 ? fin.inEscrow : contractAmount;
         amountLabel = fin.inEscrow > 0 ? 'IN ESCROW' : 'CONTRACT VALUE';
-      } else {
-        displayAmount = bidAmount;
-        amountLabel = 'PROPOSAL';
+        statusCategory = 'in_progress';
       }
 
       items.push({
@@ -363,7 +397,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
         amountLabel,
         location: linkedProject?.location || 'Remote',
         refNumber: toNumericRef(proposal.projectId || proposal.id, idx + 100),
-        statusCategory: isCompleted ? 'completed' : isAccepted ? 'in_progress' : 'pending_proposals',
+        statusCategory,
         order: matchingOrder,
         workstreamOrderId: matchingOrder?.id || proposal.workstreamOrderId,
         projectId: linkedProject?.id || proposal.projectId
@@ -371,7 +405,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     });
 
     return items;
-  }, [currentUser, myProjectOrders, mySellerOrders, projects, proposals, users, resolveSellerOrderFinancial]);
+  }, [currentUser, myProjectOrders, orders, projects, proposals, users, resolveSellerOrderFinancial]);
 
   const filteredProjectItems = useMemo(() => {
     return allProjectItems.filter(item => {
@@ -385,7 +419,9 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     const nonDeletedGigs = myGigs.filter(g => g.status !== 'deleted');
     const postedCount = nonDeletedGigs.length;
     const activeCount = nonDeletedGigs.filter(g => g.status === 'active').length;
-    const soldCount = myGigOrders.filter(isOrderCompletedOrActive).length;
+    const soldCount = myGigOrders.filter(
+      o => isOrderCompletedOrActive(o) || resolveSellerOrderFinancial(o).freelancerNetEarned > 0
+    ).length;
     const earnings =
       typeof financialSnapshot?.gigEarnedToDate === 'number'
         ? financialSnapshot.gigEarnedToDate
@@ -418,7 +454,7 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
         : Number(
             (
               allProjectItems
-                .filter(i => i.statusCategory === 'completed')
+                .filter(i => i.amountLabel === 'EARNINGS')
                 .reduce((sumCents, i) => sumCents + Math.round(Number(i.earningsAmount || 0) * 100), 0) / 100
             ).toFixed(2)
           );
