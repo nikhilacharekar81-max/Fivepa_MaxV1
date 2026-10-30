@@ -213,6 +213,10 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
   const handleSubmitProposalForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!proposalCover.trim()) return;
+    if (!Number.isFinite(numericBid) || numericBid < 5) {
+      setProposalActionError('Minimum proposal amount is $5.00.');
+      return;
+    }
     setProposalActionError(null);
 
     if (onSubmitProposal) {
@@ -1049,7 +1053,7 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
                         <input
                           type="number"
                           min="5"
-                          step="5"
+                          step="0.01"
                           value={proposalBid}
                           onChange={(e) => setProposalBid(e.target.value)}
                           required

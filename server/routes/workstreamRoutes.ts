@@ -887,10 +887,10 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
     }
 
     const amount = Math.round(Number(req.body?.amount) * 100) / 100;
-    const minAmount = Math.max(10, Number(siteSettings.getFlattenedSettings().minOrderAmount) || 10);
+    const minAmount = 5;
     if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'Enter a valid amount.' });
     if (amount > 100000) return res.status(400).json({ error: 'Amount is too large.' });
-    if (amount < minAmount) return res.status(400).json({ error: `Minimum amount is ${siteSettings.getFlattenedSettings().currencySymbol || '$'}${minAmount}.` });
+    if (amount < minAmount) return res.status(400).json({ error: `Minimum amount is ${siteSettings.getFlattenedSettings().currencySymbol || '$'}${minAmount.toFixed(2)}.` });
 
     const rawTitle = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
     const title = kind === 'deposit' ? (rawTitle || 'Escrow deposit') : rawTitle;
@@ -924,6 +924,10 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       if (!funded || activeEscrow <= 0) return res.status(400).json({ error: 'Final invoices are for completed work on a funded workstream.' });
       if (activeEscrow > 0 && amount < activeEscrow) {
         return res.status(400).json({ error: `Final invoice amount cannot be less than the funded escrow price ($${activeEscrow}).` });
+      }
+      const topUpDiff = Math.round((amount - activeEscrow) * 100) / 100;
+      if (topUpDiff > 0 && topUpDiff < 5) {
+        return res.status(400).json({ error: 'Minimum invoice top-up amount is $5.00.' });
       }
       if (existingOffers.filter(o => o.kind === 'invoice' && o.status === 'pending').length >= 1) {
         return res.status(409).json({ error: 'A final invoice is already pending for this workstream.' });
@@ -1038,6 +1042,12 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
             }
             if (txActiveEscrow > 0 && amount < txActiveEscrow) {
               const err: any = new Error(`Final invoice amount cannot be less than the funded escrow price ($${txActiveEscrow}).`);
+              err.status = 400;
+              throw err;
+            }
+            const txTopUpDiff = Math.round((amount - txActiveEscrow) * 100) / 100;
+            if (txTopUpDiff > 0 && txTopUpDiff < 5) {
+              const err: any = new Error('Minimum invoice top-up amount is $5.00.');
               err.status = 400;
               throw err;
             }
@@ -1269,10 +1279,16 @@ async function executeUnifiedOfferAccept(
     const esc = await financialRepository.getEscrow(order.id);
     const currentEscrow = esc ? esc.remaining : Number(order.amount || 0);
     const invoiceAmount = Number(offer.amount);
+    if (!Number.isFinite(invoiceAmount) || invoiceAmount < 5) {
+      return { status: 400, body: { error: 'Minimum invoice amount is $5.00.' } };
+    }
     const additionalAmount = Math.round((invoiceAmount - currentEscrow) * 100) / 100;
 
     if (additionalAmount < 0) {
       return { status: 400, body: { error: `Final invoice amount ($${invoiceAmount}) cannot be less than the current order escrow ($${currentEscrow}).` } };
+    }
+    if (additionalAmount > 0 && additionalAmount < 5) {
+      return { status: 400, body: { error: 'Minimum invoice top-up amount is $5.00.' } };
     }
 
     let releasedFreelancerNet = 0;
@@ -1361,6 +1377,10 @@ async function executeUnifiedOfferAccept(
       }
     };
   } else if (isInitialFunding) {
+    const offerAmt = Math.round(Number(offer.amount) * 100) / 100;
+    if (!Number.isFinite(offerAmt) || offerAmt < 5) {
+      return { status: 400, body: { error: 'Minimum order amount is $5.00.' } };
+    }
     if (order.status === 'funded_in_escrow' || (await orderHasEscrow(order.id))) {
       return { status: 409, body: { error: 'Order escrow is already funded.' } };
     }
@@ -1447,6 +1467,10 @@ async function executeUnifiedOfferAccept(
       }
     };
   } else if (isFollowOnAfterCompletion || isCancelledOrRefundedFollowOn || ((order.status === 'completed' || order.status === 'cancelled' || (order.status as string) === 'refunded') && offer.kind === 'proposal')) {
+    const offerAmt = Math.round(Number(offer.amount) * 100) / 100;
+    if (!Number.isFinite(offerAmt) || offerAmt < 5) {
+      return { status: 400, body: { error: 'Minimum order amount is $5.00.' } };
+    }
     const newOrderId = 'ord_' + randomUUID().slice(0, 12);
     const isGigFollowOn = order.orderType === 'gig' || (Boolean(order.gigId) && !order.projectId);
     const orderType: 'gig' | 'project' = isGigFollowOn ? 'gig' : 'project';
@@ -1556,6 +1580,10 @@ async function executeUnifiedOfferAccept(
       }
     };
   } else {
+    const offerAmt = Math.round(Number(offer.amount) * 100) / 100;
+    if (!Number.isFinite(offerAmt) || offerAmt < 5) {
+      return { status: 400, body: { error: 'Minimum escrow deposit amount is $5.00.' } };
+    }
     await postgresStore.executeInTransaction(async (client) => {
       const offerLockRes = await client.query('SELECT status FROM workstream_offers WHERE id = $1 FOR UPDATE', [offer.id]);
       if (offerLockRes.rows.length > 0 && offerLockRes.rows[0].status !== 'pending') {
@@ -1641,7 +1669,7 @@ async function executeWorkspaceInquiryOfferAccept(
   }
 
   const offerAmount = Math.round(Number(offer.amount) * 100) / 100;
-  const minOrderAmount = Math.max(10, Number(siteSettings.getSettings().commission?.minimumOrderAmount) || 10);
+  const minOrderAmount = 5;
   if (!Number.isFinite(offerAmount) || offerAmount < minOrderAmount) {
     return { status: 400, body: { error: `Minimum order amount is $${minOrderAmount.toFixed(2)}.` } };
   }

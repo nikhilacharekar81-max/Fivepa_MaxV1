@@ -547,7 +547,7 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
     }
 
     if (!isInquiry) {
-      const minOrderAmount = Math.max(10, Number(siteSettings.getSettings().commission?.minimumOrderAmount) || 10);
+      const minOrderAmount = 5;
       if (!Number.isFinite(rawAmount) || rawAmount < minOrderAmount) {
         return res.status(400).json({ error: `Minimum order amount is $${minOrderAmount.toFixed(2)}.` });
       }
@@ -1438,6 +1438,13 @@ router.post('/orders/:id/deliverable', requireAuth, requireActiveStatus, async (
       const activeEsc = await getActiveEscrowRemaining(order);
       const requestedAmt = Math.round(Number(req.body.invoiceAmount || activeEsc || order.amount || 0) * 100) / 100;
       const invAmt = requestedAmt >= activeEsc && requestedAmt > 0 ? requestedAmt : (activeEsc || Number(order.amount || 0));
+      if (invAmt < 5) {
+        return res.status(400).json({ error: 'Minimum invoice amount is $5.00.' });
+      }
+      const topUpDiff = Math.round((invAmt - activeEsc) * 100) / 100;
+      if (topUpDiff > 0 && topUpDiff < 5) {
+        return res.status(400).json({ error: 'Minimum invoice top-up amount is $5.00.' });
+      }
       const invTitle = (typeof req.body.invoiceTitle === 'string' && req.body.invoiceTitle.trim().length >= 3)
         ? req.body.invoiceTitle.trim().slice(0, 120)
         : `Final Invoice: ${order.title}`.slice(0, 120);

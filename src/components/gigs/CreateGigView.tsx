@@ -254,6 +254,9 @@ export const CreateGigView: React.FC<CreateGigViewProps> = ({
             <label className="block text-xs font-bold text-fiverr-dark uppercase tracking-wider mb-2">Base Price ($)</label>
             <input 
               type="number" 
+              min={5}
+              max={10000}
+              step="0.01"
               value={newGigPrice}
               onChange={(e) => setNewGigPrice(Number(e.target.value))}
               required

@@ -74,6 +74,17 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
     const effectiveTitle = invoiceTitle.trim() || (isCustomOrderStream ? `Custom Order Invoice for ${order.title}` : `Invoice for ${order.title}`);
     const effectiveNotes = notes.trim() || effectiveTitle;
     const parsedAmount = Number(invoiceAmount) > 0 ? Number(invoiceAmount) : defaultEscrow;
+    if (!Number.isFinite(parsedAmount) || parsedAmount < 5) {
+      setUploadError(`Minimum invoice amount is ${currencySymbol}5.00.`);
+      return;
+    }
+    if (defaultEscrow > 0 && parsedAmount > defaultEscrow) {
+      const topUpDiff = Math.round((parsedAmount - defaultEscrow) * 100) / 100;
+      if (topUpDiff > 0 && topUpDiff < 5) {
+        setUploadError(`Minimum invoice top-up amount is ${currencySymbol}5.00.`);
+        return;
+      }
+    }
 
     onSubmitDelivery({
       notes: effectiveNotes,
@@ -140,7 +151,7 @@ export const WorkstreamDeliverModal: React.FC<WorkstreamDeliverModalProps> = ({
               <input
                 type="number"
                 required
-                min="1"
+                min="5"
                 step="0.01"
                 value={invoiceAmount}
                 onChange={(e) => setInvoiceAmount(e.target.value)}

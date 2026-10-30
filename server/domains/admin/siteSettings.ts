@@ -18,7 +18,7 @@ export interface PlatformCommissionSettings {
   smallOrderFeeAmount: number; // flat fee added when the gig price is strictly under the threshold (default 1.00)
   smallOrderFeeThreshold: number; // gig price below this triggers the small-order fee (default 200)
   refundClientFeesOnFullRefund: boolean; // return service + small-order fee when an order is fully refunded
-  minimumOrderAmount: number; // default 10.00
+  minimumOrderAmount: number; // default 5.00
   escrowProtectionDays: number; // default 14
   commissionDeductionTiming: 'on_escrow_release' | 'on_order_checkout';
 }
@@ -147,7 +147,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsState = {
     smallOrderFeeAmount: DEFAULT_FEE_CONFIG.smallOrderFee, // $1.00 flat fee...
     smallOrderFeeThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold, // ...on orders under $200
     refundClientFeesOnFullRefund: true,
-    minimumOrderAmount: 10.0,
+    minimumOrderAmount: 5.0,
     escrowProtectionDays: 14, // 14-day mandatory vault
     commissionDeductionTiming: 'on_escrow_release'
   },
@@ -232,26 +232,20 @@ export class SiteSettingsService {
   }
 
   private normalizeCommissionSettings(commission: PlatformCommissionSettings): PlatformCommissionSettings {
-    const rawMinOrder = Number(commission.minimumOrderAmount);
-    const normalizedMinOrder = Number.isFinite(rawMinOrder) ? Math.max(10, rawMinOrder) : 10;
     return {
       ...commission,
-      minimumOrderAmount: normalizedMinOrder
+      minimumOrderAmount: 5
     };
   }
 
   private normalizeMarketplaceGigLimits(marketplace: GigsProjectsOrdersSettings): GigsProjectsOrdersSettings {
-    const rawMin = Number(marketplace.minimumGigPrice);
-    const normalizedMin = Number.isFinite(rawMin) ? Math.min(10000, Math.max(5, rawMin)) : 5;
+    const normalizedMin = 5;
     const rawMax = Number(marketplace.maximumGigPrice);
     const normalizedMax =
       Number.isFinite(rawMax) && rawMax > 0
         ? Math.min(10000, Math.max(normalizedMin, rawMax))
         : 10000;
-    const rawMinProjectBudget = Number(marketplace.minimumProjectBudget);
-    const normalizedMinProjectBudget = Number.isFinite(rawMinProjectBudget)
-      ? Math.max(5, rawMinProjectBudget)
-      : 5;
+    const normalizedMinProjectBudget = 5;
     const rawMaxProjectBudget = Number(marketplace.maximumProjectBudget);
     const normalizedMaxProjectBudget =
       Number.isFinite(rawMaxProjectBudget) && rawMaxProjectBudget > 0

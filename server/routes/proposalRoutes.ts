@@ -97,8 +97,8 @@ proposalRouter.post('/proposals', requireAuth, requireActiveStatus, rateLimit(30
       return res.status(400).json({ error: 'You cannot submit a proposal to your own project.' });
     }
     const bidAmount = Math.round(Number(req.body.bidAmount) * 100) / 100;
-    if (!Number.isFinite(bidAmount) || bidAmount <= 0) {
-      return res.status(400).json({ error: 'Enter a valid USD bid amount.' });
+    if (!Number.isFinite(bidAmount) || bidAmount < 5) {
+      return res.status(400).json({ error: 'Minimum proposal amount is $5.00.' });
     }
     const deliveryDays = Math.max(1, Math.min(365, Math.round(Number(req.body.deliveryDays) || 7)));
 
@@ -159,6 +159,11 @@ export async function processProposalAccept(req: any, res: any) {
     const caller = (req as any).authenticatedUser || (await store.getUser(authUserId));
     if (!caller || (caller.status !== 'active' && caller.status !== 'restricted')) return res.status(403).json({ error: 'Authentication required' });
     if (buyerId !== caller.id) return res.status(403).json({ error: 'Forbidden: Only the project buyer can accept proposals.' });
+
+    const bidAmount = Math.round(Number(proposal.bidAmount) * 100) / 100;
+    if (!Number.isFinite(bidAmount) || bidAmount < 5) {
+      return res.status(400).json({ error: 'Minimum order amount is $5.00.' });
+    }
 
     const orderId = 'ord_' + randomUUID().slice(0, 12);
     const today = new Date().toISOString().split('T')[0];
@@ -461,7 +466,7 @@ const handleProposalUpdate = async (req: Request, res: Response) => {
     if (req.body.coverLetter !== undefined) proposal.coverLetter = String(req.body.coverLetter).trim();
     if (req.body.bidAmount !== undefined) {
       const bid = Math.round(Number(req.body.bidAmount) * 100) / 100;
-      if (!Number.isFinite(bid) || bid <= 0) return res.status(400).json({ error: 'Enter a valid bid amount' });
+      if (!Number.isFinite(bid) || bid < 5) return res.status(400).json({ error: 'Minimum proposal amount is $5.00.' });
       proposal.bidAmount = bid;
     }
     if (req.body.deliveryDays !== undefined) {

@@ -3,7 +3,7 @@
 // - 20% Freelancer Commission
 // - 1% Buyer Service Fee
 // - $1.00 Small Order Fee for orders strictly below $200
-// - $1.00 Minimum Order Amount
+// - $5.00 Minimum Order Amount
 
 export interface FeeConfig {
   /** Platform commission taken from the gig price (freelancer keeps 100 - this). Default 20. */
@@ -14,7 +14,7 @@ export interface FeeConfig {
   smallOrderFee: number;
   /** Orders with a gig price strictly below this get the small-order fee. Default 200. */
   smallOrderThreshold: number;
-  /** Minimum order amount allowed. Default 1.00. */
+  /** Minimum order amount allowed. Default 5.00. */
   minimumOrderAmount?: number;
 }
 
@@ -23,7 +23,7 @@ export const DEFAULT_FEE_CONFIG: FeeConfig = {
   buyerFeePercent: 1,
   smallOrderFee: 1.00,
   smallOrderThreshold: 200,
-  minimumOrderAmount: 1.00
+  minimumOrderAmount: 5.00
 };
 
 export const DEFAULT_FEE_POLICY: FeeConfig = DEFAULT_FEE_CONFIG;

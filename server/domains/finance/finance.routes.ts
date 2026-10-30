@@ -573,6 +573,9 @@ router.post('/payments/escrow/deposit', requireAuth, requireFinancialActiveStatu
       return res.status(400).json({ error: 'Please enter a valid escrow deposit amount greater than $0.00 with at most 2 decimal places.' });
     }
     const amount = Math.round(rawNumAmount * 100) / 100;
+    if (amount < 5) {
+      return res.status(400).json({ error: 'Minimum escrow deposit amount is $5.00.' });
+    }
     if (amount > 100000) {
       return res.status(400).json({ error: 'Amount exceeds maximum limit ($100,000.00).' });
     }
@@ -1743,8 +1746,8 @@ router.post('/payments/invoices', requireAuth, async (req: Request, res: Respons
       });
     }
     const subtotal = Number((subtotalCents / 100).toFixed(2));
-    if (subtotal <= 0) {
-      return res.status(400).json({ error: 'Invoice total must be greater than $0.00.' });
+    if (subtotal < 5) {
+      return res.status(400).json({ error: 'Minimum invoice amount is $5.00.' });
     }
     const platformFee = 0;
     const total = subtotal;

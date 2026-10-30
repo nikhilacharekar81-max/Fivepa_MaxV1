@@ -32,7 +32,7 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
   const [clientServiceFee, setClientServiceFee] = useState<number>(initialClientServiceFee);
   const [smallOrderFeeAmount, setSmallOrderFeeAmount] = useState<number>(initialSmallOrderFeeAmount);
   const [smallOrderFeeThreshold, setSmallOrderFeeThreshold] = useState<number>(initialSmallOrderFeeThreshold);
-  const [minOrder, setMinOrder] = useState<number>(0);
+  const [minOrder, setMinOrder] = useState<number>(5);
   const [minPayout, setMinPayout] = useState<number>(3);
 
   // Gigs Marketplace Specific Settings
@@ -177,7 +177,7 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
     setEscrowHoldDays(14);
     setAutoCompleteDays(3);
     setAutoCompleteEnabled(true);
-    setMinOrder(10);
+    setMinOrder(5);
     setMinPayout(3);
     setMinGigPrice(5);
     setMaxGigPrice(10000);

@@ -598,6 +598,10 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
       setEscrowModalError('Please enter a valid USD amount greater than $0.00 with at most 2 decimal places.');
       return;
     }
+    if ((escrowModalMode === 'buyer_deposit' || escrowModalMode === 'seller_request') && amt < 5) {
+      setEscrowModalError('Minimum escrow deposit amount is $5.00.');
+      return;
+    }
 
     setIsSubmittingEscrow(true);
     setEscrowModalError(null);
@@ -785,8 +789,8 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
   const handleCreateInvoiceSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const amt = parseFloat(invoiceAmount);
-    if (isNaN(amt) || amt <= 0) {
-      setCreateInvoiceError('Please enter a valid invoice amount in USD.');
+    if (isNaN(amt) || amt < 5) {
+      setCreateInvoiceError('Minimum invoice amount is $5.00.');
       return;
     }
 
@@ -2625,7 +2629,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                   <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
                   <input
                     type="number"
-                    min="1"
+                    min={escrowModalMode === 'wallet_topup' ? '1' : '5'}
                     step="0.01"
                     value={escrowDepositAmount}
                     onChange={e => setEscrowDepositAmount(e.target.value)}
@@ -2767,7 +2771,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">$</span>
                     <input
                       type="number"
-                      min="1"
+                      min="5"
                       step="any"
                       required
                       value={invoiceAmount}

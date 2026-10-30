@@ -920,8 +920,8 @@ export class FinancialTransactionService {
       const comm = siteSettings.getSettings().commission;
 
       const gigPrice = Number(orderRow ? orderRow.amount : params.amount.toFixed(2));
-      if (gigPrice < 1.00) {
-        throw new Error('Minimum order amount is $1.00');
+      if (gigPrice < 5.00) {
+        throw new Error('Minimum order amount is $5.00.');
       }
 
       const calculated = calculateOrderFees(gigPrice, {
@@ -1011,7 +1011,7 @@ export class FinancialTransactionService {
         commissionPercent,
         buyerFeePercent,
         smallOrderThreshold,
-        minimumOrderAmount: 1.00,
+        minimumOrderAmount: 5.00,
         currency: 'USD',
         policyVersion: 'v1.0.0-authoritative',
         capturedAt: new Date().toISOString()
@@ -1405,6 +1405,9 @@ export class FinancialTransactionService {
 
   async topUpEscrow(params: { orderId: string; orderTitle: string; amount: number; buyerId: string; sellerId: string; actor: string; idempotencyKey?: string; }, externalClient?: any) {
     assertValidMoneyAmount(params.amount, 'topUp amount');
+    if (params.amount < 5.00) {
+      throw new Error('Minimum escrow deposit amount is $5.00.');
+    }
     assertPostgresAvailable();
 
     const run = async (client: any) => {

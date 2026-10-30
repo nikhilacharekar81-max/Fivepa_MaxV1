@@ -40,7 +40,7 @@ export const StartWorkstreamModal: React.FC<StartWorkstreamModalProps> = ({
     onSubmit({
       title: title.trim(),
       partnerId,
-      amount: Math.max(1, Number(amount) || 50),
+      amount: Math.max(5, Number(amount) || 50),
       turnaroundDays: Math.max(1, Number(turnaroundDays) || 3),
       requirements: requirements.trim() || 'Workstream scope agreed via initial brief.'
     });

@@ -160,9 +160,15 @@ export const WorkstreamMessageInput: React.FC<WorkstreamMessageInputProps> = ({
   const submitOffer = async () => {
     if (tab === 'message' || tab === 'refund' || !onCreateOffer || submitting) return;
     const amt = Number(amount);
-    if (!Number.isFinite(amt) || amt <= 0) return setFormError(`Enter an amount greater than ${currencySymbol}0.`);
+    if (!Number.isFinite(amt) || amt < 5) return setFormError(`Minimum amount is ${currencySymbol}5.00.`);
     if (tab === 'invoice' && defaultInvoiceAmount > 0 && amt < defaultInvoiceAmount) {
       return setFormError(`Invoice amount cannot be less than the funded escrow amount (${currencySymbol}${defaultInvoiceAmount.toLocaleString()}).`);
+    }
+    if (tab === 'invoice' && defaultInvoiceAmount > 0 && amt > defaultInvoiceAmount) {
+      const topUpDiff = Math.round((amt - defaultInvoiceAmount) * 100) / 100;
+      if (topUpDiff > 0 && topUpDiff < 5) {
+        return setFormError(`Minimum invoice top-up amount is ${currencySymbol}5.00.`);
+      }
     }
     if (tab !== 'deposit' && title.trim().length < 3) {
       return setFormError(tab === 'proposal' ? 'Add a proposal title (at least 3 characters).' : 'Add a description for the invoice (at least 3 characters).');
