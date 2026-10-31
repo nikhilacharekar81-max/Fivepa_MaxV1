@@ -106,9 +106,16 @@ export function saveGigsToPostgres() { return Promise.resolve(); }
 export async function syncUserBalances(userIds?: string[], externalClient?: any) {
   const runSync = async (client: any, isSavepoint: boolean) => {
     const spName = 'sp_sync_user_balances';
+    let savepointCreated = false;
     try {
       if (isSavepoint) {
-        await client.query(`SAVEPOINT ${spName}`);
+        try {
+          await client.query(`SAVEPOINT ${spName}`);
+          savepointCreated = true;
+        } catch (spErr) {
+          console.error('[syncUserBalances] Transaction is in an unsafe or aborted state, cannot establish savepoint:', spErr);
+          throw spErr;
+        }
       }
       const hasSpecificUsers = Array.isArray(userIds) && userIds.length > 0;
 
@@ -157,19 +164,40 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
               AND u.spent IS DISTINCT FROM bs.net_spent
           `, [distinctIds]);
 
-          await client.query(`
-            UPDATE wallets w
-            SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
-            FROM (
+          // Phase 3 M1: Detect wallet funds_on_hold discrepancy against active escrows, log to reconciliation_exceptions (NO silent overwrite)
+          const holdDiscrepancyRes = await client.query(`
+            SELECT w.user_id, w.funds_on_hold, COALESCE(e.escrow_hold, 0.00) AS expected_hold
+            FROM wallets w
+            JOIN (
               SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
               FROM wallets w2
               LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
               WHERE w2.user_id = ANY($1::text[])
               GROUP BY w2.user_id
-            ) e
-            WHERE w.user_id = e.user_id
+            ) e ON w.user_id = e.user_id
+            WHERE w.user_id = ANY($1::text[])
               AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
           `, [distinctIds]);
+
+          if (holdDiscrepancyRes.rows.length > 0) {
+            for (const r of holdDiscrepancyRes.rows) {
+              const storedHold = Number(r.funds_on_hold || 0);
+              const expectedHold = Number(r.expected_hold || 0);
+              const diff = Math.abs(storedHold - expectedHold);
+              const exId = `RE_WEHM_${r.user_id.slice(0, 32)}_${randomUUID().slice(0, 8)}`;
+              await client.query(`
+                INSERT INTO reconciliation_exceptions (id, type, entity_id, amount, description, detected_at)
+                VALUES ($1, $2, $3, $4, $5, NOW()::text)
+                ON CONFLICT (id) DO NOTHING
+              `, [
+                exId,
+                'WALLET_ESCROW_HOLD_MISMATCH',
+                r.user_id,
+                diff,
+                `Wallet funds_on_hold ($${storedHold.toFixed(2)}) does not match active escrow total ($${expectedHold.toFixed(2)}) for user ${r.user_id}. Discrepancy: $${diff.toFixed(2)}.`
+              ]);
+            }
+          }
         }
       } else {
         // Unified Lock Order: 1. Lock all Active Escrows sorted by order_id ASC
@@ -211,24 +239,44 @@ export async function syncUserBalances(userIds?: string[], externalClient?: any)
             AND u.spent IS DISTINCT FROM bs.net_spent
         `);
 
-        await client.query(`
-          UPDATE wallets w
-          SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
-          FROM (
+        // Phase 3 M1: Detect wallet funds_on_hold discrepancy against active escrows, log to reconciliation_exceptions (NO silent overwrite)
+        const allHoldDiscrepancyRes = await client.query(`
+          SELECT w.user_id, w.funds_on_hold, COALESCE(e.escrow_hold, 0.00) AS expected_hold
+          FROM wallets w
+          JOIN (
             SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
             FROM wallets w2
             LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
             GROUP BY w2.user_id
-          ) e
-          WHERE w.user_id = e.user_id
-            AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
+          ) e ON w.user_id = e.user_id
+          WHERE w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00)
         `);
+
+        if (allHoldDiscrepancyRes.rows.length > 0) {
+          for (const r of allHoldDiscrepancyRes.rows) {
+            const storedHold = Number(r.funds_on_hold || 0);
+            const expectedHold = Number(r.expected_hold || 0);
+            const diff = Math.abs(storedHold - expectedHold);
+            const exId = `RE_WEHM_${r.user_id.slice(0, 32)}_${randomUUID().slice(0, 8)}`;
+            await client.query(`
+              INSERT INTO reconciliation_exceptions (id, type, entity_id, amount, description, detected_at)
+              VALUES ($1, $2, $3, $4, $5, NOW()::text)
+              ON CONFLICT (id) DO NOTHING
+            `, [
+              exId,
+              'WALLET_ESCROW_HOLD_MISMATCH',
+              r.user_id,
+              diff,
+              `Wallet funds_on_hold ($${storedHold.toFixed(2)}) does not match active escrow total ($${expectedHold.toFixed(2)}) for user ${r.user_id}. Discrepancy: $${diff.toFixed(2)}.`
+            ]);
+          }
+        }
       }
-      if (isSavepoint) {
+      if (savepointCreated) {
         await client.query(`RELEASE SAVEPOINT ${spName}`);
       }
     } catch (err) {
-      if (isSavepoint) {
+      if (savepointCreated) {
         try { await client.query(`ROLLBACK TO SAVEPOINT ${spName}`); } catch {}
       }
       console.error('[syncUserBalances] Error syncing balances:', err);

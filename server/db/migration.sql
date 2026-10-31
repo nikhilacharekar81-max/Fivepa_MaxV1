@@ -1171,17 +1171,6 @@ END $$;
 DROP TRIGGER IF EXISTS trg_clamp_wallet_fields_before ON wallets;
 DROP FUNCTION IF EXISTS trg_clamp_wallet_fields();
 
--- Self-heal any existing wallets where funds_on_hold is out of sync with active escrows
-UPDATE wallets w
-SET funds_on_hold = COALESCE(e.escrow_hold, 0.00)
-FROM (
-  SELECT w2.user_id, COALESCE(SUM(esc.remaining), 0.00) AS escrow_hold
-  FROM wallets w2
-  LEFT JOIN escrows esc ON esc.buyer_id = w2.user_id AND esc.status IN ('held', 'split')
-  GROUP BY w2.user_id
-) e
-WHERE w.user_id = e.user_id
-  AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00);
 
 -- Phase 3 M4: Bind provider settlement references to individual payouts
 ALTER TABLE payouts ADD COLUMN IF NOT EXISTS provider_reference VARCHAR(255);
