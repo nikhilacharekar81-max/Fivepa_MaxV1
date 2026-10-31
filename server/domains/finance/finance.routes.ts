@@ -877,7 +877,33 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(10, 60_000), as
 
 const handlePaymentWebhook = async (req: Request, res: Response) => {
   const rawBody = req.body;
-  const gateway = String(req.headers['x-gateway-provider'] || req.query.gateway || 'stripe').trim().toLowerCase();
+  let detectedGateway = String(req.headers['x-gateway-provider'] || req.query.gateway || '').trim().toLowerCase();
+  if (!detectedGateway) {
+    if (req.headers['paypal-transmission-id'] || req.headers['paypal-auth-algo'] || req.headers['paypal-cert-url']) {
+      detectedGateway = 'paypal';
+    } else if (req.headers['stripe-signature']) {
+      detectedGateway = 'stripe';
+    } else if (req.headers['x-razorpay-signature']) {
+      detectedGateway = 'razorpay';
+    } else {
+      detectedGateway = 'stripe';
+    }
+  }
+
+  let payload: any;
+  try {
+    payload = JSON.parse(req.body.toString());
+  } catch {
+    return res.status(400).json({ error: 'Malformed JSON payload' });
+  }
+
+  if (detectedGateway === 'stripe' && !req.headers['stripe-signature']) {
+    if (payload?.event_type && (payload?.resource || String(payload?.id || '').startsWith('WH-'))) {
+      detectedGateway = 'paypal';
+    }
+  }
+  const gateway = detectedGateway;
+
   const isVerified = await paymentGatewayManager.verifyWebhookSignature({
     gateway,
     headers: req.headers,
@@ -888,29 +914,68 @@ const handlePaymentWebhook = async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Unauthorized: Invalid or missing provider webhook signature' });
   }
 
-  let payload: any;
-  try {
-    payload = JSON.parse(req.body.toString());
-  } catch {
-    return res.status(400).json({ error: 'Malformed JSON payload' });
-  }
-
-  const { event, userId, amount, reference, transactionId, eventId, currency, checkoutId, sessionId } = payload || {};
-  const txId = transactionId || eventId;
-  if (!txId || typeof txId !== 'string' || !txId.trim()) {
-    return res.status(400).json({ error: 'Missing required transactionId or eventId' });
-  }
-  if (!currency || currency !== 'USD') {
-    return res.status(400).json({ error: 'Invalid or missing currency: provider webhook currency must be explicitly USD.' });
-  }
-
-  const validEvents = ['payment.succeeded', 'checkout.session.completed', 'payment_intent.succeeded', 'payment.captured', 'order.approved'];
-  if (!validEvents.includes(event)) {
+  const rawEvent = String(payload?.event_type || payload?.event || payload?.type || '').trim().toLowerCase();
+  const validEvents = [
+    'payment.succeeded',
+    'checkout.session.completed',
+    'payment_intent.succeeded',
+    'payment.captured',
+    'order.approved',
+    'checkout.order.approved',
+    'payment.capture.completed',
+    'checkout.order.completed'
+  ];
+  if (!validEvents.includes(rawEvent)) {
     return res.json({ received: true });
   }
 
-  const lookupSessionKey = (checkoutId || sessionId) ? String(checkoutId || sessionId).trim() : null;
-  const lookupOrderKey = payload?.orderId ? String(payload.orderId).trim() : null;
+  const txId = String(
+    payload?.resource?.id ||
+    payload?.id ||
+    payload?.transactionId ||
+    payload?.eventId ||
+    ''
+  ).trim();
+  if (!txId) {
+    return res.status(400).json({ error: 'Missing required transactionId or eventId' });
+  }
+
+  const currency = String(
+    payload?.currency ||
+    payload?.resource?.amount?.currency_code ||
+    payload?.resource?.purchase_units?.[0]?.amount?.currency_code ||
+    'USD'
+  ).trim().toUpperCase();
+  if (currency !== 'USD') {
+    return res.status(400).json({ error: 'Invalid or missing currency: provider webhook currency must be explicitly USD.' });
+  }
+
+  const payloadAmount = payload?.amount !== undefined
+    ? Number(payload.amount)
+    : (payload?.resource?.amount?.value !== undefined || payload?.resource?.purchase_units?.[0]?.amount?.value !== undefined)
+      ? Number(payload?.resource?.amount?.value || payload?.resource?.purchase_units?.[0]?.amount?.value)
+      : undefined;
+
+  const userId = payload?.userId;
+  const reference = payload?.reference || payload?.resource?.invoice_id || txId;
+
+  const lookupSessionKey = (
+    payload?.checkoutId ||
+    payload?.sessionId ||
+    payload?.resource?.purchase_units?.[0]?.reference_id ||
+    payload?.resource?.custom_id ||
+    payload?.resource?.supplementary_data?.related_ids?.order_id
+  ) ? String(
+    payload?.checkoutId ||
+    payload?.sessionId ||
+    payload?.resource?.purchase_units?.[0]?.reference_id ||
+    payload?.resource?.custom_id ||
+    payload?.resource?.supplementary_data?.related_ids?.order_id
+  ).trim() : null;
+
+  const lookupOrderKey = (payload?.orderId || payload?.resource?.invoice_id)
+    ? String(payload?.orderId || payload?.resource?.invoice_id).trim()
+    : null;
 
   try {
     // Pre-fetch and verify candidate checkout session strictly OUTSIDE the database transaction
@@ -938,6 +1003,14 @@ const handlePaymentWebhook = async (req: Request, res: Response) => {
         [txId]
       );
       if (preByTx.rows.length > 0) preSess = preByTx.rows[0];
+    }
+    if (!preSess && payload?.resource?.supplementary_data?.related_ids?.order_id) {
+      const relatedOrdId = payload.resource.supplementary_data.related_ids.order_id;
+      const preByRelated = await pool.query(
+        'SELECT * FROM payment_checkout_sessions WHERE provider_tx_id = $1 LIMIT 1',
+        [relatedOrdId]
+      );
+      if (preByRelated.rows.length > 0) preSess = preByRelated.rows[0];
     }
     if (!preSess && !lookupSessionKey && lookupOrderKey) {
       const preByOrd = await pool.query(
@@ -1017,9 +1090,8 @@ const handlePaymentWebhook = async (req: Request, res: Response) => {
       if (userId !== undefined && userId !== null && String(userId) !== '' && String(userId) !== authoritativeUserId) {
         throw { status: 400, message: 'Checkout session user mismatch.' };
       }
-      if (amount !== undefined && amount !== null && amount !== '') {
-        const payloadAmount = Number(amount);
-        if (!Number.isFinite(payloadAmount) || Math.round(payloadAmount * 100) !== Math.round(authoritativeAmount * 100)) {
+      if (payloadAmount !== undefined && Number.isFinite(payloadAmount)) {
+        if (Math.round(payloadAmount * 100) !== Math.round(authoritativeAmount * 100)) {
           throw { status: 400, message: 'Checkout session amount mismatch.' };
         }
       }

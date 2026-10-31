@@ -1183,4 +1183,9 @@ FROM (
 WHERE w.user_id = e.user_id
   AND w.funds_on_hold IS DISTINCT FROM COALESCE(e.escrow_hold, 0.00);
 
+-- Phase 3 M4: Bind provider settlement references to individual payouts
+ALTER TABLE payouts ADD COLUMN IF NOT EXISTS provider_reference VARCHAR(255);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payouts_provider_ref ON payouts (provider_reference) WHERE provider_reference IS NOT NULL;
+
+
 

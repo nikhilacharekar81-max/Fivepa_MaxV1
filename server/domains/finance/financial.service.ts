@@ -916,25 +916,73 @@ export class FinancialTransactionService {
         }
       }
 
-      const { siteSettings } = await import('../admin/siteSettings.js');
-      const comm = siteSettings.getSettings().commission;
-
       const gigPrice = Number(orderRow ? orderRow.amount : params.amount.toFixed(2));
       if (gigPrice < 5.00) {
         throw new Error('Minimum order amount is $5.00.');
       }
 
-      const calculated = calculateOrderFees(gigPrice, {
-        commissionPercent: comm.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent,
-        buyerFeePercent: comm.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
-        smallOrderFee: comm.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
-        smallOrderThreshold: comm.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold
-      });
+      let parsedFeeSnapshot: any = null;
+      if (orderRow?.fee_breakdown) {
+        try {
+          parsedFeeSnapshot = typeof orderRow.fee_breakdown === 'string'
+            ? JSON.parse(orderRow.fee_breakdown)
+            : orderRow.fee_breakdown;
+        } catch {
+          parsedFeeSnapshot = null;
+        }
+      }
 
-      const serviceFee = calculated.serviceFee;
-      const smallOrderFee = calculated.smallOrderFee;
-      const commissionPercent = comm.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent;
-      const clientTotal = calculated.clientTotal;
+      let serviceFee: number;
+      let smallOrderFee: number;
+      let commissionPercent: number;
+      let clientTotal: number;
+      let buyerFeePercent: number;
+      let smallOrderThreshold: number;
+      let freelancerNet: number;
+      let platformCommission: number;
+
+      if (parsedFeeSnapshot && (parsedFeeSnapshot.clientTotal !== undefined || parsedFeeSnapshot.serviceFee !== undefined || parsedFeeSnapshot.buyerFee !== undefined)) {
+        // M2: Use persisted original checkout/order fee snapshot
+        serviceFee = Number((parsedFeeSnapshot.serviceFee ?? parsedFeeSnapshot.buyerFee ?? 0).toFixed(2));
+        smallOrderFee = Number((parsedFeeSnapshot.smallOrderFee ?? 0).toFixed(2));
+        commissionPercent = Number((parsedFeeSnapshot.commissionPercent ?? (parsedFeeSnapshot.freelancerPercent !== undefined ? 100 - parsedFeeSnapshot.freelancerPercent : 20)).toFixed(2));
+        clientTotal = Number((parsedFeeSnapshot.clientTotal ?? (gigPrice + serviceFee + smallOrderFee)).toFixed(2));
+        buyerFeePercent = Number((parsedFeeSnapshot.buyerFeePercent ?? 1).toFixed(2));
+        smallOrderThreshold = Number((parsedFeeSnapshot.smallOrderThreshold ?? 200).toFixed(2));
+        platformCommission = parsedFeeSnapshot.platformCommission !== undefined
+          ? Number(Number(parsedFeeSnapshot.platformCommission).toFixed(2))
+          : Number((gigPrice * (commissionPercent / 100)).toFixed(2));
+        freelancerNet = parsedFeeSnapshot.freelancerNet !== undefined
+          ? Number(Number(parsedFeeSnapshot.freelancerNet).toFixed(2))
+          : Number((gigPrice - platformCommission).toFixed(2));
+      } else if (orderRow && (orderRow.service_fee !== null && orderRow.service_fee !== undefined || orderRow.small_order_fee !== null && orderRow.small_order_fee !== undefined)) {
+        serviceFee = Number(Number(orderRow.service_fee || 0).toFixed(2));
+        smallOrderFee = Number(Number(orderRow.small_order_fee || 0).toFixed(2));
+        const policy = resolveEffectiveFeePolicy(orderRow);
+        commissionPercent = policy.commissionPercent;
+        buyerFeePercent = policy.buyerFeePercent;
+        smallOrderThreshold = policy.smallOrderThreshold;
+        clientTotal = Number((gigPrice + serviceFee + smallOrderFee).toFixed(2));
+        platformCommission = Number((gigPrice * (commissionPercent / 100)).toFixed(2));
+        freelancerNet = Number((gigPrice - platformCommission).toFixed(2));
+      } else {
+        const { siteSettings } = await import('../admin/siteSettings.js');
+        const comm = siteSettings.getSettings().commission;
+        const calculated = calculateOrderFees(gigPrice, {
+          commissionPercent: comm.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent,
+          buyerFeePercent: comm.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+          smallOrderFee: comm.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
+          smallOrderThreshold: comm.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold
+        });
+        serviceFee = calculated.serviceFee;
+        smallOrderFee = calculated.smallOrderFee;
+        commissionPercent = comm.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent;
+        buyerFeePercent = comm.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent;
+        smallOrderThreshold = comm.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold;
+        clientTotal = calculated.clientTotal;
+        platformCommission = calculated.platformCommission;
+        freelancerNet = calculated.freelancerNet;
+      }
 
       const idempKey = params.idempotencyKey || `IDEMP-ORD-FUND-${params.orderId}`;
       const payloadFingerprint = {
@@ -997,17 +1045,14 @@ export class FinancialTransactionService {
          VALUES ($1, $2, $3, $4, $5, $5, 'held', $6, $7, $8)`,
         [params.orderId, params.orderTitle, params.buyerId, params.sellerId, gigPrice, serviceFee, smallOrderFee, commissionPercent]
       );
-      
-      const buyerFeePercent = comm.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent;
-      const smallOrderThreshold = comm.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold;
 
-      const feeSnapshot = {
+      const feeSnapshot = parsedFeeSnapshot || {
         gigPrice,
         serviceFee,
         smallOrderFee,
         clientTotal,
-        freelancerNet: calculated.freelancerNet,
-        platformCommission: calculated.platformCommission,
+        freelancerNet,
+        platformCommission,
         commissionPercent,
         buyerFeePercent,
         smallOrderThreshold,
@@ -1128,15 +1173,22 @@ export class FinancialTransactionService {
       const gross = Number(escrow.remaining);
       assertValidMoneyAmount(gross, 'escrow remaining balance');
 
-      // Verify buyer wallet hold invariant against authoritative held escrows locked above
+      // Invariant check: Fail safely and log to reconciliation_exceptions if buyer wallet hold is insufficient (NO silent overwrite - M1)
       let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
       if (buyerHold < gross) {
-        if (authoritativeHold >= gross) {
-          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [authoritativeHold, escrow.buyer_id]);
-          buyerHold = authoritativeHold;
-        } else {
-          throw new Error(`Cannot release escrow for order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is insufficient for release ($${gross.toFixed(2)}).`);
-        }
+        await client.query(
+          `INSERT INTO reconciliation_exceptions (id, type, entity_id, amount, description, detected_at)
+           VALUES ($1, $2, $3, $4, $5, NOW()::text)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            randomUUID(),
+            'WALLET_HOLD_INSUFFICIENT',
+            escrow.buyer_id,
+            Math.abs(buyerHold - gross),
+            `Buyer wallet hold ($${buyerHold.toFixed(2)}) is inconsistent or insufficient for releasing escrow gross ($${gross.toFixed(2)}) on order ${params.orderId}. Authoritative held: $${authoritativeHold.toFixed(2)}`
+          ]
+        ).catch(() => {});
+        throw new Error(`Cannot release escrow for order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is inconsistent or insufficient for release ($${gross.toFixed(2)}).`);
       }
 
       const orderRowForFee = orderRes.rows[0];
@@ -1308,15 +1360,22 @@ export class FinancialTransactionService {
         throw new Error(`Refund amount ($${refundAmount}) exceeds available escrow remaining ($${availableToRefund}).`);
       }
 
-      // Verify buyer wallet hold invariant and reconcile safely under lock if needed
+      // Invariant check: Fail safely and log to reconciliation_exceptions if buyer wallet hold is insufficient (NO silent overwrite - M1)
       let buyerHold = Number(buyerWallet?.funds_on_hold || 0);
       if (buyerHold < refundAmount) {
-        if (authoritativeHold >= refundAmount) {
-          await client.query('UPDATE wallets SET funds_on_hold = $1 WHERE user_id = $2', [authoritativeHold, escrow.buyer_id]);
-          buyerHold = authoritativeHold;
-        } else {
-          throw new Error(`Cannot refund order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is insufficient for refund ($${refundAmount.toFixed(2)}).`);
-        }
+        await client.query(
+          `INSERT INTO reconciliation_exceptions (id, type, entity_id, amount, description, detected_at)
+           VALUES ($1, $2, $3, $4, $5, NOW()::text)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            randomUUID(),
+            'WALLET_HOLD_INSUFFICIENT',
+            escrow.buyer_id,
+            Math.abs(buyerHold - refundAmount),
+            `Buyer wallet hold ($${buyerHold.toFixed(2)}) is inconsistent or insufficient for refunding ($${refundAmount.toFixed(2)}) on order ${params.orderId}. Authoritative held: $${authoritativeHold.toFixed(2)}`
+          ]
+        ).catch(() => {});
+        throw new Error(`Cannot refund order ${params.orderId}: Buyer wallet hold ($${buyerHold.toFixed(2)}) is insufficient for refund ($${refundAmount.toFixed(2)}).`);
       }
 
       const completesFullRefund = (refundAmount === availableToRefund && Number(escrow.released_gross || 0) === 0);
@@ -1617,7 +1676,7 @@ export class FinancialTransactionService {
       );
 
       const debitAcct = params.source === 'gateway' ? '1020' : '1010';
-      const creditAcct = wallet.user_role === 'freelancer' ? '2020' : '2010';
+      const creditAcct = (params as any).roleContext === 'freelancer' ? '2020' : '2010';
       const entries = [
         { account_code: debitAcct, debit: depAmount, credit: 0, description: 'Deposit asset', user_id: null },
         { account_code: creditAcct, debit: 0, credit: depAmount, description: 'User wallet payable liability', user_id: params.userId }
@@ -1709,9 +1768,6 @@ export class FinancialTransactionService {
 
       if (wallet.status === 'frozen' || wallet.status === 'suspended' || wallet.status === 'restricted') {
         throw new Error(`Cannot request payout from a ${wallet.status} wallet.`);
-      }
-      if (wallet.user_role !== 'freelancer') {
-        throw new Error('Only freelancers can request payouts.');
       }
 
       if (!Number.isFinite(params.amount) || params.amount <= 0 || Math.abs(Math.round(params.amount * 100) - params.amount * 100) > 1e-6) {
@@ -1973,7 +2029,7 @@ export class FinancialTransactionService {
         [journalId, `PROMO-${params.targetId}-${Date.now()}`, params.description, 'PROMOTION_FEE_COLLECTED', idempKey, params.actor]
       );
 
-      const acct = wallet.user_role === 'freelancer' ? '2020' : '2010';
+      const acct = params.targetType === 'gig' ? '2020' : '2010';
       const entries = [
         { account_code: acct, debit: params.feeAmount, credit: 0, description: params.description, user_id: params.userId },
         { account_code: '4040', debit: 0, credit: params.feeAmount, description: 'Platform promo revenue', user_id: null }
@@ -2058,6 +2114,13 @@ export class FinancialTransactionService {
         throw new Error('Provider reference is required to settle payout.');
       }
 
+      if (params.providerReference) {
+        const dupRef = await client.query('SELECT id FROM payouts WHERE provider_reference = $1 AND id != $2', [params.providerReference, params.payoutId]);
+        if (dupRef.rows.length > 0) {
+          throw new Error(`Provider reference "${params.providerReference}" is already used for payout ${dupRef.rows[0].id}.`);
+        }
+      }
+
       if (!verifiedOutsideTx) {
         throw new Error(`Payout settlement could not be verified with payment provider for payout ${params.payoutId}`);
       }
@@ -2074,19 +2137,31 @@ export class FinancialTransactionService {
       const amount = Number(payout.amount);
       let pendingBal = Number(freelancerWallet?.pending_withdrawals || 0);
 
-      // Verify pending_withdrawals invariant and reconcile safely under lock if needed
+      // Invariant check: Fail safely and log to reconciliation_exceptions if pending withdrawals is insufficient (NO silent overwrite - M1)
       if (pendingBal < amount) {
-        const reconciledPending = Number(activePayoutRows.rows.reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0).toFixed(2));
-        if (reconciledPending >= amount) {
-          await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, freelancerId]);
-          pendingBal = reconciledPending;
-        } else {
-          throw new Error(`Cannot settle payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
-        }
+        await client.query(
+          `INSERT INTO reconciliation_exceptions (id, type, entity_id, amount, description, detected_at)
+           VALUES ($1, $2, $3, $4, $5, NOW()::text)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            randomUUID(),
+            'WALLET_PENDING_WITHDRAWAL_INSUFFICIENT',
+            freelancerId,
+            Math.abs(pendingBal - amount),
+            `Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is inconsistent or insufficient for payout ($${amount.toFixed(2)}) on payout ${params.payoutId}.`
+          ]
+        ).catch(() => {});
+        throw new Error(`Cannot settle payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
       }
 
       await client.query('UPDATE wallets SET pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, freelancerId]);
-      await client.query("UPDATE payouts SET status = 'processed', processed_at = NOW(), updated_at = NOW() WHERE id = $1", [params.payoutId]);
+      const updRes = await client.query(
+        "UPDATE payouts SET status = 'processed', provider_reference = $1, processed_at = NOW(), updated_at = NOW() WHERE id = $2 AND status IN ('pending', 'approved') RETURNING *",
+        [params.providerReference || null, params.payoutId]
+      );
+      if (updRes.rows.length === 0) {
+        throw new Error(`Cannot settle payout ${params.payoutId}: payout status is not pending or approved.`);
+      }
 
       const journalId = 'jnl_' + randomUUID().slice(0, 12);
       await client.query(
@@ -2145,15 +2220,21 @@ export class FinancialTransactionService {
       const amount = Number(payout.amount);
       let pendingBal = Number(freelancerWallet?.pending_withdrawals || 0);
 
-      // Verify pending_withdrawals invariant and reconcile safely under lock if needed
+      // Invariant check: Fail safely and log to reconciliation_exceptions if pending withdrawals is insufficient (NO silent overwrite - M1)
       if (pendingBal < amount) {
-        const reconciledPending = Number(activePayoutRows.rows.reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0).toFixed(2));
-        if (reconciledPending >= amount) {
-          await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, freelancerId]);
-          pendingBal = reconciledPending;
-        } else {
-          throw new Error(`Cannot cancel payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
-        }
+        await client.query(
+          `INSERT INTO reconciliation_exceptions (id, type, entity_id, amount, description, detected_at)
+           VALUES ($1, $2, $3, $4, $5, NOW()::text)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            randomUUID(),
+            'WALLET_PENDING_WITHDRAWAL_INSUFFICIENT',
+            freelancerId,
+            Math.abs(pendingBal - amount),
+            `Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is inconsistent or insufficient for cancelling payout ($${amount.toFixed(2)}) on payout ${params.payoutId}.`
+          ]
+        ).catch(() => {});
+        throw new Error(`Cannot cancel payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
       }
 
       await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, freelancerId]);
@@ -2230,15 +2311,21 @@ export class FinancialTransactionService {
       const amount = Number(payout.amount);
       let pendingBal = Number(freelancerWallet?.pending_withdrawals || 0);
 
-      // Verify pending_withdrawals invariant and reconcile safely under lock if needed
+      // Invariant check: Fail safely and log to reconciliation_exceptions if pending withdrawals is insufficient (NO silent overwrite - M1)
       if (pendingBal < amount) {
-        const reconciledPending = Number(activePayoutRows.rows.reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0).toFixed(2));
-        if (reconciledPending >= amount) {
-          await client.query('UPDATE wallets SET pending_withdrawals = $1 WHERE user_id = $2', [reconciledPending, freelancerId]);
-          pendingBal = reconciledPending;
-        } else {
-          throw new Error(`Cannot fail payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
-        }
+        await client.query(
+          `INSERT INTO reconciliation_exceptions (id, type, entity_id, amount, description, detected_at)
+           VALUES ($1, $2, $3, $4, $5, NOW()::text)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            randomUUID(),
+            'WALLET_PENDING_WITHDRAWAL_INSUFFICIENT',
+            freelancerId,
+            Math.abs(pendingBal - amount),
+            `Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is inconsistent or insufficient for failing payout ($${amount.toFixed(2)}) on payout ${params.payoutId}.`
+          ]
+        ).catch(() => {});
+        throw new Error(`Cannot fail payout ${params.payoutId}: Wallet pending withdrawals ($${pendingBal.toFixed(2)}) is insufficient for payout ($${amount.toFixed(2)}).`);
       }
 
       await client.query('UPDATE wallets SET available_balance = available_balance + $1, pending_withdrawals = pending_withdrawals - $1 WHERE user_id = $2', [amount, freelancerId]);
@@ -2339,9 +2426,6 @@ export class FinancialTransactionService {
       if (wallet.status === 'frozen' || wallet.status === 'suspended' || wallet.status === 'restricted') {
         throw new Error(`Cannot retry payout for a ${wallet.status} wallet.`);
       }
-      if (wallet.user_role !== 'freelancer') {
-        throw new Error('Only freelancers can retry payouts.');
-      }
 
       const { siteSettings } = await import('../admin/siteSettings.js');
       const walletConfig = siteSettings.getSettings().wallets;
@@ -2359,7 +2443,7 @@ export class FinancialTransactionService {
         }
       }
 
-      const minPayout = walletConfig.minimumWithdrawalAmount ?? 10.00;
+      const minPayout = walletConfig.minimumWithdrawalAmount ?? 3.00;
       if (amount < minPayout) {
         throw new Error(`Minimum payout withdrawal amount is $${minPayout.toFixed(2)}.`);
       }

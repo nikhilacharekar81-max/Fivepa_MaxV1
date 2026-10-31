@@ -563,14 +563,42 @@ export class PaymentGatewayManager {
             signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
           });
           if (!captureRes.ok) {
-            return { verified: false, error: `PayPal order capture failed (${captureRes.status})` };
+            let isAlreadyCaptured = false;
+            try {
+              const errJson: any = await captureRes.json();
+              const errStr = JSON.stringify(errJson);
+              if (captureRes.status === 422 && (errStr.includes('ORDER_ALREADY_CAPTURED') || errStr.includes('ORDER_COMPLETED'))) {
+                isAlreadyCaptured = true;
+              }
+            } catch {
+              // ignore parse errors
+            }
+
+            // Re-fetch order status to verify if it was already captured concurrently or earlier
+            const recheckRes = await fetch(`${paypalHost}/v2/checkout/orders/${encodeURIComponent(idToLookup)}`, {
+              headers: { 'Authorization': `Bearer ${tokenData.access_token}` },
+              signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
+            });
+            if (recheckRes.ok) {
+              orderData = await recheckRes.json();
+            } else if (!isAlreadyCaptured) {
+              return { verified: false, error: `PayPal order capture failed (${captureRes.status})` };
+            }
+          } else {
+            orderData = await captureRes.json();
           }
-          orderData = await captureRes.json();
         }
 
         if (orderData.status !== 'COMPLETED') {
           return { verified: false, error: `PayPal order status is ${orderData.status}. Payment must be COMPLETED.` };
         }
+
+        // Verify purchase_units[0].reference_id matches FivePA checkout session if sessionId provided
+        const refId = orderData.purchase_units?.[0]?.reference_id || orderData.purchase_units?.[0]?.custom_id;
+        if (params.sessionId && refId && refId !== params.sessionId) {
+          return { verified: false, error: `PayPal reference mismatch: expected session ${params.sessionId}, got ${refId}` };
+        }
+
         const unit = orderData.purchase_units?.[0]?.amount ||
           orderData.purchase_units?.[0]?.payments?.captures?.[0]?.amount;
         if (!unit) return { verified: false, error: 'PayPal purchase unit amount missing.' };

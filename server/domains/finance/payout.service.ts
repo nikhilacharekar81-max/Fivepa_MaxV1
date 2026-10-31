@@ -180,16 +180,15 @@ export async function handlePayoutRequest(req: Request, res: Response) {
 
     const accountDetails = String(req.body?.accountDetails || 'Primary Bank Account').slice(0, 500);
 
-    // Atomic wallet row lock + eligibility check + OTP consumption + Payout creation inside a single database transaction:
+    // Atomic payout lock + wallet row lock + eligibility check + OTP consumption + Payout creation inside a single database transaction:
     const txOutcome = await postgresStore.executeInTransaction(async (client) => {
+      // H2: Lock active payouts for freelancer FIRST before acquiring wallet lock
+      await client.query("SELECT id FROM payouts WHERE freelancer_id = $1 AND status IN ('pending', 'approved') ORDER BY id ASC FOR UPDATE", [freelancerId]);
       const walletRes = await client.query('SELECT available_balance, status, user_role FROM wallets WHERE user_id = $1 FOR UPDATE', [freelancerId]);
       if (walletRes.rows.length > 0) {
         const wallet = walletRes.rows[0];
         if (wallet.status === 'frozen' || wallet.status === 'suspended' || wallet.status === 'restricted') {
           throw new Error(`Cannot request payout from a ${wallet.status} wallet.`);
-        }
-        if (wallet.user_role && wallet.user_role !== 'freelancer') {
-          throw new Error('Only freelancers can request payouts.');
         }
         if (Number(wallet.available_balance || 0) < numAmount) {
           throw new Error('Insufficient available balance.');
@@ -298,7 +297,7 @@ export const approvePayout = async (req: Request, res: Response) => {
   try {
     const payoutId = req.params.id;
     const updatedPayout = await postgresStore.executeInTransaction(async (client) => {
-      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
+      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
       if (pRes.rows.length === 0) throw { status: 404, message: 'Payout not found' };
       const payout = pRes.rows[0];
       if (payout.status === 'approved') {
@@ -308,9 +307,12 @@ export const approvePayout = async (req: Request, res: Response) => {
         throw { status: 400, message: `Cannot approve payout in status "${payout.status}"` };
       }
       const updated = await client.query(
-        "UPDATE payouts SET status = 'approved', updated_at = NOW() WHERE id = $1 RETURNING *",
+        "UPDATE payouts SET status = 'approved', updated_at = NOW() WHERE id = $1 AND status = 'pending' RETURNING *",
         [payoutId]
       );
+      if (updated.rows.length === 0) {
+        throw { status: 400, message: 'Cannot approve payout: payout was not in pending status.' };
+      }
       return mapPayoutRow(updated.rows[0]);
     });
 
@@ -354,7 +356,7 @@ export const processPayout = async (req: Request, res: Response) => {
     }
 
     const { journal, freelancerId } = await postgresStore.executeInTransaction(async (client) => {
-      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
+      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
       if (pCheck.rows.length === 0) throw { status: 404, message: 'Payout not found' };
       const preRow = pCheck.rows[0];
       if (preRow.status !== 'pending' && preRow.status !== 'approved') {
@@ -394,7 +396,7 @@ export const rejectPayout = async (req: Request, res: Response) => {
     const actor = adminActor(req);
 
     const { freelancerId } = await postgresStore.executeInTransaction(async (client) => {
-      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
+      const pRes = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
       if (pRes.rows.length === 0) throw { status: 404, message: 'Payout not found' };
       const payoutRow = pRes.rows[0];
       if (payoutRow.status !== 'pending' && payoutRow.status !== 'approved') {
@@ -427,7 +429,7 @@ export const failPayout = async (req: Request, res: Response) => {
     const actor = adminActor(req);
 
     const txResult = await postgresStore.executeInTransaction(async (client) => {
-      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1', [payoutId]);
+      const pCheck = await client.query('SELECT * FROM payouts WHERE id = $1 FOR UPDATE', [payoutId]);
       if (pCheck.rows.length === 0) throw { status: 404, message: 'Payout not found' };
       const currentPayout = pCheck.rows[0];
 
