@@ -2,7 +2,11 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Briefcase,
   CheckCircle2,
-  PlusCircle
+  PlusCircle,
+  Sparkles,
+  CreditCard,
+  AlertCircle,
+  X
 } from 'lucide-react';
 import { Gig, Order, UserAccount, Category, Project, Proposal } from '../../types';
 import { UserFreelanceOffersList } from '../user_dashboard/UserFreelanceOffersList';
@@ -72,6 +76,18 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
   const [gigToDelete, setGigToDelete] = useState<{ id: string; title?: string } | null>(null);
   const [financialSnapshot, setFinancialSnapshot] = useState<any | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [featurePaymentModal, setFeaturePaymentModal] = useState<{
+    gig: Gig;
+    requiredFee: number;
+    currentBalance: number;
+    shortfall: number;
+    idempotencyKey: string;
+    depositIdempotencyKey: string;
+  } | null>(null);
+  const [featureTopUpAmount, setFeatureTopUpAmount] = useState<string>('10.00');
+  const [featureGateway, setFeatureGateway] = useState<'stripe' | 'paypal' | 'razorpay'>('stripe');
+  const [isProcessingFeatureTopUp, setIsProcessingFeatureTopUp] = useState(false);
+  const [featureModalError, setFeatureModalError] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -759,6 +775,45 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        const isInsufficientBalance =
+          nextFeatured &&
+          (data.code === 'INSUFFICIENT_WALLET_BALANCE' ||
+            /insufficient.*balance/i.test(String(data.error || '')));
+
+        if (isInsufficientBalance) {
+          const parsedFee = Number(data.requiredFee);
+          const requiredFee = Number.isFinite(parsedFee) && parsedFee > 0 ? parsedFee : 10;
+          const parsedBal = Number(
+            data.currentBalance ??
+              financialSnapshot?.availableBalance ??
+              currentUser?.walletBalance ??
+              0
+          );
+          const currentBalance = Number.isFinite(parsedBal) && parsedBal >= 0 ? parsedBal : 0;
+          const rawShortfall = Number((requiredFee - currentBalance).toFixed(2));
+          const shortfall = Math.max(1, rawShortfall > 0 ? rawShortfall : requiredFee);
+          const depNonce =
+            typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+          const ensuredFeatureKey =
+            idempotencyKey ||
+            `IDEMP-FEATGIG-${gig.id}-${currentUser?.id || 'seller'}-${depNonce}`;
+
+          setFeatureTopUpAmount(shortfall.toFixed(2));
+          setFeatureGateway('stripe');
+          setFeatureModalError(null);
+          setFeaturePaymentModal({
+            gig,
+            requiredFee,
+            currentBalance,
+            shortfall,
+            idempotencyKey: ensuredFeatureKey,
+            depositIdempotencyKey: `TOPUP-FEATGIG-${gig.id}-${currentUser?.id || 'seller'}-${depNonce}`
+          });
+          return;
+        }
+
         if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
           delete pendingFeatureActionKeyRef.current[gigId];
         }
@@ -793,6 +848,123 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
       showToast(`Network error while trying to ${nextFeatured ? 'feature' : 'unfeature'} gig.`);
     } finally {
       inFlightFeatureGigIdsRef.current.delete(gigId);
+    }
+  };
+
+  const handleConfirmFeatureTopUpAndPay = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!featurePaymentModal || isProcessingFeatureTopUp) return;
+
+    const { gig, requiredFee, shortfall, idempotencyKey, depositIdempotencyKey } = featurePaymentModal;
+    const rawTrimmed = String(featureTopUpAmount ?? '').trim();
+    const amt = Number(rawTrimmed);
+
+    if (!rawTrimmed || !Number.isFinite(amt) || amt <= 0 || Math.abs(Math.round(amt * 100) - amt * 100) > 1e-6) {
+      setFeatureModalError('Please enter a valid USD amount greater than $0.00 with at most 2 decimal places.');
+      return;
+    }
+    if (amt < shortfall) {
+      setFeatureModalError(`Minimum top-up required to cover the $${requiredFee.toFixed(2)} feature fee is $${shortfall.toFixed(2)}.`);
+      return;
+    }
+    if (amt > 5000) {
+      setFeatureModalError('Single top-up transactions are limited to $5,000.00 USD.');
+      return;
+    }
+
+    setIsProcessingFeatureTopUp(true);
+    setFeatureModalError(null);
+    inFlightFeatureGigIdsRef.current.add(gig.id);
+
+    try {
+      const baseHeaders = await ensureAuthHeaders();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...baseHeaders
+      };
+
+      const depRes = await fetch('/api/payments/deposit', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          userId: currentUser?.id,
+          amount: amt,
+          gateway: featureGateway,
+          idempotencyKey: depositIdempotencyKey
+        })
+      });
+
+      if (depRes.status === 501) {
+        const chkRes = await fetch('/api/payments/gateway/checkout', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            amount: amt,
+            currency: 'USD',
+            gateway: featureGateway,
+            purpose: 'deposit'
+          })
+        });
+        const chkData = await chkRes.json().catch(() => ({}));
+        if (!chkRes.ok) {
+          throw new Error(chkData.error || 'Failed to initialize external payment gateway checkout.');
+        }
+        if (chkData.redirectUrl) {
+          window.location.href = chkData.redirectUrl;
+          return;
+        }
+      } else if (!depRes.ok) {
+        const depData = await depRes.json().catch(() => ({}));
+        throw new Error(depData.error || 'Failed to process external wallet top-up.');
+      }
+
+      const featRes = await fetch(`/api/gigs/${gig.id}/feature`, {
+        method: 'PATCH',
+        headers: {
+          ...headers,
+          'Idempotency-Key': idempotencyKey,
+          'X-Idempotency-Key': idempotencyKey
+        },
+        body: JSON.stringify({
+          featured: true,
+          idempotencyKey,
+          operationId: idempotencyKey
+        })
+      });
+      const featData = await featRes.json().catch(() => ({}));
+      if (!featRes.ok) {
+        throw new Error(featData.error || 'Wallet topped up, but featuring the gig failed. Please click Feature It again.');
+      }
+
+      delete pendingFeatureActionKeyRef.current[gig.id];
+      setFeaturePaymentModal(null);
+
+      const updatedFeatured = typeof featData.featured === 'boolean' ? featData.featured : true;
+      setMyGigs(prev =>
+        prev.map(g =>
+          g.id === gig.id
+            ? {
+                ...g,
+                ...(featData.gig || {}),
+                featured: updatedFeatured,
+                ...(featData.featuredUntil !== undefined ? { featuredUntil: featData.featuredUntil } : {})
+              }
+            : g
+        )
+      );
+
+      const gatewayLabel =
+        featureGateway === 'stripe' ? 'Stripe' : featureGateway === 'paypal' ? 'PayPal' : 'Razorpay';
+      showToast(
+        `Paid $${amt.toFixed(2)} via ${gatewayLabel} & featured "${gig.title}" ($${Number(featData.feeCharged ?? requiredFee).toFixed(2)} fee charged)!`
+      );
+      await fetchMyGigs();
+      if (onRefresh) onRefresh();
+    } catch (err: any) {
+      setFeatureModalError(err?.message || 'Failed to complete external payment and feature gig.');
+    } finally {
+      setIsProcessingFeatureTopUp(false);
+      inFlightFeatureGigIdsRef.current.delete(gig.id);
     }
   };
 
@@ -1025,6 +1197,138 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
         onClose={() => setGigToDelete(null)}
         onConfirm={handleConfirmDelete}
       />
+
+      {/* FEATURE GIG EXTERNAL PAYMENT & TOP-UP MODAL */}
+      {featurePaymentModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-5">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm">Feature Gig — Instant Top-Up & Pay</h3>
+                  <p className="text-[11px] text-slate-500">Top up your USD wallet via external gateway and feature for 7 days</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!isProcessingFeatureTopUp) {
+                    setFeaturePaymentModal(null);
+                    setFeatureModalError(null);
+                  }
+                }}
+                className="text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-2 text-xs">
+              <div className="font-bold text-slate-900 line-clamp-1">
+                {featurePaymentModal.gig.title}
+              </div>
+              <div className="flex items-center justify-between text-slate-600">
+                <span>7-Day Featured Placement Fee:</span>
+                <span className="font-bold text-slate-900">${featurePaymentModal.requiredFee.toFixed(2)} USD</span>
+              </div>
+              <div className="flex items-center justify-between text-slate-600">
+                <span>Available Wallet Balance:</span>
+                <span className="font-semibold text-slate-700">${featurePaymentModal.currentBalance.toFixed(2)} USD</span>
+              </div>
+              <div className="pt-1.5 border-t border-slate-200 flex items-center justify-between text-emerald-700 font-bold">
+                <span>Shortfall Required:</span>
+                <span>${featurePaymentModal.shortfall.toFixed(2)} USD</span>
+              </div>
+            </div>
+
+            <form onSubmit={handleConfirmFeatureTopUpAndPay} className="space-y-4">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Select External Payment Method
+                </label>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  {([
+                    { id: 'stripe', label: 'Stripe', sub: 'Card / Apple Pay' },
+                    { id: 'paypal', label: 'PayPal', sub: 'PayPal USD' },
+                    { id: 'razorpay', label: 'Razorpay', sub: 'Intl / Card' }
+                  ] as const).map(gw => (
+                    <button
+                      key={gw.id}
+                      type="button"
+                      onClick={() => setFeatureGateway(gw.id)}
+                      className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                        featureGateway === gw.id
+                          ? 'border-emerald-600 bg-emerald-50/60 font-bold text-slate-900'
+                          : 'border-slate-200 text-slate-600 hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1">
+                        <CreditCard className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>{gw.label}</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-0.5 truncate">{gw.sub}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Top-Up Amount ($ USD)
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
+                  <input
+                    type="number"
+                    min={featurePaymentModal.shortfall.toFixed(2)}
+                    max="5000"
+                    step="0.01"
+                    value={featureTopUpAmount}
+                    onChange={e => setFeatureTopUpAmount(e.target.value)}
+                    className="w-full pl-8 pr-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold text-slate-900 focus:outline-hidden focus:bg-white"
+                  />
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Funds are credited to your wallet first, then ${featurePaymentModal.requiredFee.toFixed(2)} is deducted to feature your Gig.
+                </p>
+              </div>
+
+              {featureModalError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs flex items-center gap-2 font-medium">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{featureModalError}</span>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2.5 pt-2">
+                <button
+                  type="button"
+                  disabled={isProcessingFeatureTopUp}
+                  onClick={() => {
+                    setFeaturePaymentModal(null);
+                    setFeatureModalError(null);
+                  }}
+                  className="flex-1 py-2.5 px-4 rounded-xl border border-slate-300 text-slate-700 font-bold text-xs hover:bg-slate-50 cursor-pointer disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isProcessingFeatureTopUp}
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-emerald-600 text-white font-bold text-xs hover:bg-emerald-500 disabled:opacity-50 cursor-pointer"
+                >
+                  {isProcessingFeatureTopUp
+                    ? 'Processing Payment...'
+                    : `Pay $${Number(featureTopUpAmount || featurePaymentModal.shortfall).toFixed(2)} & Feature`}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

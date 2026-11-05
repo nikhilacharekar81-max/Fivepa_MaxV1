@@ -521,6 +521,19 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
   } catch (err: any) {
     console.error('[FeatureGig] Error:', err);
     const msg = err?.message || 'Failed to feature gig';
+    if (/insufficient.*wallet balance/i.test(msg)) {
+      const balMatch = msg.match(/\$([0-9]+(?:\.[0-9]+)?)\)\s+to\s+feature\s+this\s+gig\.\s+Required:\s+\$([0-9]+(?:\.[0-9]+)?)/i);
+      const currentBalance = balMatch ? Number(balMatch[1]) : 0;
+      const requiredFee = balMatch ? Number(balMatch[2]) : undefined;
+      const shortfall = requiredFee !== undefined ? Math.max(0, Number((requiredFee - currentBalance).toFixed(2))) : undefined;
+      return res.status(400).json({
+        error: msg,
+        code: 'INSUFFICIENT_WALLET_BALANCE',
+        currentBalance,
+        requiredFee,
+        shortfall
+      });
+    }
     const status = msg.includes('Forbidden') ? 403 : msg.includes('not found') ? 404 : 400;
     res.status(status).json({ error: msg });
   }
