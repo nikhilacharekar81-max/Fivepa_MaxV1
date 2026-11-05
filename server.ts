@@ -231,7 +231,15 @@ if (process.env.NODE_ENV !== 'test' && !server.listening) {
       try {
         const pool = postgresStore.getPool();
         const pathParts = (pathname || '').split('/').filter(Boolean).map(p => safeDecodeURIComponent(p));
-        const candidateTokens = Array.from(new Set(pathParts.filter(p => p.length > 0 && p.length <= 120)));
+        const topLevelStaticRoutes = new Set([
+          'gigs', 'projects', 'search-projects', 'project-search', 'freelance-jobs',
+          'freelancers', 'search-freelancers', 'freelancer-search',
+          'dashboard', 'orders', 'wallet', 'admin', 'messages', 'settings', 'activity', 'support'
+        ]);
+        const isSingleStaticRoute = pathParts.length === 1 && topLevelStaticRoutes.has(pathParts[0].toLowerCase());
+        const candidateTokens = isSingleStaticRoute
+          ? []
+          : Array.from(new Set(pathParts.filter(p => p.length > 0 && p.length <= 120 && !['gig', 'gigs', 'project', 'projects', 'categories'].includes(p.toLowerCase()))));
 
         const [gigsRes, usersRes, projectsRes] = await Promise.all([
           candidateTokens.length > 0

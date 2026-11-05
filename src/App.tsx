@@ -213,14 +213,17 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
     return false;
   }, [updateCurrentUser]);
 
-  // Initial client hydration fetch
+  // Initial client hydration fetch (single coordinated pass)
   useEffect(() => {
-    refresh();
-    loadUserSession().then((loaded) => {
-      if (loaded) {
+    let cancelled = false;
+    loadUserSession().finally(() => {
+      if (!cancelled) {
         refresh();
       }
     });
+    return () => {
+      cancelled = true;
+    };
   }, [loadUserSession, refresh]);
 
   // Liked Gigs state

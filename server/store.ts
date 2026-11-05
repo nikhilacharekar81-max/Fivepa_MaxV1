@@ -1632,13 +1632,14 @@ export async function hydrateStoreFromPostgres() {
     postgresStore.isHydrated = true;
 
     try {
-      const persistedSettings = await postgresStore.loadSiteSettings();
+      const [persistedSettings, persistedGateways, persistedCategories] = await Promise.all([
+        postgresStore.loadSiteSettings(),
+        postgresStore.loadPaymentGateways(),
+        postgresStore.loadCategories()
+      ]);
       if (persistedSettings) siteSettings.loadFromState(persistedSettings);
-
-      const persistedGateways = await postgresStore.loadPaymentGateways();
       if (persistedGateways) paymentGatewayManager.loadFromState(persistedGateways);
 
-      const persistedCategories = await postgresStore.loadCategories();
       const { setCategories, getCategories } = await import('./routes/adminRoutes.js');
       if (persistedCategories && Array.isArray(persistedCategories) && persistedCategories.length > 0) {
         setCategories(persistedCategories);
@@ -1649,7 +1650,6 @@ export async function hydrateStoreFromPostgres() {
       console.warn('[Store] Notice: Failed to hydrate site settings/gateways/categories:', settErr);
     }
 
-
     const skipDemoSeeding = process.env.NODE_ENV === 'production' && isRemotePostgresConfigured();
     if (skipDemoSeeding) {
       await workspaceService.hydrateFromPostgres();
@@ -1657,10 +1657,19 @@ export async function hydrateStoreFromPostgres() {
     }
 
     const pool = postgresStore.getPool();
-    const userCountRes = await pool.query("SELECT COUNT(*) as c FROM users WHERE id != 'system'");
+    const [userCountRes, alreadyInitialized] = await Promise.all([
+      pool.query("SELECT COUNT(*) as c FROM users WHERE id != 'system'"),
+      postgresStore.isInitialized()
+    ]);
     const userCount = Number(userCountRes.rows[0]?.c || 0);
 
-    if (userCount === 0 && !(await postgresStore.isInitialized())) {
+    if (userCount > 0 && alreadyInitialized && process.env.NODE_ENV !== 'test') {
+      await workspaceService.hydrateFromPostgres();
+      console.log('[PostgresStore] Zero split-brain Cloud Run architecture initialized (fast path).');
+      return;
+    }
+
+    if (userCount === 0 && !alreadyInitialized) {
       const defaultPass = await bcrypt.hash('Password123!', 10);
       const nowIso = new Date().toISOString();
       const seedUsers: User[] = [

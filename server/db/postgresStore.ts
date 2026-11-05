@@ -1,6 +1,7 @@
 import pkg from 'pg';
 import { PGlite } from '@electric-sql/pglite';
 import { AsyncLocalStorage } from 'async_hooks';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -506,9 +507,44 @@ export class PostgresStore {
       throw new Error(`FATAL: Database migration file (${migrationPath}) is empty.`);
     }
 
+    const migrationHash = createHash('sha256').update(sql).digest('hex');
+
+    if (process.env.NODE_ENV !== 'test') {
+      try {
+        const checkRes = await this.getPool().query(
+          `SELECT
+             (SELECT value->>'hash' FROM app_metadata WHERE key = 'schema_migration_hash') AS applied_hash,
+             to_regclass('public.users') IS NOT NULL AS has_users,
+             to_regclass('public.wallets') IS NOT NULL AS has_wallets,
+             to_regclass('public.orders') IS NOT NULL AS has_orders,
+             to_regclass('public.reconciliation_exceptions') IS NOT NULL AS has_recon`
+        );
+        const row = checkRes.rows[0];
+        if (
+          row &&
+          row.applied_hash === migrationHash &&
+          row.has_users &&
+          row.has_wallets &&
+          row.has_orders &&
+          row.has_recon
+        ) {
+          console.log(`[PostgresStore] Schema up-to-date (hash ${migrationHash.slice(0, 8)}). Skipping redundant migration DDL.`);
+          return;
+        }
+      } catch {
+        // Proceed with full migration if tables do not exist yet
+      }
+    }
+
     if (!isRemotePostgresConfigured()) {
       assertProductionPostgresConfigured();
       await this.getPool().query(sql);
+      await this.getPool().query(
+        `INSERT INTO app_metadata (key, value, updated_at)
+         VALUES ('schema_migration_hash', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [JSON.stringify({ hash: migrationHash, appliedAt: new Date().toISOString() })]
+      );
       console.log(`[PostgresStore] Migrations executed successfully on embedded PostgreSQL (${getDatabaseName()}).`);
       return;
     }
@@ -527,6 +563,12 @@ export class PostgresStore {
         ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "${appUser}";
         ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "${appUser}";
       `);
+      await adminPool.query(
+        `INSERT INTO app_metadata (key, value, updated_at)
+         VALUES ('schema_migration_hash', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [JSON.stringify({ hash: migrationHash, appliedAt: new Date().toISOString() })]
+      );
       console.log(`[PostgresStore] Migrations executed successfully on ${getDatabaseName()}.`);
     } finally {
       await adminPool.end();

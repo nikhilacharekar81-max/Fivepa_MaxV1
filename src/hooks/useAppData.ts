@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { UserAccount, Gig, Project, Proposal, Order, Dispute, Refund, Payout, Category, Review, SupportTicket, AuditLog, Message, WorkstreamOffer } from '../types';
 import { getAuthToken, setAuthToken, requestDemoSession } from '../utils/authToken';
 import { getDeviceId } from '../utils/deviceId';
@@ -29,6 +29,13 @@ export const useAppData = (initialData?: any) => {
   
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isFirstMountFetchRef = useRef(true);
+  const initialHydratedFlagsRef = useRef({
+    hasUsers: Array.isArray(initialData?.users) && initialData.users.length > 0,
+    hasGigs: Array.isArray(initialData?.gigs) && initialData.gigs.length > 0,
+    hasProjects: Array.isArray(initialData?.projects) && initialData.projects.length > 0,
+    hasCategories: Array.isArray(initialData?.categories) && initialData.categories.length > 0
+  });
 
   const fetchUserEmails = async (userId: string) => {
     try {
@@ -53,6 +60,8 @@ export const useAppData = (initialData?: any) => {
   const fetchData = useCallback(async (currentUserId?: string) => {
     setIsLoading(true);
     setError(null);
+    const isInitialMountPass = isFirstMountFetchRef.current;
+    isFirstMountFetchRef.current = false;
     try {
       let token = getAuthToken();
       let cachedUserId: string | null = currentUserId || null;
@@ -109,14 +118,19 @@ export const useAppData = (initialData?: any) => {
 
       let reqOpt = buildReqOpt(token);
 
+      const skipUsersOnMount = isInitialMountPass && !isAdminOrSupport && initialHydratedFlagsRef.current.hasUsers;
+      const skipGigsOnMount = isInitialMountPass && !isAdminOrSupport && initialHydratedFlagsRef.current.hasGigs;
+      const skipProjectsOnMount = isInitialMountPass && !isAdminOrSupport && initialHydratedFlagsRef.current.hasProjects;
+      const skipCategoriesOnMount = isInitialMountPass && !isAdminOrSupport && initialHydratedFlagsRef.current.hasCategories;
+
       let [uRes, gRes, pRes, prRes, offRes, oRes, cRes, revRes] = await Promise.all([
-        fetch('/api/users', reqOpt),
-        fetch('/api/gigs', reqOpt),
-        fetch('/api/projects', reqOpt),
+        skipUsersOnMount ? Promise.resolve(null) : fetch('/api/users', reqOpt),
+        skipGigsOnMount ? Promise.resolve(null) : fetch('/api/gigs', reqOpt),
+        skipProjectsOnMount ? Promise.resolve(null) : fetch('/api/projects', reqOpt),
         token ? fetch('/api/proposals', reqOpt) : Promise.resolve(null),
         token ? fetch('/api/offers', reqOpt) : Promise.resolve(null),
         token ? fetch('/api/orders', reqOpt) : Promise.resolve(null),
-        fetch('/api/categories', reqOpt),
+        skipCategoriesOnMount ? Promise.resolve(null) : fetch('/api/categories', reqOpt),
         fetch('/api/reviews', reqOpt)
       ]);
 

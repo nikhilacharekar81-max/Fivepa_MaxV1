@@ -868,11 +868,8 @@ export async function processAutoAcceptOrders(customNow?: number): Promise<Array
              AND o.status NOT IN ('completed', 'cancelled', 'refunded', 'disputed')
          ) cand`
       );
-      const targetOrders: Order[] = [];
-      for (const r of ordersRes.rows) {
-        const order = await store.getOrder(r.id);
-        if (order) targetOrders.push(order);
-      }
+      const fetchedOrders = await Promise.all(ordersRes.rows.map(r => store.getOrder(r.id)));
+      const targetOrders: Order[] = fetchedOrders.filter((o): o is Order => Boolean(o));
 
       for (const order of targetOrders) {
         const isProject = order.orderType === 'project' || (order as any).type === 'project' || Boolean(order.projectId);

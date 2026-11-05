@@ -4,6 +4,7 @@ import {
   DEFAULT_SITE_SETTINGS,
   siteSettings,
   store,
+  mapUserRow,
   type ExtensionRequest,
   type Message,
   type Dispute,
@@ -124,23 +125,25 @@ router.get('/orders', requireAuth, requireActiveStatus, async (req: Request, res
       return res.json([]);
     }
 
-    const [usersList, msgsRes] = await Promise.all([
+    const [usersRes, msgsRes] = await Promise.all([
       userIds.length > 0
-        ? Promise.all(userIds.map(id => store.getUser(id)))
-        : Promise.resolve([]),
+        ? pool.query('SELECT * FROM users WHERE id = ANY($1::text[])', [userIds])
+        : Promise.resolve({ rows: [] as any[] }),
       (orderIds.length > 0 || wsIds.length > 0)
         ? pool.query(`
-            SELECT id, order_id, workspace_id, metadata->>'workspaceId' AS meta_ws_id, text, timestamp
+            SELECT DISTINCT ON (COALESCE(order_id, workspace_id, metadata->>'workspaceId'))
+              id, order_id, workspace_id, metadata->>'workspaceId' AS meta_ws_id, text, timestamp
             FROM messages
             WHERE (order_id IS NOT NULL AND order_id = ANY($1::text[]))
                OR (order_id IS NULL AND (workspace_id = ANY($2::text[]) OR (metadata->>'workspaceId') = ANY($2::text[])))
-            ORDER BY timestamp DESC
+            ORDER BY COALESCE(order_id, workspace_id, metadata->>'workspaceId'), timestamp DESC
           `, [
             orderIds.length > 0 ? orderIds : ['__none__'],
             wsIds.length > 0 ? wsIds : ['__none__']
           ])
         : Promise.resolve({ rows: [] as any[] })
     ]);
+    const usersList = usersRes.rows.map(mapUserRow);
 
     const latestMsgMap = new Map<string, { text: string; timestamp: string }>();
     const orderIdSet = new Set(orderIds);
