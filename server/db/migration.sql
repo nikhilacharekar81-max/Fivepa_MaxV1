@@ -583,11 +583,12 @@ CREATE INDEX IF NOT EXISTS idx_payment_methods_user_id ON payment_methods(user_i
 
 DO $$ BEGIN
   IF to_regclass('public.clearing_earnings') IS NOT NULL THEN
-    INSERT INTO earnings_clearing (id, order_id, seller_id, amount, clears_at, status, created_at)
+    INSERT INTO earnings_clearing (id, order_id, seller_id, amount, clearance_start, clearance_end, status, payout_eligible)
     SELECT id, order_id, seller_id, amount,
-           EXTRACT(EPOCH FROM clears_at)::BIGINT * 1000,
-           status,
-           COALESCE(created_at::TEXT, NOW()::TEXT)
+           COALESCE(created_at, NOW()),
+           clears_at,
+           COALESCE(status, 'clearing'),
+           CASE WHEN status = 'completed' THEN TRUE ELSE FALSE END
     FROM clearing_earnings
     ON CONFLICT (id) DO NOTHING;
     DROP TABLE clearing_earnings CASCADE;
