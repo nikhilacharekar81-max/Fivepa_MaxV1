@@ -26,10 +26,11 @@ export class IdentityRepo {
           await client.query(
             `INSERT INTO users (
               id, name, username, email, mobile, role, avatar, title, rating, reviews_count, 
-              hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, 
+              hourly_rate, earned, spent, completed_jobs, bio, skills, status, verified, email_verified, 
               mobile_verified, wallet_balance, created_at, is_flagged, flag_reason, password, 
-              session_version, known_devices, is_available_now, notification_preferences
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+              session_version, known_devices, is_available_now, notification_preferences,
+              membership_tier, buyer_membership_tier, location, tagline, cover_url, languages, education, portfolio
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)
             ON CONFLICT (id) DO UPDATE SET
               name = EXCLUDED.name,
               username = EXCLUDED.username,
@@ -41,7 +42,8 @@ export class IdentityRepo {
               rating = EXCLUDED.rating,
               reviews_count = EXCLUDED.reviews_count,
               hourly_rate = EXCLUDED.hourly_rate,
-              earned = EXCLUDED.earned,
+              earned = COALESCE(EXCLUDED.earned, users.earned, 0),
+              spent = COALESCE(EXCLUDED.spent, users.spent, 0),
               completed_jobs = EXCLUDED.completed_jobs,
               bio = EXCLUDED.bio,
               skills = EXCLUDED.skills,
@@ -49,7 +51,7 @@ export class IdentityRepo {
               verified = EXCLUDED.verified,
               email_verified = EXCLUDED.email_verified,
               mobile_verified = EXCLUDED.mobile_verified,
-              wallet_balance = EXCLUDED.wallet_balance,
+              wallet_balance = COALESCE(EXCLUDED.wallet_balance, users.wallet_balance, 0),
               created_at = EXCLUDED.created_at,
               is_flagged = EXCLUDED.is_flagged,
               flag_reason = EXCLUDED.flag_reason,
@@ -57,15 +59,29 @@ export class IdentityRepo {
               session_version = EXCLUDED.session_version,
               known_devices = EXCLUDED.known_devices,
               is_available_now = EXCLUDED.is_available_now,
-              notification_preferences = EXCLUDED.notification_preferences`,
+              notification_preferences = EXCLUDED.notification_preferences,
+              membership_tier = COALESCE(EXCLUDED.membership_tier, users.membership_tier, 'free'),
+              buyer_membership_tier = COALESCE(EXCLUDED.buyer_membership_tier, users.buyer_membership_tier, 'standard'),
+              location = COALESCE(EXCLUDED.location, users.location),
+              tagline = COALESCE(EXCLUDED.tagline, users.tagline),
+              cover_url = COALESCE(EXCLUDED.cover_url, users.cover_url),
+              languages = COALESCE(EXCLUDED.languages, users.languages),
+              education = COALESCE(EXCLUDED.education, users.education),
+              portfolio = COALESCE(EXCLUDED.portfolio, users.portfolio)`,
             [
               u.id, u.name, u.username || null, u.email, u.mobile || null, u.role, u.avatar || null,
               u.title || null, u.rating ?? 5.0, u.reviewsCount ?? 0, u.hourlyRate ?? 0, u.earned ?? 0,
+              (u as any).spent ?? null,
               u.completedJobs ?? 0, u.bio || null, u.skills || [], u.status || 'active',
               !!u.verified, !!u.emailVerified, !!u.mobileVerified, u.walletBalance ?? 0,
               u.createdAt || new Date().toISOString(), !!u.isFlagged, u.flagReason || null,
               u.password || null, u.sessionVersion ?? 1, u.knownDevices || ['dev_default_session'],
-              !!u.isAvailableNow, u.notificationPreferences ? JSON.stringify(u.notificationPreferences) : null
+              !!u.isAvailableNow, u.notificationPreferences ? JSON.stringify(u.notificationPreferences) : null,
+              u.membershipTier || 'free', u.buyerMembershipTier || 'standard',
+              u.location || null, (u as any).tagline || null, (u as any).coverUrl || null,
+              u.languages || null,
+              (u as any).education ? JSON.stringify((u as any).education) : null,
+              (u as any).portfolio ? JSON.stringify((u as any).portfolio) : null
             ]
           );
         }

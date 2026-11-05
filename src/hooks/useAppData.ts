@@ -157,13 +157,13 @@ export const useAppData = (initialData?: any) => {
       const categoriesData = await safeJson(cRes, null);
       const reviewsData = await safeJson(revRes, null);
 
-      if (Array.isArray(usersData) && usersData.length > 0) setUsers(usersData);
-      if (Array.isArray(gigsData) && gigsData.length > 0) setGigs(gigsData);
-      if (Array.isArray(projectsData) && projectsData.length > 0) setProjects(projectsData);
+      if (Array.isArray(usersData)) setUsers(usersData);
+      if (Array.isArray(gigsData)) setGigs(gigsData);
+      if (Array.isArray(projectsData)) setProjects(projectsData);
       if (Array.isArray(proposalsData)) setProposals(proposalsData);
       if (Array.isArray(offersData)) setOffers(offersData);
       if (Array.isArray(ords)) setOrders(ords);
-      if (Array.isArray(categoriesData) && categoriesData.length > 0) setCategories(categoriesData);
+      if (Array.isArray(categoriesData)) setCategories(categoriesData);
       if (Array.isArray(reviewsData)) setReviews(reviewsData);
 
       if (token && isAdminOrSupport) {
@@ -176,24 +176,26 @@ export const useAppData = (initialData?: any) => {
           fetch('/api/admin/settings', reqOpt)
         ]);
 
-        const disputesData = await safeJson(dRes, []);
-        const refundsData = await safeJson(rRes, []);
-        const payoutsData = await safeJson(payRes, []);
-        const supportTicketsData = await safeJson(sRes, []);
-        const auditLogsData = await safeJson(aRes, []);
+        const disputesData = await safeJson(dRes, null);
+        const refundsData = await safeJson(rRes, null);
+        const payoutsData = await safeJson(payRes, null);
+        const supportTicketsData = await safeJson(sRes, null);
+        const auditLogsData = await safeJson(aRes, null);
         const settingsData = await safeJson(setRes, null);
 
-        if (disputesData.length > 0) setDisputes(disputesData);
-        if (refundsData.length > 0) setRefunds(refundsData);
-        if (payoutsData.length > 0) setPayouts(payoutsData);
-        if (supportTicketsData.length > 0) setSupportTickets(supportTicketsData);
-        if (auditLogsData.length > 0) setAuditLogs(auditLogsData);
+        if (Array.isArray(disputesData)) setDisputes(disputesData);
+        if (Array.isArray(refundsData)) setRefunds(refundsData);
+        if (Array.isArray(payoutsData)) setPayouts(payoutsData);
+        if (Array.isArray(supportTicketsData)) setSupportTickets(supportTicketsData);
+        if (Array.isArray(auditLogsData)) setAuditLogs(auditLogsData);
 
         if (settingsData) {
           if (settingsData.freelancerCommissionRate !== undefined) setPlatformFee(settingsData.freelancerCommissionRate);
           if (settingsData.clientServiceFee !== undefined) setClientServiceFee(settingsData.clientServiceFee);
+          else if (settingsData.buyerProcessingFeeRate !== undefined) setClientServiceFee(settingsData.buyerProcessingFeeRate);
           if (settingsData.smallOrderFeeThreshold !== undefined) setSmallOrderFeeThreshold(settingsData.smallOrderFeeThreshold);
           if (settingsData.smallOrderFeeAmount !== undefined) setSmallOrderFeeAmount(settingsData.smallOrderFeeAmount);
+          else if (settingsData.smallOrderFee !== undefined) setSmallOrderFeeAmount(settingsData.smallOrderFee);
           if (settingsData.escrowHoldDays !== undefined) setEscrowProtectionDays(settingsData.escrowHoldDays);
         }
       }

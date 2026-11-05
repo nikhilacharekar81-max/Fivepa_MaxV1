@@ -32,7 +32,7 @@ import {
   AdminMembershipsQuotasModule,
   AdminPaymentGatewaysModule
 } from '../components/admin_modules';
-import { setAuthToken } from '../utils/authToken';
+import { getAuthToken, setAuthToken } from '../utils/authToken';
 
 export interface AdminPageProps {
   currentUser: UserAccount | null;
@@ -101,30 +101,41 @@ export const AdminPage: React.FC<AdminPageProps> = ({
   const [adminReports, setAdminReports] = useState<any[]>([]);
   const [adminThreads, setAdminThreads] = useState<any[]>([]);
 
+  const getAdminHeaders = (withJson = false): Record<string, string> => {
+    const token = getAuthToken();
+    const headers: Record<string, string> = {
+      'x-device-id': getDeviceId()
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (withJson) headers['Content-Type'] = 'application/json';
+    return headers;
+  };
+
   useEffect(() => {
     if (!isUserAdmin) return;
     const fetchAdminData = async () => {
       try {
+        const headers = getAdminHeaders();
         if (adminTab === 'disputes') {
-          const res = await fetch('/api/admin/disputes');
+          const res = await fetch('/api/admin/disputes', { headers });
           if (res.ok) setAdminDisputes(await res.json());
         } else if (adminTab === 'refunds') {
-          const res = await fetch('/api/admin/refunds');
+          const res = await fetch('/api/admin/refunds', { headers });
           if (res.ok) setAdminRefunds(await res.json());
         } else if (adminTab === 'payouts') {
-          const res = await fetch('/api/admin/payouts');
+          const res = await fetch('/api/admin/payouts', { headers });
           if (res.ok) setAdminPayouts(await res.json());
         } else if (adminTab === 'reviews') {
-          const res = await fetch('/api/admin/reviews');
+          const res = await fetch('/api/admin/reviews', { headers });
           if (res.ok) setAdminReviews(await res.json());
         } else if (adminTab === 'support') {
-          const res = await fetch('/api/admin/support/tickets');
+          const res = await fetch('/api/admin/support/tickets', { headers });
           if (res.ok) setAdminTickets(await res.json());
         } else if (adminTab === 'reports') {
-          const res = await fetch('/api/admin/reports');
+          const res = await fetch('/api/admin/reports', { headers });
           if (res.ok) setAdminReports(await res.json());
         } else if (adminTab === 'messages') {
-          const res = await fetch('/api/admin/messages/threads');
+          const res = await fetch('/api/admin/messages/threads', { headers });
           if (res.ok) setAdminThreads(await res.json());
         }
       } catch (err) {
@@ -478,20 +489,104 @@ export const AdminPage: React.FC<AdminPageProps> = ({
               const u = usersList.find(x => x.id === userId); 
               if (u) setImpersonatedUser(u); 
             }} 
-            onToggleUserStatus={(userId) => { 
-              setUsersList(prev => prev.map(u => u.id === userId ? { ...u, status: u.status === 'suspended' ? 'active' : 'suspended' } : u)); 
-            }} 
+            onToggleUserStatus={async (userId) => {
+              const target = usersList.find(x => x.id === userId);
+              const nextStatus = target?.status === 'suspended' ? 'active' : 'suspended';
+              const res = await fetch(`/api/admin/users/${userId}`, {
+                method: 'PATCH',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({ status: nextStatus })
+              });
+              if (res.ok) {
+                setUsersList(prev => prev.map(u => u.id === userId ? { ...u, status: nextStatus } : u));
+                if (refresh) await refresh();
+              }
+            }}
+            onUpdateUser={async (updatedUser) => {
+              const res = await fetch(`/api/admin/users/${updatedUser.id}`, {
+                method: 'PATCH',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify(updatedUser)
+              });
+              if (res.ok) {
+                setUsersList(prev => prev.map(u => u.id === updatedUser.id ? updatedUser : u));
+                if (refresh) await refresh();
+              }
+            }}
+            onDeleteUser={async (userId) => {
+              const res = await fetch(`/api/admin/users/${userId}`, {
+                method: 'DELETE',
+                headers: getAdminHeaders()
+              });
+              if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || 'Failed to delete user account');
+              }
+              setUsersList(prev => prev.filter(u => String(u.id) !== String(userId)));
+              if (refresh) await refresh();
+            }}
           />
         )}
 
         {/* MODULE 3: PROJECTS MANAGEMENT */}
         {adminTab === 'projects' && (
-          <AdminProjectsModule allProjects={projects} />
+          <AdminProjectsModule
+            allProjects={projects}
+            onUpdateProjectStatus={async (projectId, status, moderationStatus) => {
+              const res = await fetch(`/api/admin/projects/${projectId}`, {
+                method: 'PATCH',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({ status, moderationStatus })
+              });
+              if (res.ok && refresh) await refresh();
+            }}
+            onDeleteProject={async (projectId) => {
+              const res = await fetch(`/api/admin/projects/${projectId}`, {
+                method: 'DELETE',
+                headers: getAdminHeaders()
+              });
+              if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || 'Failed to delete project');
+              }
+              if (refresh) await refresh();
+            }}
+          />
         )}
 
         {/* MODULE 4: FREELANCER GIGS & SERVICES MANAGEMENT */}
         {adminTab === 'gigs' && (
-          <AdminGigsModule allGigs={gigs} />
+          <AdminGigsModule
+            allGigs={gigs}
+            allUsers={usersList}
+            onUpdateGigStatus={async (gigId, status) => {
+              await fetch(`/api/admin/gigs/${gigId}/status`, {
+                method: 'PATCH',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({ status })
+              });
+              if (refresh) await refresh();
+            }}
+            onToggleFeatured={async (gigId, featured) => {
+              await fetch(`/api/admin/gigs/${gigId}/feature`, {
+                method: 'PATCH',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({ featured })
+              });
+              if (refresh) await refresh();
+            }}
+            onDeleteGig={async (gigId) => {
+              const res = await fetch(`/api/admin/gigs/${gigId}`, {
+                method: 'DELETE',
+                headers: getAdminHeaders()
+              });
+              if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || 'Failed to delete gig');
+              }
+              if (refresh) await refresh();
+            }}
+          />
         )}
 
         {/* MODULE 5: CATEGORIES & SUBCATEGORIES MANAGEMENT */}
@@ -518,13 +613,16 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             onUpdateProposalStatus={async (id, status) => {
               await fetch(`/api/admin/proposals/${id}/status`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAdminHeaders(true),
                 body: JSON.stringify({ status })
               });
               if (refresh) refresh();
             }}
             onDeleteProposal={async (id) => {
-              await fetch(`/api/admin/proposals/${id}`, { method: 'DELETE' });
+              await fetch(`/api/admin/proposals/${id}`, {
+                method: 'DELETE',
+                headers: getAdminHeaders()
+              });
               if (refresh) refresh();
             }}
           />
@@ -561,7 +659,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             onReleaseEscrow={async (orderId) => {
               await fetch(`/api/admin/finance/escrow/${orderId}/release`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAdminHeaders(true),
                 body: JSON.stringify({ reason: 'Admin manual release from Admin Console' })
               });
               await refresh();
@@ -569,7 +667,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             onRefundEscrow={async (orderId) => {
               await fetch(`/api/admin/finance/escrow/${orderId}/refund`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAdminHeaders(true),
                 body: JSON.stringify({ reason: 'Admin manual refund from Admin Console' })
               });
               await refresh();
@@ -581,12 +679,21 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         {adminTab === 'disputes' && (
           <AdminDisputesModule
             initialDisputes={adminDisputes}
-            onResolveDispute={async (disputeId, resolution) => {
-              await fetch(`/api/admin/disputes/${disputeId}/resolve`, {
+            onResolveDispute={async (disputeId, resolution, details) => {
+              const res = await fetch(`/api/admin/disputes/${disputeId}/resolve`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ status: resolution })
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({
+                  status: resolution,
+                  buyerPercent: details?.buyerPercent,
+                  sellerPercent: details?.sellerPercent,
+                  resolutionNotes: details?.resolutionNotes
+                })
               });
+              if (res.ok) {
+                const refreshed = await fetch('/api/admin/disputes', { headers: getAdminHeaders() });
+                if (refreshed.ok) setAdminDisputes(await refreshed.json());
+              }
               if (refresh) refresh();
             }}
           />
@@ -596,12 +703,24 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         {adminTab === 'refunds' && (
           <AdminRefundsModule
             initialRefunds={adminRefunds}
-            onApproveRefund={async (refundId) => {
-              await fetch(`/api/admin/refunds/${refundId}/approve`, { method: 'POST' });
+            onApproveRefund={async (refundId, details) => {
+              await fetch(`/api/admin/refunds/${refundId}/approve`, {
+                method: 'POST',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({ amount: details?.amount, reason: details?.reason })
+              });
+              const refreshed = await fetch('/api/admin/refunds', { headers: getAdminHeaders() });
+              if (refreshed.ok) setAdminRefunds(await refreshed.json());
               if (refresh) refresh();
             }}
-            onRejectRefund={async (refundId) => {
-              await fetch(`/api/admin/refunds/${refundId}/reject`, { method: 'POST' });
+            onRejectRefund={async (refundId, details) => {
+              await fetch(`/api/admin/refunds/${refundId}/reject`, {
+                method: 'POST',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({ reason: details?.reason })
+              });
+              const refreshed = await fetch('/api/admin/refunds', { headers: getAdminHeaders() });
+              if (refreshed.ok) setAdminRefunds(await refreshed.json());
               if (refresh) refresh();
             }}
           />
@@ -611,12 +730,34 @@ export const AdminPage: React.FC<AdminPageProps> = ({
         {adminTab === 'payouts' && (
           <AdminPayoutsModule
             initialPayouts={adminPayouts}
-            onApprovePayout={async (payoutId) => {
-              await fetch(`/api/admin/finance/payouts/${payoutId}/approve`, { method: 'POST' });
+            onApprovePayout={async (payoutId, note) => {
+              await fetch(`/api/admin/finance/payouts/${payoutId}/approve`, {
+                method: 'POST',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({ reason: note || 'Approved by Admin' })
+              });
+              const refreshed = await fetch('/api/admin/payouts', { headers: getAdminHeaders() });
+              if (refreshed.ok) setAdminPayouts(await refreshed.json());
               if (refresh) refresh();
             }}
-            onRejectPayout={async (payoutId) => {
-              await fetch(`/api/admin/finance/payouts/${payoutId}/reject`, { method: 'POST' });
+            onProcessPayout={async (payoutId, transactionRef, note) => {
+              await fetch(`/api/admin/finance/payouts/${payoutId}/process`, {
+                method: 'POST',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({ transactionRef, reason: note || 'Processed by Admin' })
+              });
+              const refreshed = await fetch('/api/admin/payouts', { headers: getAdminHeaders() });
+              if (refreshed.ok) setAdminPayouts(await refreshed.json());
+              if (refresh) refresh();
+            }}
+            onRejectPayout={async (payoutId, note) => {
+              await fetch(`/api/admin/finance/payouts/${payoutId}/reject`, {
+                method: 'POST',
+                headers: getAdminHeaders(true),
+                body: JSON.stringify({ reason: note || 'Rejected by Admin' })
+              });
+              const refreshed = await fetch('/api/admin/payouts', { headers: getAdminHeaders() });
+              if (refreshed.ok) setAdminPayouts(await refreshed.json());
               if (refresh) refresh();
             }}
           />
@@ -629,13 +770,24 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             onUpdateReviewStatus={async (id, status, reason) => {
               await fetch(`/api/admin/reviews/${id}/status`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAdminHeaders(true),
                 body: JSON.stringify({ status, moderationStatus: status, reason })
               });
+              const refreshed = await fetch('/api/admin/reviews', { headers: getAdminHeaders() });
+              if (refreshed.ok) setAdminReviews(await refreshed.json());
               if (refresh) refresh();
             }}
             onDeleteReview={async (id) => {
-              await fetch(`/api/admin/reviews/${id}`, { method: 'DELETE' });
+              const res = await fetch(`/api/admin/reviews/${id}`, {
+                method: 'DELETE',
+                headers: getAdminHeaders()
+              });
+              if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.error || 'Failed to delete review');
+              }
+              const refreshed = await fetch('/api/admin/reviews', { headers: getAdminHeaders() });
+              if (refreshed.ok) setAdminReviews(await refreshed.json());
               if (refresh) refresh();
             }}
           />
@@ -648,7 +800,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             onModerateThread={async (threadId, action, note) => {
               await fetch(`/api/admin/messages/moderate`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAdminHeaders(true),
                 body: JSON.stringify({ threadId, action, note })
               });
               if (refresh) refresh();
@@ -663,7 +815,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             onTakeAction={async (reportId, action) => {
               await fetch(`/api/admin/reports/${reportId}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAdminHeaders(true),
                 body: JSON.stringify({ action, status: 'resolved' })
               });
               if (refresh) refresh();
@@ -671,7 +823,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             onDismissReport={async (reportId) => {
               await fetch(`/api/admin/reports/${reportId}`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAdminHeaders(true),
                 body: JSON.stringify({ status: 'dismissed' })
               });
               if (refresh) refresh();
@@ -686,7 +838,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             onReplyTicket={async (ticketId, replyText) => {
               await fetch(`/api/admin/tickets/${ticketId}/reply`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAdminHeaders(true),
                 body: JSON.stringify({ text: replyText })
               });
               if (refresh) refresh();
@@ -694,7 +846,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
             onUpdateTicketStatus={async (ticketId, status) => {
               await fetch(`/api/admin/tickets/${ticketId}/status`, {
                 method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getAdminHeaders(true),
                 body: JSON.stringify({ status })
               });
               if (refresh) refresh();

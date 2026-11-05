@@ -301,8 +301,30 @@ export interface UserAccount {
   reviewsCount: number;
   hourlyRate: number;
   earned: number;
+  spent?: number;
   completedJobs: number;
   bio: string;
+  tagline?: string;
+  coverUrl?: string;
+  education?: Array<{
+    id?: string;
+    title?: string;
+    institution?: string;
+    school?: string;
+    degree?: string;
+    year: string;
+  }>;
+  portfolio?: Array<{
+    id?: string;
+    title: string;
+    description: string;
+    category?: string;
+    image?: string;
+    imageUrl?: string;
+    link?: string;
+    attachmentName?: string;
+    attachmentUrl?: string;
+  }>;
   skills: string[];
   status: 'active' | 'suspended' | 'restricted' | 'deactivated' | 'frozen';
   verified: boolean;

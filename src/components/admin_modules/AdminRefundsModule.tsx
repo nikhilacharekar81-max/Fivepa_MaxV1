@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   CornerDownLeft, Search, Filter, CheckCircle2, Clock, XCircle,
   AlertTriangle, DollarSign, Eye, X, ChevronLeft, ChevronRight,
@@ -8,8 +8,8 @@ import { Refund } from '../../types';
 
 interface AdminRefundsModuleProps {
   initialRefunds?: Refund[];
-  onApproveRefund?: (refundId: string) => void;
-  onRejectRefund?: (refundId: string) => void;
+  onApproveRefund?: (refundId: string, details?: { amount?: number; reason?: string }) => void | Promise<void>;
+  onRejectRefund?: (refundId: string, details?: { reason?: string }) => void | Promise<void>;
 }
 
 export const AdminRefundsModule: React.FC<AdminRefundsModuleProps> = ({
@@ -19,6 +19,10 @@ export const AdminRefundsModule: React.FC<AdminRefundsModuleProps> = ({
 }) => {
   // Local robust state for client refund requests
   const [refunds, setRefunds] = useState<Refund[]>(() => initialRefunds || []);
+
+  useEffect(() => {
+    setRefunds(initialRefunds || []);
+  }, [initialRefunds]);
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -80,18 +84,18 @@ export const AdminRefundsModule: React.FC<AdminRefundsModuleProps> = ({
   }, [filteredRefunds, currentPage, pageSize]);
 
   // Action execution
-  const handleExecuteAction = () => {
+  const handleExecuteAction = async () => {
     if (!actionModal) return;
     const { type, refund } = actionModal;
     const amountToRefund = isFullRefund ? refund.amount : Math.min(partialAmount, refund.amount);
 
     if (type === 'approve') {
+      if (onApproveRefund) await onApproveRefund(refund.id, { amount: amountToRefund, reason: adminReasonText });
       setRefunds(prev => prev.map(r => r.id === refund.id ? { ...r, status: 'approved' as const } : r));
-      if (onApproveRefund) onApproveRefund(refund.id);
       showToast(`Refund #${refund.id} approved. $${amountToRefund.toLocaleString()} credited to buyer wallet.`);
     } else if (type === 'reject') {
+      if (onRejectRefund) await onRejectRefund(refund.id, { reason: adminReasonText });
       setRefunds(prev => prev.map(r => r.id === refund.id ? { ...r, status: 'rejected' as const } : r));
-      if (onRejectRefund) onRejectRefund(refund.id);
       showToast(`Refund request #${refund.id} rejected. Order funds remain with freelancer.`);
     }
 

@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS users (
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preferences JSONB;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS spent NUMERIC(12,2) DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_tier VARCHAR(64) DEFAULT 'free';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS buyer_membership_tier VARCHAR(64) DEFAULT 'standard';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS location VARCHAR(255);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS tagline TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS cover_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS languages TEXT[];
+ALTER TABLE users ADD COLUMN IF NOT EXISTS education JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio JSONB DEFAULT '[]'::jsonb;
 UPDATE users SET password_hash = password WHERE password_hash IS NULL AND password IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower ON users (LOWER(email));
 
@@ -572,18 +581,18 @@ CREATE TABLE IF NOT EXISTS payment_methods (
 
 CREATE INDEX IF NOT EXISTS idx_payment_methods_user_id ON payment_methods(user_id);
 
-CREATE TABLE IF NOT EXISTS clearing_earnings (
-  id VARCHAR(64) PRIMARY KEY,
-  order_id VARCHAR(64) NOT NULL,
-  seller_id VARCHAR(64) NOT NULL,
-  amount NUMERIC(14,2) NOT NULL,
-  clears_at TIMESTAMPTZ NOT NULL,
-  status VARCHAR(32) DEFAULT 'clearing' NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_clearing_earnings_seller ON clearing_earnings(seller_id, clears_at);
-CREATE INDEX IF NOT EXISTS idx_clearing_earnings_order ON clearing_earnings(order_id);
+DO $$ BEGIN
+  IF to_regclass('public.clearing_earnings') IS NOT NULL THEN
+    INSERT INTO earnings_clearing (id, order_id, seller_id, amount, clears_at, status, created_at)
+    SELECT id, order_id, seller_id, amount,
+           EXTRACT(EPOCH FROM clears_at)::BIGINT * 1000,
+           status,
+           COALESCE(created_at::TEXT, NOW()::TEXT)
+    FROM clearing_earnings
+    ON CONFLICT (id) DO NOTHING;
+    DROP TABLE clearing_earnings CASCADE;
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS auth_verification_codes (
   email TEXT NOT NULL,
@@ -892,8 +901,6 @@ BEGIN
       ('wallet_movements', 'fk_wallet_movements_user', 'user_id', 'users', 'id', 'r', 'RESTRICT'),
       ('earnings_clearing', 'fk_earnings_clearing_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
       ('earnings_clearing', 'fk_earnings_clearing_seller', 'seller_id', 'users', 'id', 'r', 'RESTRICT'),
-      ('clearing_earnings', 'fk_clearing_earnings_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
-      ('clearing_earnings', 'fk_clearing_earnings_seller', 'seller_id', 'users', 'id', 'r', 'RESTRICT'),
       ('payment_checkout_sessions', 'fk_checkout_sessions_user', 'user_id', 'users', 'id', 'r', 'RESTRICT'),
       ('payment_checkout_sessions', 'fk_checkout_sessions_order', 'order_id', 'orders', 'id', 'r', 'RESTRICT'),
       ('wallets', 'fk_wallets_user', 'user_id', 'users', 'id', 'r', 'RESTRICT')
@@ -1000,7 +1007,6 @@ BEGIN
         _review_count INT := 0;
         _ledger_entry_count INT := 0;
         _earnings_clearing_count INT := 0;
-        _clearing_earnings_count INT := 0;
         _checkout_session_count INT := 0;
         _has_unresolvable BOOLEAN := FALSE;
         _conflict_reasons TEXT := '';
@@ -1093,7 +1099,7 @@ BEGIN
              OR order_id = _other_ws_id
              OR (array_length(_associated_order_ids, 1) > 0 AND order_id = ANY(_associated_order_ids));
 
-          -- 6. Count escrows, custom invoices, disputes, refunds, reviews, ledger_entries, earnings_clearing, clearing_earnings, and payment_checkout_sessions
+          -- 6. Count escrows, custom invoices, disputes, refunds, reviews, ledger_entries, earnings_clearing, and payment_checkout_sessions
           IF array_length(_associated_order_ids, 1) > 0 THEN
             SELECT COUNT(*) INTO _escrow_count FROM escrows WHERE order_id = ANY(_associated_order_ids);
             SELECT COUNT(*) INTO _invoice_count FROM custom_invoices WHERE related_order_id = ANY(_associated_order_ids);
@@ -1102,7 +1108,6 @@ BEGIN
             SELECT COUNT(*) INTO _review_count FROM reviews WHERE order_id = ANY(_associated_order_ids);
             SELECT COUNT(*) INTO _ledger_entry_count FROM ledger_entries WHERE order_id = ANY(_associated_order_ids);
             SELECT COUNT(*) INTO _earnings_clearing_count FROM earnings_clearing WHERE order_id = ANY(_associated_order_ids);
-            SELECT COUNT(*) INTO _clearing_earnings_count FROM clearing_earnings WHERE order_id = ANY(_associated_order_ids);
             SELECT COUNT(*) INTO _checkout_session_count FROM payment_checkout_sessions WHERE order_id = ANY(_associated_order_ids);
           ELSE
             _escrow_count := 0;
@@ -1112,7 +1117,6 @@ BEGIN
             _review_count := 0;
             _ledger_entry_count := 0;
             _earnings_clearing_count := 0;
-            _clearing_earnings_count := 0;
             _checkout_session_count := 0;
           END IF;
 
@@ -1130,7 +1134,6 @@ BEGIN
              AND _review_count = 0 
              AND _ledger_entry_count = 0
              AND _earnings_clearing_count = 0
-             AND _clearing_earnings_count = 0
              AND _checkout_session_count = 0
              AND COALESCE(array_length(_associated_order_ids, 1), 0) = 0 THEN
             UPDATE workspaces
@@ -1139,9 +1142,9 @@ BEGIN
           ELSE
             _has_unresolvable := TRUE;
             _conflict_reasons := format(
-              'orders=%s, recorded_order_ids=%s, malformed_order_ids=%s, msgs=%s, offers=%s, uploads=%s, escrows=%s, invoices=%s, disputes=%s, ledger_entries=%s, earnings_clearing=%s, clearing_earnings=%s, checkout_sessions=%s',
+              'orders=%s, recorded_order_ids=%s, malformed_order_ids=%s, msgs=%s, offers=%s, uploads=%s, escrows=%s, invoices=%s, disputes=%s, ledger_entries=%s, earnings_clearing=%s, checkout_sessions=%s',
               _ord_count, _recorded_order_count, _is_order_ids_malformed, _msg_count, _offer_count, _upload_count, _escrow_count, _invoice_count, _dispute_count,
-              _ledger_entry_count, _earnings_clearing_count, _clearing_earnings_count, _checkout_session_count
+              _ledger_entry_count, _earnings_clearing_count, _checkout_session_count
             );
             _unresolvable_diag := _unresolvable_diag || format(
               ' [Workspace %s: %s (buyer: %s, seller: %s, originType: %s, originId: %s)]',

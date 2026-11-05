@@ -71,42 +71,70 @@ export const EditProfilePage: React.FC<EditProfilePageProps> = ({
   const [name, setName] = useState(user.name);
   const [title, setTitle] = useState(user.title || '');
   const [hourlyRate, setHourlyRate] = useState<number>(user.hourlyRate || 25);
-  const [location, setLocation] = useState('Mumbai, India');
+  const [location, setLocation] = useState(user.location || 'Mumbai, India');
   const [bio, setBio] = useState(user.bio || '');
   const [avatarUrl, setAvatarUrl] = useState(user.avatar);
-  const [coverUrl, setCoverUrl] = useState('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&h=300&fit=crop');
+  const [coverUrl, setCoverUrl] = useState(user.coverUrl || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=1200&h=300&fit=crop');
 
   // Skills state
   const [skills, setSkills] = useState<string[]>(user.skills || ['SEO', 'Guest Posting', 'Backlinks']);
   const [newSkillInput, setNewSkillInput] = useState('');
 
   // Languages
-  const [languages, setLanguages] = useState<LanguageItem[]>([
-    { id: 'lang_1', language: 'English', fluency: 'Fluent' },
-    { id: 'lang_2', language: 'Hindi', fluency: 'Native' }
-  ]);
+  const [languages, setLanguages] = useState<LanguageItem[]>(() => {
+    if (Array.isArray(user.languages) && user.languages.length > 0) {
+      return user.languages.map((l: any, idx: number) =>
+        typeof l === 'string'
+          ? { id: `lang_${idx}`, language: l, fluency: 'Fluent' }
+          : { id: l.id || `lang_${idx}`, language: l.language || String(l), fluency: l.fluency || 'Fluent' }
+      );
+    }
+    return [
+      { id: 'lang_1', language: 'English', fluency: 'Fluent' },
+      { id: 'lang_2', language: 'Hindi', fluency: 'Native' }
+    ];
+  });
   const [newLangName, setNewLangName] = useState('');
   const [newLangFluency, setNewLangFluency] = useState('Fluent');
 
   // Education
-  const [education, setEducation] = useState<EducationItem[]>([
-    { id: 'edu_1', title: 'Bachelor of Science in Computer Science', institution: 'University of Technology', year: '2020' }
-  ]);
+  const [education, setEducation] = useState<EducationItem[]>(() =>
+    Array.isArray(user.education) && user.education.length > 0
+      ? user.education.map((e, idx) => ({
+          id: e.id || `edu_${idx}`,
+          title: e.title || e.degree || 'Degree',
+          institution: e.institution || e.school || 'University',
+          year: e.year || '2020'
+        }))
+      : [{ id: 'edu_1', title: 'Bachelor of Science in Computer Science', institution: 'University of Technology', year: '2020' }]
+  );
   const [newEduTitle, setNewEduTitle] = useState('');
   const [newEduInst, setNewEduInst] = useState('');
   const [newEduYear, setNewEduYear] = useState('2021');
 
   // Portfolio items
-  const [portfolioItems, setPortfolioItems] = useState<PortfolioItem[]>([
-    {
-      id: 'port_1',
-      title: 'High DA Backlinks & SEO Audit Case Study',
-      description: 'Increased organic search traffic by +340% for an e-commerce client in 90 days.',
-      category: 'Digital Marketing & SEO',
-      image: 'https://images.unsplash.com/photo-1432888622747-4eb9a8efeb07?w=400&h=250&fit=crop',
-      attachmentName: 'SEO_Audit_Report_2026.pdf'
-    }
-  ]);
+  const [portfolioItems, setPortfolioItems] = useState<PortfolioItem[]>(() =>
+    Array.isArray(user.portfolio) && user.portfolio.length > 0
+      ? user.portfolio.map((p, idx) => ({
+          id: p.id || `port_${idx}`,
+          title: p.title || 'Project',
+          description: p.description || '',
+          category: p.category || 'Technology & Programming',
+          image: p.image || p.imageUrl || 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=400&h=250&fit=crop',
+          attachmentName: p.attachmentName,
+          attachmentUrl: p.attachmentUrl || p.link
+        }))
+      : [
+          {
+            id: 'port_1',
+            title: 'High DA Backlinks & SEO Audit Case Study',
+            description: 'Increased organic search traffic by +340% for an e-commerce client in 90 days.',
+            category: 'Digital Marketing & SEO',
+            image: 'https://images.unsplash.com/photo-1432888622747-4eb9a8efeb07?w=400&h=250&fit=crop',
+            attachmentName: 'SEO_Audit_Report_2026.pdf'
+          }
+        ]
+  );
 
   // Modal / Add Portfolio form
   const [showAddPortfolio, setShowAddPortfolio] = useState(false);
@@ -127,6 +155,14 @@ export const EditProfilePage: React.FC<EditProfilePageProps> = ({
     setToast(msg);
     setTimeout(() => setToast(null), 3000);
   };
+
+  const readFileAsDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('Failed to read image file'));
+      reader.readAsDataURL(file);
+    });
 
   // Add skill handler
   const handleAddSkill = () => {
@@ -207,13 +243,16 @@ export const EditProfilePage: React.FC<EditProfilePageProps> = ({
       name,
       title,
       hourlyRate,
+      location,
       bio,
       avatar: avatarUrl,
+      coverUrl,
       skills,
+      languages: languages.map(l => `${l.language} (${l.fluency})`),
+      education,
+      portfolio: portfolioItems,
       isAvailableNow
     };
-
-    updateCurrentUser(updatedUser);
 
     try {
       const res = await fetchWithRetry('/api/users/profile', {
@@ -223,17 +262,20 @@ export const EditProfilePage: React.FC<EditProfilePageProps> = ({
           name,
           title,
           hourlyRate,
+          location,
           bio,
           avatar: avatarUrl,
+          coverUrl,
           skills,
+          languages: languages.map(l => `${l.language} (${l.fluency})`),
+          education,
+          portfolio: portfolioItems,
           isAvailableNow
         })
       });
       if (res.ok) {
         const data = await res.json();
-        if (data.user) {
-          updateCurrentUser(data.user);
-        }
+        updateCurrentUser(data.user || updatedUser);
         showToastMsg('Your profile has been saved successfully!');
       } else {
         const errData = await res.json().catch(() => ({}));
@@ -241,7 +283,7 @@ export const EditProfilePage: React.FC<EditProfilePageProps> = ({
       }
     } catch (err) {
       console.error('Failed to persist profile:', err);
-      showToastMsg('Saved locally, but network error persisting to server.');
+      showToastMsg('Network error persisting profile to server.');
     }
   };
 
@@ -342,11 +384,15 @@ export const EditProfilePage: React.FC<EditProfilePageProps> = ({
                   type="file" 
                   accept="image/*" 
                   className="hidden" 
-                  onChange={(e) => {
+                  onChange={async (e) => {
                     if (e.target.files && e.target.files[0]) {
-                      const url = URL.createObjectURL(e.target.files[0]);
-                      setCoverUrl(url);
-                      showToastMsg('Cover banner updated!');
+                      try {
+                        const dataUrl = await readFileAsDataUrl(e.target.files[0]);
+                        setCoverUrl(dataUrl);
+                        showToastMsg('Cover banner updated!');
+                      } catch {
+                        showToastMsg('Failed to read cover photo.');
+                      }
                     }
                   }}
                 />
@@ -372,11 +418,15 @@ export const EditProfilePage: React.FC<EditProfilePageProps> = ({
                       type="file" 
                       accept="image/*" 
                       className="hidden" 
-                      onChange={(e) => {
+                      onChange={async (e) => {
                         if (e.target.files && e.target.files[0]) {
-                          const url = URL.createObjectURL(e.target.files[0]);
-                          setAvatarUrl(url);
-                          showToastMsg('Profile picture updated!');
+                          try {
+                            const dataUrl = await readFileAsDataUrl(e.target.files[0]);
+                            setAvatarUrl(dataUrl);
+                            showToastMsg('Profile picture updated!');
+                          } catch {
+                            showToastMsg('Failed to read profile picture.');
+                          }
                         }
                       }}
                     />

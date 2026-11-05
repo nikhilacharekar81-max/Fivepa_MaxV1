@@ -236,7 +236,6 @@ export const handleSubmitReview = async (req: Request, res: Response) => {
       }
     };
     await recordMessage(sysMsg);
-    broadcastMessage(sysMsg, order.id);
 
     res.status(201).json({ success: true, review: newReview, order: enrichOrderWithServiceInfo(order), message: sysMsg });
   } catch (err: any) {
@@ -386,7 +385,6 @@ router.post('/reviews/:id/reply', requireAuth, async (req: Request, res: Respons
           metadata: { action: 'review_reply_submitted', reply: replyObj }
         };
         await recordMessage(sysMsg);
-        broadcastMessage(sysMsg, order.id);
       }
     }
 

@@ -166,7 +166,87 @@ export function initWebSocketServer(server: Server): WebSocketServer {
   return wss;
 }
 
+const locallyBroadcastMessageIds = new Set<string>();
+const locallyBroadcastNotificationIds = new Set<string>();
+let lastCrossInstanceMsgTs = new Date().toISOString();
+let lastCrossInstanceNotifTs = new Date().toISOString();
+
+function rememberBroadcastId(set: Set<string>, id?: string) {
+  if (!id) return;
+  set.add(id);
+  if (set.size > 1000) {
+    const first = set.values().next().value;
+    if (first) set.delete(first);
+  }
+}
+
+const crossInstanceWsInterval = setInterval(async () => {
+  if (clients.size === 0) return;
+  try {
+    const pool = postgresStore.getPool();
+    const [msgRes, notifRes] = await Promise.all([
+      pool.query(
+        'SELECT * FROM messages WHERE timestamp > $1 ORDER BY timestamp ASC LIMIT 50',
+        [lastCrossInstanceMsgTs]
+      ),
+      pool.query(
+        'SELECT * FROM notifications WHERE created_at > $1 ORDER BY created_at ASC LIMIT 50',
+        [lastCrossInstanceNotifTs]
+      )
+    ]);
+
+    for (const r of msgRes.rows) {
+      if (r.timestamp && String(r.timestamp) > lastCrossInstanceMsgTs) {
+        lastCrossInstanceMsgTs = String(r.timestamp);
+      }
+      if (!locallyBroadcastMessageIds.has(r.id)) {
+        const msg: Message = {
+          id: r.id,
+          orderId: r.order_id || undefined,
+          workspaceId: r.workspace_id || undefined,
+          senderId: r.sender_id,
+          senderName: r.sender_name,
+          text: r.text,
+          timestamp: r.timestamp,
+          type: r.type,
+          fileInfo: typeof r.file_info === 'string' ? JSON.parse(r.file_info) : (r.file_info || undefined),
+          metadata: typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || undefined)
+        };
+        const targetId = msg.orderId || msg.workspaceId;
+        if (targetId) {
+          await broadcastMessage(msg, targetId);
+        }
+      }
+    }
+
+    for (const r of notifRes.rows) {
+      if (r.created_at && String(r.created_at) > lastCrossInstanceNotifTs) {
+        lastCrossInstanceNotifTs = String(r.created_at);
+      }
+      if (!locallyBroadcastNotificationIds.has(r.id) && r.user_id) {
+        const notif: Notification = {
+          id: r.id,
+          userId: r.user_id,
+          type: r.type,
+          title: r.title,
+          message: r.message,
+          link: r.link || undefined,
+          read: Boolean(r.read),
+          createdAt: r.created_at,
+          dedupKey: r.dedup_key || undefined,
+          actorId: r.actor_id || undefined
+        };
+        broadcastNotificationToUser(notif.userId, notif);
+      }
+    }
+  } catch {}
+}, 3000);
+if (crossInstanceWsInterval && typeof crossInstanceWsInterval.unref === 'function') {
+  crossInstanceWsInterval.unref();
+}
+
 export async function broadcastMessage(message: Message, orderId: string) {
+  rememberBroadcastId(locallyBroadcastMessageIds, message.id);
   const payload = JSON.stringify({ type: 'MESSAGE_RECEIVED', message });
   const updatePayload = JSON.stringify({
     type: 'WORKSTREAM_UPDATED',
@@ -195,7 +275,12 @@ export async function broadcastMessage(message: Message, orderId: string) {
       const clientUserId = (client as any).authenticatedUserId;
       if (!clientUserId) continue;
       const clientRole = (client as any).role;
-      const isParticipant = clientUserId === senderId || clientUserId === buyerId || clientUserId === sellerId || clientUserId === (order as any).clientId || clientUserId === (order as any).freelancerId;
+      const isParticipant =
+        clientUserId === senderId ||
+        clientUserId === buyerId ||
+        clientUserId === sellerId ||
+        clientUserId === (order as any)?.clientId ||
+        clientUserId === (order as any)?.freelancerId;
       const isSubscribedStaff =
         isStaffUser({ role: clientRole }) &&
         (orderId.startsWith('support_admin_') ||
@@ -213,6 +298,7 @@ export async function broadcastMessage(message: Message, orderId: string) {
 }
 
 export function broadcastNotificationToUser(userId: string, notification: Notification) {
+  rememberBroadcastId(locallyBroadcastNotificationIds, notification.id);
   for (const client of clients) {
     if ((client as any).isAuthenticated && (client as any).authenticatedUserId === userId && client.readyState === WebSocket.OPEN) {
       try {

@@ -7,14 +7,16 @@ import {
 } from 'lucide-react';
 import { Gig, UserAccount } from '../../types';
 import { DEFAULT_AVATAR, DEFAULT_GIG_IMAGE } from '../../constants';
+import { getAuthToken } from '../../utils/authToken';
+import { getDeviceId } from '../../utils/deviceId';
 
 interface AdminGigsModuleProps {
   allGigs?: Gig[];
   allUsers?: UserAccount[];
-  onUpdateGigStatus?: (gigId: string, status: Gig['status']) => void;
-  onToggleFeatured?: (gigId: string, featured: boolean) => void;
-  onDeleteGig?: (gigId: string) => void;
-  onCreateGig?: (newGig: any) => void;
+  onUpdateGigStatus?: (gigId: string, status: Gig['status']) => void | Promise<void>;
+  onToggleFeatured?: (gigId: string, featured: boolean) => void | Promise<void>;
+  onDeleteGig?: (gigId: string) => void | Promise<void>;
+  onCreateGig?: (newGig: any) => void | Promise<void>;
 }
 
 export const AdminGigsModule: React.FC<AdminGigsModuleProps> = ({
@@ -27,6 +29,14 @@ export const AdminGigsModule: React.FC<AdminGigsModuleProps> = ({
 }) => {
   const effectiveGigs = allGigs || [];
   const effectiveUsers = allUsers || [];
+
+  const getAdminAuthHeaders = (withJson = false): Record<string, string> => {
+    const token = getAuthToken();
+    const headers: Record<string, string> = { 'x-device-id': getDeviceId() };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (withJson) headers['Content-Type'] = 'application/json';
+    return headers;
+  };
 
   const [gigs, setGigs] = useState<Gig[]>(() => {
     try {
@@ -147,64 +157,95 @@ export const AdminGigsModule: React.FC<AdminGigsModuleProps> = ({
   // Handlers
   const handleToggleFeaturedClick = async (gig: Gig) => {
     const nextState = !gig.featured;
-    setGigs(prev => prev.map(g => g.id === gig.id ? { ...g, featured: nextState } : g));
-    if (onToggleFeatured) onToggleFeatured(gig.id, nextState);
-    showToast(`Gig #${gig.id} ${nextState ? 'featured on marketplace ($10 fee applied)' : 'removed from featured spot'}.`);
-    
     try {
-      await fetch(`/api/admin/gigs/${gig.id}/feature`, { method: 'PATCH' });
+      const res = await fetch(`/api/admin/gigs/${gig.id}/feature`, {
+        method: 'PATCH',
+        headers: getAdminAuthHeaders(true),
+        body: JSON.stringify({ featured: nextState })
+      });
+      if (!res.ok) throw new Error('Failed to update featured status');
+      setGigs(prev => prev.map(g => g.id === gig.id ? { ...g, featured: nextState } : g));
+      if (onToggleFeatured) await onToggleFeatured(gig.id, nextState);
+      showToast(`Gig #${gig.id} ${nextState ? 'featured on marketplace' : 'removed from featured spot'}.`);
     } catch (e) {
       console.warn('API sync error:', e);
+      showToast('Failed to update featured status on server.');
     }
   };
 
   const handleStatusToggle = async (gig: Gig) => {
     const nextStatus = gig.status === 'paused' ? 'active' : 'paused';
-    setGigs(prev => prev.map(g => g.id === gig.id ? { ...g, status: nextStatus } : g));
-    if (onUpdateGigStatus) onUpdateGigStatus(gig.id, nextStatus);
-    showToast(`Gig #${gig.id} status changed to ${nextStatus.toUpperCase()}.`);
-
     try {
-      await fetch(`/api/admin/gigs/${gig.id}/status`, {
+      const res = await fetch(`/api/admin/gigs/${gig.id}/status`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAdminAuthHeaders(true),
         body: JSON.stringify({ status: nextStatus })
       });
+      if (!res.ok) throw new Error('Failed to update gig status');
+      setGigs(prev => prev.map(g => g.id === gig.id ? { ...g, status: nextStatus } : g));
+      if (onUpdateGigStatus) await onUpdateGigStatus(gig.id, nextStatus);
+      showToast(`Gig #${gig.id} status changed to ${nextStatus.toUpperCase()}.`);
     } catch (e) {
       console.warn('API sync error:', e);
+      showToast('Failed to update gig status on server.');
     }
   };
 
   const executeDeleteGig = async (id: string, title?: string) => {
     const targetId = String(id);
     try {
-      const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_gigs') || '[]').map((d: any) => String(d));
-      if (!deletedIds.includes(targetId)) {
-        deletedIds.push(targetId);
-        localStorage.setItem('workperhour_deleted_gigs', JSON.stringify(deletedIds));
+      const res = await fetch(`/api/admin/gigs/${id}`, {
+        method: 'DELETE',
+        headers: getAdminAuthHeaders()
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to delete gig');
       }
-    } catch {}
+      try {
+        const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_gigs') || '[]').map((d: any) => String(d));
+        if (!deletedIds.includes(targetId)) {
+          deletedIds.push(targetId);
+          localStorage.setItem('workperhour_deleted_gigs', JSON.stringify(deletedIds));
+        }
+      } catch {}
 
-    setGigs(prev => prev.filter(g => String(g.id) !== targetId));
-    if (onDeleteGig) onDeleteGig(id);
-    showToast(`Service listing permanently deleted.`);
-
-    try {
-      await fetch(`/api/admin/gigs/${id}`, { method: 'DELETE' });
-    } catch (e) {
+      setGigs(prev => prev.filter(g => String(g.id) !== targetId));
+      if (onDeleteGig) await onDeleteGig(id);
+      showToast(`Service listing permanently deleted.`);
+    } catch (e: any) {
       console.warn('API delete error:', e);
+      showToast(e?.message || 'Failed to delete gig on server.');
     }
   };
 
-  const handleBulkFeature = () => {
+  const handleBulkFeature = async () => {
     if (selectedGigIds.length === 0) return;
+    for (const id of selectedGigIds) {
+      try {
+        await fetch(`/api/admin/gigs/${id}/feature`, {
+          method: 'PATCH',
+          headers: getAdminAuthHeaders(true),
+          body: JSON.stringify({ featured: true })
+        });
+      } catch {}
+    }
     setGigs(prev => prev.map(g => selectedGigIds.includes(g.id) ? { ...g, featured: true } : g));
     showToast(`Successfully pinned ${selectedGigIds.length} gigs as featured.`);
     setSelectedGigIds([]);
   };
 
-  const handleBulkPause = () => {
+  const handleBulkPause = async () => {
     if (selectedGigIds.length === 0) return;
+    for (const id of selectedGigIds) {
+      try {
+        await fetch(`/api/admin/gigs/${id}/status`, {
+          method: 'PATCH',
+          headers: getAdminAuthHeaders(true),
+          body: JSON.stringify({ status: 'paused' })
+        });
+      } catch {}
+    }
     setGigs(prev => prev.map(g => selectedGigIds.includes(g.id) ? { ...g, status: 'paused' } : g));
     showToast(`Successfully paused ${selectedGigIds.length} gigs.`);
     setSelectedGigIds([]);
@@ -213,27 +254,35 @@ export const AdminGigsModule: React.FC<AdminGigsModuleProps> = ({
   const executeBulkDelete = async () => {
     if (selectedGigIds.length === 0) return;
 
-    const idsToRemove = selectedGigIds.map(id => String(id));
-    try {
-      const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_gigs') || '[]').map((d: any) => String(d));
-      for (const idStr of idsToRemove) {
-        if (!deletedIds.includes(idStr)) deletedIds.push(idStr);
-      }
-      localStorage.setItem('workperhour_deleted_gigs', JSON.stringify(deletedIds));
-    } catch {}
-
-    setGigs(prev => prev.filter(g => !idsToRemove.includes(String(g.id))));
-    if (onDeleteGig) {
-      selectedGigIds.forEach(id => onDeleteGig(id));
-    }
-    showToast(`Successfully deleted ${idsToRemove.length} gigs.`);
-
+    const succeededIds: string[] = [];
     for (const id of selectedGigIds) {
       try {
-        await fetch(`/api/admin/gigs/${id}`, { method: 'DELETE' });
+        const res = await fetch(`/api/admin/gigs/${id}`, {
+          method: 'DELETE',
+          headers: getAdminAuthHeaders()
+        });
+        if (res.ok) succeededIds.push(String(id));
       } catch (e) {
         console.warn('API delete error:', e);
       }
+    }
+
+    if (succeededIds.length > 0) {
+      try {
+        const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_gigs') || '[]').map((d: any) => String(d));
+        for (const idStr of succeededIds) {
+          if (!deletedIds.includes(idStr)) deletedIds.push(idStr);
+        }
+        localStorage.setItem('workperhour_deleted_gigs', JSON.stringify(deletedIds));
+      } catch {}
+
+      setGigs(prev => prev.filter(g => !succeededIds.includes(String(g.id))));
+      if (onDeleteGig) {
+        for (const id of succeededIds) await onDeleteGig(id);
+      }
+      showToast(`Successfully deleted ${succeededIds.length} gigs.`);
+    } else {
+      showToast('Failed to delete selected gigs on server.');
     }
 
     setSelectedGigIds([]);
@@ -284,18 +333,17 @@ export const AdminGigsModule: React.FC<AdminGigsModuleProps> = ({
     try {
       const res = await fetch(`/api/admin/gigs/${editingGig.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAdminAuthHeaders(true),
         body: JSON.stringify(editGigForm)
       });
+      if (!res.ok) throw new Error('Failed to update gig');
       const updated = await res.json();
       setGigs(prev => prev.map(g => g.id === editingGig.id ? updated : g));
       setEditingGig(null);
       showToast(`Gig updated successfully!`);
     } catch (err) {
       console.error(err);
-      setGigs(prev => prev.map(g => g.id === editingGig.id ? { ...g, ...editGigForm } : g));
-      setEditingGig(null);
-      showToast(`Gig updated locally.`);
+      showToast(`Failed to update gig on server.`);
     }
   };
 
@@ -303,14 +351,15 @@ export const AdminGigsModule: React.FC<AdminGigsModuleProps> = ({
     e.preventDefault();
     if (!moderatingGig) return;
     try {
-      await fetch(`/api/admin/gigs/${moderatingGig.id}`, {
+      const res = await fetch(`/api/admin/gigs/${moderatingGig.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAdminAuthHeaders(true),
         body: JSON.stringify({
           moderationStatus: moderationDecision,
           moderationNotes: modNote
         })
       });
+      if (!res.ok) throw new Error('Failed to save moderation decision');
       setGigs(prev => prev.map(g => g.id === moderatingGig.id ? { ...g, moderationStatus: moderationDecision, moderationNotes: modNote } : g));
       setModeratingGig(null);
       setModNote('');

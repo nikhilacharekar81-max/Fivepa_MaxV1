@@ -108,24 +108,28 @@ export const AdminUsersModule: React.FC<AdminUsersModuleProps> = ({
     }
   };
 
-  const handleConfirmDeleteUser = () => {
+  const handleConfirmDeleteUser = async () => {
     if (!deletingUserId) return;
     const idToDelete = String(deletingUserId);
     try {
-      const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_users') || '[]').map((d: any) => String(d));
-      if (!deletedIds.includes(idToDelete)) {
-        deletedIds.push(idToDelete);
-        localStorage.setItem('workperhour_deleted_users', JSON.stringify(deletedIds));
+      if (onDeleteUser) {
+        await Promise.resolve(onDeleteUser(idToDelete));
       }
-    } catch (e) {
-      console.error("Error persisting deleted user ID to localStorage", e);
+      try {
+        const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_users') || '[]').map((d: any) => String(d));
+        if (!deletedIds.includes(idToDelete)) {
+          deletedIds.push(idToDelete);
+          localStorage.setItem('workperhour_deleted_users', JSON.stringify(deletedIds));
+        }
+      } catch (e) {
+        console.error("Error persisting deleted user ID to localStorage", e);
+      }
+      setUsers((prev: UserAccount[]) => prev.filter(u => String(u.id) !== idToDelete));
+    } catch (err: any) {
+      alert(err?.message || 'Failed to delete user account.');
+    } finally {
+      setDeletingUserId(null);
     }
-
-    setUsers((prev: UserAccount[]) => prev.filter(u => String(u.id) !== idToDelete));
-    if (onDeleteUser) {
-      onDeleteUser(idToDelete);
-    }
-    setDeletingUserId(null);
   };
 
   const exportUsersCSV = () => {

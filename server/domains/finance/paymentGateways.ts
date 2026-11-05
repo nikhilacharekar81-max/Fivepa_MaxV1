@@ -230,11 +230,40 @@ export class PaymentGatewayManager {
     }
   }
 
+  private lastRefreshedAt = 0;
+  private refreshInFlight: Promise<void> | null = null;
+
+  public async refreshFromDatabase(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && now - this.lastRefreshedAt < 5000) return;
+    if (this.refreshInFlight) return this.refreshInFlight;
+    this.refreshInFlight = (async () => {
+      try {
+        const { postgresStore, isPostgresEnabled } = await import('../../db/postgresStore.js');
+        if (!isPostgresEnabled()) return;
+        const persisted = await postgresStore.loadPaymentGateways();
+        if (persisted && typeof persisted === 'object' && Object.keys(persisted).length > 0) {
+          this.loadFromState(persisted);
+        }
+        this.lastRefreshedAt = Date.now();
+      } catch {} finally {
+        this.refreshInFlight = null;
+      }
+    })();
+    return this.refreshInFlight;
+  }
+
   public getState(): PaymentGatewaysState {
+    if (Date.now() - this.lastRefreshedAt > 5000) {
+      void this.refreshFromDatabase(false);
+    }
     return this.state;
   }
 
   public getGateway(gatewayName: 'paypal' | 'stripe' | 'razorpay', env: 'production' | 'sandbox' = 'sandbox'): GatewayConfig {
+    if (Date.now() - this.lastRefreshedAt > 5000) {
+      void this.refreshFromDatabase(false);
+    }
     return this.state[env]?.[gatewayName];
   }
 
@@ -257,6 +286,7 @@ export class PaymentGatewayManager {
     const secureState = this.getEncryptedState();
     const { postgresStore } = await import('../../db/postgresStore.js');
     await postgresStore.savePaymentGateways(secureState);
+    this.lastRefreshedAt = Date.now();
   }
 
   public saveToDisk() {
@@ -266,6 +296,9 @@ export class PaymentGatewayManager {
   }
 
   public getMaskedState(): PaymentGatewaysState {
+    if (Date.now() - this.lastRefreshedAt > 5000) {
+      void this.refreshFromDatabase(false);
+    }
     const maskSecret = (secret: string) => {
       if (!secret || secret.trim() === '') return '';
       return '••••••••••••••••';
@@ -287,6 +320,7 @@ export class PaymentGatewayManager {
     if (env !== 'production' && env !== 'sandbox') throw new Error('Invalid environment.');
     if (!['paypal', 'stripe', 'razorpay'].includes(gatewayName)) throw new Error('Invalid gateway.');
 
+    await this.refreshFromDatabase(true);
     const envState = this.state[env];
     const current = envState[gatewayName];
 

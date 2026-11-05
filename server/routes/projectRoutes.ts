@@ -542,6 +542,14 @@ projectRouter.delete('/admin/projects/:id', requireAdmin, async (req: Request, r
     const deleted = await store.getProject(req.params.id);
     if (!deleted) return res.status(404).json({ error: 'Project not found' });
 
+    const activeOrdersRes = await postgresStore.getPool().query(
+      "SELECT 1 FROM orders WHERE project_id = $1 AND status NOT IN ('completed', 'cancelled', 'refunded') LIMIT 1",
+      [deleted.id]
+    );
+    if (activeOrdersRes.rows.length > 0) {
+      return res.status(409).json({ error: 'Cannot delete a project with active orders. Complete or cancel active orders first.' });
+    }
+
     await store.deleteProject(req.params.id);
 
     await registerAuditLog({
@@ -550,7 +558,7 @@ projectRouter.delete('/admin/projects/:id', requireAdmin, async (req: Request, r
       role: 'super_admin',
       action: 'ADMIN_PROJECT_DELETED',
       target: `Project "${deleted.title}"`,
-      details: `Admin permanently removed project #${deleted.id}`,
+      details: `Admin removed project #${deleted.id}`,
       timestamp: new Date().toLocaleString()
     });
 

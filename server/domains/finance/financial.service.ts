@@ -1570,7 +1570,10 @@ export class FinancialTransactionService {
 
       // Balanced Journal: Debit Buyer Wallets Payable (2010), Credit Escrow Liability (2030), Credit Service Fee (4020), Credit Small Order Fee (4030)
       const jId = randomUUID();
-      await client.query('INSERT INTO ledger_journals (id, reference, event_type, actor, idempotency_key) VALUES ($1, $2, $3, $4, $5)', [jId, `ORD-${params.orderId}-TOPUP`, 'ORDER_ESCROW_FUNDED', params.actor, idempKey]);
+      await client.query(
+        'INSERT INTO ledger_journals (id, reference, description, event_type, actor, idempotency_key) VALUES ($1, $2, $3, $4, $5, $6)',
+        [jId, `ORD-${params.orderId}-TOPUP`, `Top-up escrow for Order #${params.orderId}: ${params.orderTitle}`, 'ORDER_ESCROW_TOPUP', params.actor, idempKey]
+      );
       const entries: any[] = [
         { account_code: '2010', debit: clientTotal, credit: 0, description: 'Debited buyer wallet payable for top-up', user_id: params.buyerId, order_id: params.orderId },
         { account_code: '2030', debit: 0, credit: gigPrice, description: 'Escrow hold (top-up)', order_id: params.orderId }

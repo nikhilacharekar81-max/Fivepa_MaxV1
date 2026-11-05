@@ -86,7 +86,7 @@ export function useWorkstreamRealtime({
               const clientMsgId = incomingMsg.metadata?.clientMessageId;
               const isSame = (m: any) => {
                 if (m.id === incomingMsg.id) return true;
-                if (clientMsgId && m.metadata?.clientMessageId === clientMsgId) return true;
+                if (clientMsgId && (m.id === clientMsgId || m.metadata?.clientMessageId === clientMsgId)) return true;
                 if (singletonAction && m.type === 'system' && m.orderId === incomingMsg.orderId && m.metadata?.action === incomingMsg.metadata?.action) {
                   return true;
                 }
@@ -104,10 +104,15 @@ export function useWorkstreamRealtime({
                 }
                 return false;
               };
-              const alreadyExists = prev.some(isSame);
-              if (alreadyExists) {
-                // If it exists but was optimistic, update it with full server data
-                return prev.map(m => isSame(m) ? { ...incomingMsg, status: 'sent' } : m);
+              const matchingIndices: number[] = [];
+              prev.forEach((m, idx) => {
+                if (isSame(m)) matchingIndices.push(idx);
+              });
+              if (matchingIndices.length > 0) {
+                const firstIdx = matchingIndices[0];
+                return prev
+                  .filter((_, idx) => idx === firstIdx || !matchingIndices.includes(idx))
+                  .map((m, idx) => (idx === firstIdx ? { ...incomingMsg, status: 'sent' } : m));
               }
               const next = [...prev, incomingMsg];
               return next.sort(compareMessageTime);
@@ -124,8 +129,24 @@ export function useWorkstreamRealtime({
             }));
           } else if (data.type === 'MESSAGE_ACK' && data.message) {
             setMessages(prev => prev.map(m => 
-              m.metadata?.clientMessageId === data.clientMessageId ? data.message : m
+              (m.id === data.clientMessageId || m.metadata?.clientMessageId === data.clientMessageId) ? data.message : m
             ));
+          } else if (data.type === 'WORKSTREAM_UPDATED' && data.orderId) {
+            setOrders(prev => prev.map(o =>
+              o.id === data.orderId
+                ? {
+                    ...o,
+                    ...(data.lastMessage !== undefined ? { lastMessage: data.lastMessage } : {}),
+                    ...(data.lastMessageTime !== undefined ? { lastMessageTime: data.lastMessageTime } : {})
+                  }
+                : o
+            ));
+          } else if ((data.type === 'NOTIFICATION' || data.type === 'NOTIFICATION_CREATED') && data.notification) {
+            window.dispatchEvent(new CustomEvent('fivepa:notification', { detail: data.notification }));
+            if (onOrderStateChangedRef.current) {
+              if (stateRefreshTimerRef.current) clearTimeout(stateRefreshTimerRef.current);
+              stateRefreshTimerRef.current = setTimeout(() => onOrderStateChangedRef.current?.(), 400);
+            }
           }
         } catch (err) {
           console.error('Error parsing WebSocket message:', err);

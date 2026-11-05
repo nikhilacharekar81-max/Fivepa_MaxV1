@@ -144,9 +144,10 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
       try {
         const isWorkspaceOnly = !!isInquiryRef.current;
         const url = isWorkspaceOnly ? '/api/messages' : `/api/orders/${activeOrderId}/message`;
+        const metadata = { clientMessageId, ...(activeWorkspaceId ? { workspaceId: activeWorkspaceId } : {}) };
         const bodyPayload = isWorkspaceOnly
-          ? { workspaceId: activeWorkspaceId, text: text.trim(), type, fileInfo, clientMessageId }
-          : { text: text.trim(), type, fileInfo, clientMessageId };
+          ? { workspaceId: activeWorkspaceId, text: text.trim(), type, fileInfo, clientMessageId, metadata }
+          : { text: text.trim(), type, fileInfo, clientMessageId, metadata };
 
         const res = await fetchWithRetry(url, {
           method: 'POST',
@@ -156,7 +157,19 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
         if (res.ok) {
           const data = await res.json();
           const serverMsg = data.message || data;
-          setMessages(prev => prev.map(m => m.id === clientMessageId ? { ...m, ...serverMsg, status: 'sent' } : m));
+          setMessages(prev => {
+            const hasServerMsg = prev.some(m => m.id === serverMsg.id);
+            if (hasServerMsg) {
+              return prev
+                .filter(m => m.id === serverMsg.id || (m.id !== clientMessageId && m.metadata?.clientMessageId !== clientMessageId))
+                .map(m => m.id === serverMsg.id ? { ...m, ...serverMsg, status: 'sent' } : m);
+            }
+            return prev.map(m =>
+              (m.id === clientMessageId || m.metadata?.clientMessageId === clientMessageId)
+                ? { ...m, ...serverMsg, status: 'sent' }
+                : m
+            );
+          });
         } else {
           throw new Error('Server error');
         }
@@ -199,13 +212,27 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
           body: JSON.stringify({
             text,
             type,
+            clientMessageId,
             metadata: { ...metadata, clientMessageId }
           })
         });
 
         if (res.ok) {
           const data = await res.json();
-          setMessages(prev => prev.map(m => m.id === clientMessageId ? { ...data.message, status: 'sent' } : m));
+          const serverMsg = data.message || data;
+          setMessages(prev => {
+            const hasServerMsg = prev.some(m => m.id === serverMsg.id);
+            if (hasServerMsg) {
+              return prev
+                .filter(m => m.id === serverMsg.id || (m.id !== clientMessageId && m.metadata?.clientMessageId !== clientMessageId))
+                .map(m => m.id === serverMsg.id ? { ...m, ...serverMsg, status: 'sent' } : m);
+            }
+            return prev.map(m =>
+              (m.id === clientMessageId || m.metadata?.clientMessageId === clientMessageId)
+                ? { ...serverMsg, status: 'sent' }
+                : m
+            );
+          });
         } else {
           throw new Error('Failed to send event');
         }
@@ -233,14 +260,27 @@ export function useWorkstreamMessages(options: UseWorkstreamMessagesOptions = {}
           text: msg.text,
           type: msg.type || 'message',
           fileInfo: msg.fileInfo,
-          clientMessageId
+          clientMessageId,
+          metadata: { ...(msg.metadata || {}), clientMessageId }
         })
       });
 
       if (res.ok) {
         const data = await res.json();
         const serverMsg = data.message || data;
-        setMessages(prev => prev.map(m => (m.id === msg.id || m.id === clientMessageId) ? { ...m, ...serverMsg, status: 'sent' } : m));
+        setMessages(prev => {
+          const hasServerMsg = prev.some(m => m.id === serverMsg.id);
+          if (hasServerMsg) {
+            return prev
+              .filter(m => m.id === serverMsg.id || (m.id !== msg.id && m.id !== clientMessageId && m.metadata?.clientMessageId !== clientMessageId))
+              .map(m => m.id === serverMsg.id ? { ...m, ...serverMsg, status: 'sent' } : m);
+          }
+          return prev.map(m =>
+            (m.id === msg.id || m.id === clientMessageId || m.metadata?.clientMessageId === clientMessageId)
+              ? { ...m, ...serverMsg, status: 'sent' }
+              : m
+          );
+        });
       } else {
         throw new Error('Server error');
       }

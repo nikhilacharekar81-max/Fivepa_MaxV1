@@ -640,14 +640,28 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
 
         // If there is a pending deposit/proposal offer with matching amount and buyer wants to accept it
         if (pendingOffer && Math.abs(Number(pendingOffer.amount) - amt) < 0.01) {
-          // Ensure buyer has sufficient wallet balance if instant_deposit is chosen
-          if (escrowFundSource === 'instant_deposit' || availableBalance < amt) {
+          const feeCfg = {
+            commissionPercent: platformFee,
+            buyerFeePercent: clientServiceFee,
+            smallOrderFee: smallOrderFeeAmount,
+            smallOrderThreshold: smallOrderFeeThreshold
+          };
+          const currentFundedGross = Number(targetRow?.escrowFunded || targetRow?.inEscrow || 0);
+          const computedRequired = currentFundedGross > 0
+            ? Number((calculateOrderFees(currentFundedGross + amt, feeCfg).clientTotal - calculateOrderFees(currentFundedGross, feeCfg).clientTotal).toFixed(2))
+            : calculateOrderFees(amt, feeCfg).clientTotal;
+          const requiredCharge = Number((pendingOffer as any).clientTotal || computedRequired || amt);
+
+          // Ensure buyer has sufficient wallet balance including applicable buyer service fee and small-order fee
+          if (escrowFundSource === 'instant_deposit' || availableBalance < requiredCharge) {
+            const shortfall = Math.max(1, Number((requiredCharge - availableBalance).toFixed(2)));
+            const depositAmt = escrowFundSource === 'instant_deposit' ? Math.max(requiredCharge, shortfall) : shortfall;
             const depRes = await fetch('/api/payments/deposit', {
               method: 'POST',
               headers,
               body: JSON.stringify({
                 userId: currentUser?.id,
-                amount: Math.max(amt, Number((amt - availableBalance).toFixed(2)))
+                amount: depositAmt
               })
             });
             if (!depRes.ok) {
@@ -722,12 +736,31 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
         ...(await ensureValidAuthHeaders())
       };
       const amt = Number(offer.amount || 0);
-      const needed = offer.kind === 'invoice'
-        ? Math.max(0, Number((amt - Number(orderRow.inEscrow || 0)).toFixed(2)))
-        : amt;
+      const feeCfg = {
+        commissionPercent: platformFee,
+        buyerFeePercent: clientServiceFee,
+        smallOrderFee: smallOrderFeeAmount,
+        smallOrderThreshold: smallOrderFeeThreshold
+      };
+      const inEscrowGross = Number(orderRow.inEscrow || 0);
+      const fundedGross = Number(orderRow.escrowFunded || inEscrowGross || 0);
+      let needed = 0;
+      if (offer.kind === 'invoice') {
+        const additionalGross = Math.max(0, Number((amt - inEscrowGross).toFixed(2)));
+        if (additionalGross > 0) {
+          needed = fundedGross > 0
+            ? Number((calculateOrderFees(fundedGross + additionalGross, feeCfg).clientTotal - calculateOrderFees(fundedGross, feeCfg).clientTotal).toFixed(2))
+            : calculateOrderFees(additionalGross, feeCfg).clientTotal;
+        }
+      } else {
+        const computedCharge = fundedGross > 0
+          ? Number((calculateOrderFees(fundedGross + amt, feeCfg).clientTotal - calculateOrderFees(fundedGross, feeCfg).clientTotal).toFixed(2))
+          : calculateOrderFees(amt, feeCfg).clientTotal;
+        needed = Number((offer as any).clientTotal || computedCharge || amt);
+      }
 
       if (needed > availableBalance) {
-        const shortfall = Number((needed - availableBalance).toFixed(2));
+        const shortfall = Math.max(1, Number((needed - availableBalance).toFixed(2)));
         const depRes = await fetch('/api/payments/deposit', {
           method: 'POST',
           headers,

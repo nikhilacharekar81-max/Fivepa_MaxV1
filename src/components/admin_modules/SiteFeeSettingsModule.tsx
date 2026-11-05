@@ -17,6 +17,8 @@ interface SiteFeeSettingsModuleProps {
 }
 
 import { DEFAULT_FEE_CONFIG } from '../../shared/fees';
+import { getAuthToken } from '../../utils/authToken';
+import { getDeviceId } from '../../utils/deviceId';
 
 export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
   currentUser,
@@ -70,7 +72,10 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
   // Load existing settings on mount
   useEffect(() => {
     setIsLoading(true);
-    fetch('/api/admin/settings')
+    const token = getAuthToken();
+    const headers: Record<string, string> = { 'x-device-id': getDeviceId() };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    fetch('/api/admin/settings', { headers })
       .then(res => res.json())
       .then(data => {
         if (data) {
@@ -107,9 +112,15 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
     setSaveError(null);
 
     try {
+      const token = getAuthToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-device-id': getDeviceId()
+      };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
       const response = await fetch('/api/admin/settings', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           freelancerCommissionRate: takeRate,
           clientServiceFee,

@@ -134,7 +134,23 @@ export function Header({
     };
     fetchNotifs();
     const interval = setInterval(fetchNotifs, 30000);
-    return () => clearInterval(interval);
+    const handleRealtimeNotification = (evt: Event) => {
+      const detail = (evt as CustomEvent).detail;
+      if (detail && detail.id) {
+        setNotifications(prev => {
+          if (prev.some(n => n.id === detail.id)) return prev;
+          playNotificationSound();
+          return [detail, ...prev];
+        });
+      } else {
+        fetchNotifs();
+      }
+    };
+    window.addEventListener('fivepa:notification', handleRealtimeNotification as EventListener);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('fivepa:notification', handleRealtimeNotification as EventListener);
+    };
   }, [currentUser?.id]);
 
   const unreadCount = notifications.filter(n => !n.read).length;

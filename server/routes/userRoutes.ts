@@ -49,13 +49,26 @@ userRouter.patch('/users/profile', requireAuth, async (req: Request, res: Respon
     const {
       name,
       title,
+      tagline,
       bio,
+      location,
       hourlyRate,
       skills,
+      languages,
+      education,
+      portfolio,
       avatar,
+      coverUrl,
       isAvailableNow,
       username
     } = req.body || {};
+
+    if (typeof avatar === 'string' && avatar.trim().startsWith('blob:')) {
+      return res.status(400).json({ error: 'Temporary blob URLs cannot be saved as avatar. Please upload a valid image.' });
+    }
+    if (typeof coverUrl === 'string' && coverUrl.trim().startsWith('blob:')) {
+      return res.status(400).json({ error: 'Temporary blob URLs cannot be saved as cover image. Please upload a valid image.' });
+    }
 
     if (typeof name === 'string' && name.trim()) {
       user.name = escapeHtml(name.trim().slice(0, 80));
@@ -63,19 +76,42 @@ userRouter.patch('/users/profile', requireAuth, async (req: Request, res: Respon
     if (typeof title === 'string') {
       user.title = escapeHtml(title.trim().slice(0, 120));
     }
+    if (typeof tagline === 'string') {
+      (user as any).tagline = escapeHtml(tagline.trim().slice(0, 200));
+    }
     if (typeof bio === 'string') {
       user.bio = escapeHtml(bio.trim());
     }
+    if (typeof location === 'string') {
+      user.location = escapeHtml(location.trim().slice(0, 120));
+    }
     if (typeof hourlyRate === 'number' && Number.isFinite(hourlyRate) && hourlyRate >= 0) {
       user.hourlyRate = hourlyRate;
+    } else if (typeof hourlyRate === 'string' && hourlyRate.trim() !== '') {
+      const parsedRate = Number(hourlyRate);
+      if (Number.isFinite(parsedRate) && parsedRate >= 0) user.hourlyRate = parsedRate;
     }
     if (Array.isArray(skills)) {
       user.skills = skills.map((s: any) => String(s).trim()).filter(Boolean);
     } else if (typeof skills === 'string') {
       user.skills = skills.split(',').map(s => s.trim()).filter(Boolean);
     }
+    if (Array.isArray(languages)) {
+      user.languages = languages.map((l: any) => String(l).trim()).filter(Boolean);
+    } else if (typeof languages === 'string') {
+      user.languages = languages.split(',').map(l => l.trim()).filter(Boolean);
+    }
+    if (Array.isArray(education)) {
+      (user as any).education = education;
+    }
+    if (Array.isArray(portfolio)) {
+      (user as any).portfolio = portfolio;
+    }
     if (typeof avatar === 'string' && avatar.trim()) {
       user.avatar = avatar.trim();
+    }
+    if (typeof coverUrl === 'string' && coverUrl.trim()) {
+      (user as any).coverUrl = coverUrl.trim();
     }
     if (typeof isAvailableNow === 'boolean') {
       user.isAvailableNow = isAvailableNow;

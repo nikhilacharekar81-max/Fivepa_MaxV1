@@ -295,6 +295,7 @@ export function mapUserRow(r: any): User {
     reviewsCount: Number(r.reviews_count || 0),
     hourlyRate: Number(r.hourly_rate || 0),
     earned: Number(r.earned || 0),
+    spent: Number(r.spent || 0),
     completedJobs: Number(r.completed_jobs || 0),
     bio: r.bio || '',
     skills: typeof r.skills === 'string' ? JSON.parse(r.skills) : (r.skills || []),
@@ -310,7 +311,15 @@ export function mapUserRow(r: any): User {
     sessionVersion: Number(r.session_version || 1),
     knownDevices: typeof r.known_devices === 'string' ? JSON.parse(r.known_devices) : (r.known_devices || []),
     isAvailableNow: Boolean(r.is_available_now),
-    notificationPreferences: typeof r.notification_preferences === 'string' ? JSON.parse(r.notification_preferences) : (r.notification_preferences || undefined)
+    notificationPreferences: typeof r.notification_preferences === 'string' ? JSON.parse(r.notification_preferences) : (r.notification_preferences || undefined),
+    membershipTier: r.membership_tier || 'free',
+    buyerMembershipTier: r.buyer_membership_tier || 'standard',
+    location: r.location || undefined,
+    tagline: r.tagline || undefined,
+    coverUrl: r.cover_url || undefined,
+    languages: typeof r.languages === 'string' ? JSON.parse(r.languages) : (r.languages || undefined),
+    education: typeof r.education === 'string' ? JSON.parse(r.education) : (r.education || undefined),
+    portfolio: typeof r.portfolio === 'string' ? JSON.parse(r.portfolio) : (r.portfolio || undefined)
   };
 }
 
@@ -668,12 +677,16 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   async listUsers(): Promise<User[]> {
-    const res = await postgresStore.getPool().query("SELECT * FROM users WHERE id != 'system' ORDER BY created_at DESC");
+    const res = await postgresStore.getPool().query(
+      "SELECT * FROM users WHERE id != 'system' AND COALESCE(flag_reason, '') != 'ACCOUNT_DELETED_BY_ADMIN' ORDER BY created_at DESC"
+    );
     return res.rows.map(mapUserRow);
   }
 
   async listPublicUsers(): Promise<User[]> {
-    const res = await postgresStore.getPool().query("SELECT * FROM users WHERE status = 'active' AND id != 'system' ORDER BY rating DESC, earned DESC");
+    const res = await postgresStore.getPool().query(
+      "SELECT * FROM users WHERE status = 'active' AND id != 'system' AND COALESCE(flag_reason, '') != 'ACCOUNT_DELETED_BY_ADMIN' ORDER BY rating DESC, earned DESC"
+    );
     return res.rows.map(mapUserRow);
   }
 
@@ -831,6 +844,9 @@ export class PostgresAsyncStore implements StoreInterface {
       tags: 'tags',
       extras: 'extras',
       status: 'status',
+      featured: 'featured',
+      isFeatured: 'is_featured',
+      featuredUntil: 'featured_until',
       moderationStatus: 'moderation_status',
       moderationNotes: 'moderation_notes',
       freelancerName: 'freelancer_name',
@@ -938,7 +954,7 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   async listProjects(status?: string): Promise<Project[]> {
-    let query = 'SELECT * FROM projects ORDER BY created_at DESC';
+    let query = "SELECT * FROM projects WHERE NOT (status = 'suspended' AND moderation_status = 'rejected') ORDER BY created_at DESC";
     let params: any[] = [];
     if (status) {
       query = 'SELECT * FROM projects WHERE status = $1 ORDER BY created_at DESC';
@@ -1004,8 +1020,46 @@ export class PostgresAsyncStore implements StoreInterface {
   }
 
   async deleteProject(id: string): Promise<boolean> {
-    const res = await postgresStore.getPool().query('DELETE FROM projects WHERE id = $1', [id]);
-    return res.rowCount !== null && res.rowCount > 0;
+    const pool = postgresStore.getPool();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Check if historical orders reference this project
+      const ordersRes = await client.query('SELECT COUNT(*)::int AS cnt FROM orders WHERE project_id = $1', [id]);
+      const hasOrders = Number(ordersRes.rows[0]?.cnt || 0) > 0;
+      if (hasOrders) {
+        // Preserve historical orders and foreign-key integrity by archiving/suspending the project
+        const archRes = await client.query(
+          "UPDATE projects SET status = 'suspended', moderation_status = 'rejected', featured = FALSE, is_featured = FALSE WHERE id = $1",
+          [id]
+        );
+        await client.query('COMMIT');
+        return archRes.rowCount !== null && archRes.rowCount > 0;
+      }
+      // If no orders exist for this project, try physical delete; if proposals/clarifications block FK, archive safely
+      await client.query('SAVEPOINT sp_delete_project');
+      try {
+        await client.query('DELETE FROM project_clarifications WHERE project_id = $1', [id]);
+        await client.query("DELETE FROM proposals WHERE project_id = $1 AND status != 'accepted'", [id]);
+        const delRes = await client.query('DELETE FROM projects WHERE id = $1', [id]);
+        await client.query('RELEASE SAVEPOINT sp_delete_project');
+        await client.query('COMMIT');
+        return delRes.rowCount !== null && delRes.rowCount > 0;
+      } catch (_fkErr) {
+        await client.query('ROLLBACK TO SAVEPOINT sp_delete_project');
+        const archRes = await client.query(
+          "UPDATE projects SET status = 'suspended', moderation_status = 'rejected', featured = FALSE, is_featured = FALSE WHERE id = $1",
+          [id]
+        );
+        await client.query('COMMIT');
+        return archRes.rowCount !== null && archRes.rowCount > 0;
+      }
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
   }
 
   async getProposal(id: string, client?: any): Promise<Proposal | undefined> {
@@ -1362,10 +1416,11 @@ export class PostgresAsyncStore implements StoreInterface {
     await dbRunner.query(
       `INSERT INTO users (
         id, name, username, email, mobile, role, avatar, title, rating, reviews_count, 
-        hourly_rate, earned, completed_jobs, bio, skills, status, verified, email_verified, 
+        hourly_rate, earned, spent, completed_jobs, bio, skills, status, verified, email_verified, 
         mobile_verified, wallet_balance, created_at, is_flagged, flag_reason, password, 
-        session_version, known_devices, is_available_now, notification_preferences
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+        session_version, known_devices, is_available_now, notification_preferences,
+        membership_tier, buyer_membership_tier, location, tagline, cover_url, languages, education, portfolio
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
         username = EXCLUDED.username,
@@ -1377,7 +1432,8 @@ export class PostgresAsyncStore implements StoreInterface {
         rating = EXCLUDED.rating,
         reviews_count = EXCLUDED.reviews_count,
         hourly_rate = EXCLUDED.hourly_rate,
-        earned = EXCLUDED.earned,
+        earned = COALESCE(EXCLUDED.earned, users.earned, 0),
+        spent = COALESCE(EXCLUDED.spent, users.spent, 0),
         completed_jobs = EXCLUDED.completed_jobs,
         bio = EXCLUDED.bio,
         skills = EXCLUDED.skills,
@@ -1385,7 +1441,7 @@ export class PostgresAsyncStore implements StoreInterface {
         verified = EXCLUDED.verified,
         email_verified = EXCLUDED.email_verified,
         mobile_verified = EXCLUDED.mobile_verified,
-        wallet_balance = EXCLUDED.wallet_balance,
+        wallet_balance = COALESCE(EXCLUDED.wallet_balance, users.wallet_balance, 0),
         created_at = EXCLUDED.created_at,
         is_flagged = EXCLUDED.is_flagged,
         flag_reason = EXCLUDED.flag_reason,
@@ -1393,15 +1449,29 @@ export class PostgresAsyncStore implements StoreInterface {
         session_version = EXCLUDED.session_version,
         known_devices = EXCLUDED.known_devices,
         is_available_now = EXCLUDED.is_available_now,
-        notification_preferences = EXCLUDED.notification_preferences`,
+        notification_preferences = EXCLUDED.notification_preferences,
+        membership_tier = COALESCE(EXCLUDED.membership_tier, users.membership_tier, 'free'),
+        buyer_membership_tier = COALESCE(EXCLUDED.buyer_membership_tier, users.buyer_membership_tier, 'standard'),
+        location = COALESCE(EXCLUDED.location, users.location),
+        tagline = COALESCE(EXCLUDED.tagline, users.tagline),
+        cover_url = COALESCE(EXCLUDED.cover_url, users.cover_url),
+        languages = COALESCE(EXCLUDED.languages, users.languages),
+        education = COALESCE(EXCLUDED.education, users.education),
+        portfolio = COALESCE(EXCLUDED.portfolio, users.portfolio)`,
       [
         u.id, u.name, u.username || null, u.email, u.mobile || null, u.role, u.avatar || null,
         u.title || null, u.rating ?? 5.0, u.reviewsCount ?? 0, u.hourlyRate ?? 0, u.earned ?? 0,
+        (u as any).spent ?? null,
         u.completedJobs ?? 0, u.bio || null, u.skills || [], u.status || 'active',
         Boolean(u.verified), Boolean(u.emailVerified), Boolean(u.mobileVerified), u.walletBalance ?? 0,
         u.createdAt || new Date().toISOString(), Boolean(u.isFlagged), u.flagReason || null,
         u.password || null, u.sessionVersion ?? 1, u.knownDevices || ['dev_default_session'],
-        Boolean(u.isAvailableNow), u.notificationPreferences ? JSON.stringify(u.notificationPreferences) : null
+        Boolean(u.isAvailableNow), u.notificationPreferences ? JSON.stringify(u.notificationPreferences) : null,
+        u.membershipTier || 'free', u.buyerMembershipTier || 'standard',
+        u.location || null, (u as any).tagline || null, (u as any).coverUrl || null,
+        u.languages || null,
+        (u as any).education ? JSON.stringify((u as any).education) : null,
+        (u as any).portfolio ? JSON.stringify((u as any).portfolio) : null
       ]
     );
   }
@@ -2254,7 +2324,7 @@ export async function hydrateStoreFromPostgres() {
       FROM (
         SELECT u2.id AS user_id, COALESCE(SUM(c.amount), 0) AS total_earned
         FROM users u2
-        LEFT JOIN earnings_clearing c ON c.seller_id = u2.id
+        LEFT JOIN earnings_clearing c ON c.seller_id = u2.id AND c.status IN ('clearing', 'completed') AND c.amount > 0
         GROUP BY u2.id
       ) ec
       WHERE u.id = ec.user_id

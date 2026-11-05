@@ -433,13 +433,44 @@ gigRouter.delete('/gigs/:id', requireAuth, requireActiveStatus, async (req: Requ
   }
 });
 
-// Feature Gig
+// Feature / Unfeature Gig (Seller)
 gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (req: Request, res: Response) => {
   const caller = (req as any).authenticatedUser;
   try {
+    const gig = await store.getGig(req.params.id);
+    if (!gig || gig.status === 'deleted') {
+      return res.status(404).json({ error: 'Gig not found' });
+    }
+    if (gig.freelancerId !== caller.id) {
+      return res.status(403).json({ error: 'Forbidden: You can only feature or unfeature your own gigs.' });
+    }
+
+    const desiredFeatured = typeof req.body?.featured === 'boolean'
+      ? req.body.featured
+      : !Boolean(gig.featured);
+
+    if (!desiredFeatured) {
+      await postgresStore.getPool().query(
+        'UPDATE gigs SET featured = FALSE, is_featured = FALSE, featured_until = NULL, updated_at = NOW() WHERE id = $1 AND freelancer_id = $2',
+        [gig.id, caller.id]
+      );
+      const updatedGig = await store.getGig(gig.id);
+      return res.json({
+        success: true,
+        gigId: gig.id,
+        featured: false,
+        feeCharged: 0,
+        gig: updatedGig
+      });
+    }
+
     const activeSettings = siteSettings.getSettings();
-    const fee = activeSettings.marketplace.featuredGigFee;
-    if (!fee || fee <= 0) {
+    const fee = Number(
+      activeSettings.marketplace?.featuredGigFee ??
+      (activeSettings.commission as any)?.featuredGigFee ??
+      10
+    );
+    if (isNaN(fee) || fee < 0) {
       return res.status(500).json({ error: 'Feature fee is not configured.' });
     }
 
@@ -458,8 +489,25 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
     ) as string | undefined;
     const trimmedOpId = callerOpId && String(callerOpId).trim() ? String(callerOpId).trim() : undefined;
 
+    if (fee === 0) {
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      await postgresStore.getPool().query(
+        'UPDATE gigs SET featured = TRUE, is_featured = TRUE, featured_until = $1, updated_at = NOW() WHERE id = $2 AND freelancer_id = $3',
+        [expiresAt, gig.id, caller.id]
+      );
+      const updatedGig = await store.getGig(gig.id);
+      return res.json({
+        success: true,
+        gigId: gig.id,
+        featured: true,
+        feeCharged: 0,
+        featuredUntil: expiresAt,
+        gig: updatedGig
+      });
+    }
+
     const result = await financialTransactionService.chargeFeaturedGigFee({
-      gigId: req.params.id,
+      gigId: gig.id,
       sellerId: caller.id,
       feeAmount: fee,
       extensionDays: 7,
@@ -468,9 +516,16 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
       operationId: trimmedOpId
     });
 
-    res.json(result);
+    const updatedGig = await store.getGig(gig.id);
+    res.json({
+      ...result,
+      featured: true,
+      gig: updatedGig
+    });
   } catch (err: any) {
     console.error('[FeatureGig] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to feature gig' });
+    const msg = err?.message || 'Failed to feature gig';
+    const status = msg.includes('Forbidden') ? 403 : msg.includes('not found') ? 404 : 400;
+    res.status(status).json({ error: msg });
   }
 });

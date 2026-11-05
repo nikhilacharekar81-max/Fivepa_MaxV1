@@ -135,25 +135,29 @@ export const AdminProjectsModule: React.FC<AdminProjectsModuleProps> = ({
     }));
   };
 
-  const handleDeleteProject = () => {
+  const handleDeleteProject = async () => {
     if (!deleteConfirmProject) return;
 
     const idToDelete = String(deleteConfirmProject.id);
     try {
-      const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_projects') || '[]').map((d: any) => String(d));
-      if (!deletedIds.includes(idToDelete)) {
-        deletedIds.push(idToDelete);
-        localStorage.setItem('workperhour_deleted_projects', JSON.stringify(deletedIds));
+      if (onDeleteProject) {
+        await Promise.resolve(onDeleteProject(idToDelete));
       }
-    } catch (e) {
-      console.error("Error writing deleted projects to localStorage", e);
+      try {
+        const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_projects') || '[]').map((d: any) => String(d));
+        if (!deletedIds.includes(idToDelete)) {
+          deletedIds.push(idToDelete);
+          localStorage.setItem('workperhour_deleted_projects', JSON.stringify(deletedIds));
+        }
+      } catch (e) {
+        console.error("Error writing deleted projects to localStorage", e);
+      }
+      setProjects(prev => prev.filter(p => String(p.id) !== idToDelete));
+    } catch (err: any) {
+      alert(err?.message || 'Failed to delete project.');
+    } finally {
+      setDeleteConfirmProject(null);
     }
-
-    setProjects(prev => prev.filter(p => String(p.id) !== idToDelete));
-    if (onDeleteProject) {
-      onDeleteProject(idToDelete);
-    }
-    setDeleteConfirmProject(null);
   };
 
   return (

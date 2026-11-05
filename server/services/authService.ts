@@ -473,9 +473,10 @@ export async function handleLogin(req: Request, res: Response) {
   for (const key of attemptKeys) loginAttempts.delete(key);
   if (isPostgresEnabled() && attemptKeys.length > 0) {
     try {
+      const dbAttemptKeys = attemptKeys.map(k => k.startsWith('login:') ? k : `login:${k}`);
       await postgresStore.getPool().query(
         `DELETE FROM auth_verification_codes WHERE email = ANY($1::text[]) AND type = 'login_attempts'`,
-        [attemptKeys]
+        [dbAttemptKeys]
       );
     } catch {}
   }

@@ -1030,7 +1030,6 @@ export class PostgresStore {
       'user_emails',
       'support_tickets',
       'payment_methods',
-      'clearing_earnings',
       'earnings_clearing',
       'payouts',
       'refunds',

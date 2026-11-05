@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Scale, Search, Filter, AlertTriangle, CheckCircle2, Clock,
   FileText, Eye, X, ShieldAlert, ArrowRight, CornerDownLeft,
@@ -9,7 +9,11 @@ import { Dispute } from '../../types';
 
 interface AdminDisputesModuleProps {
   initialDisputes?: Dispute[];
-  onResolveDispute?: (disputeId: string, resolution: string) => void;
+  onResolveDispute?: (
+    disputeId: string,
+    resolution: string,
+    details?: { buyerPercent?: number; sellerPercent?: number; resolutionNotes?: string }
+  ) => void | Promise<void>;
 }
 
 export const AdminDisputesModule: React.FC<AdminDisputesModuleProps> = ({
@@ -18,6 +22,10 @@ export const AdminDisputesModule: React.FC<AdminDisputesModuleProps> = ({
 }) => {
   // Local robust state
   const [disputes, setDisputes] = useState<Dispute[]>(() => initialDisputes || []);
+
+  useEffect(() => {
+    setDisputes(initialDisputes || []);
+  }, [initialDisputes]);
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -75,7 +83,7 @@ export const AdminDisputesModule: React.FC<AdminDisputesModuleProps> = ({
   }, [filteredDisputes, currentPage, pageSize]);
 
   // Execute Resolution
-  const handleConfirmResolution = () => {
+  const handleConfirmResolution = async () => {
     if (!resolutionModal) return;
     const { dispute } = resolutionModal;
 
@@ -83,15 +91,19 @@ export const AdminDisputesModule: React.FC<AdminDisputesModuleProps> = ({
       ? `${resolutionNotes || 'Split resolution'}: ${partialSplit.buyerPercent}% to buyer, ${partialSplit.sellerPercent}% to freelancer.`
       : resolutionNotes || `Resolved as ${resolutionType}`;
 
+    if (onResolveDispute) {
+      await onResolveDispute(dispute.id, resolutionType, {
+        buyerPercent: partialSplit.buyerPercent,
+        sellerPercent: partialSplit.sellerPercent,
+        resolutionNotes: fullNote
+      });
+    }
+
     setDisputes(prev => prev.map(d => d.id === dispute.id ? {
       ...d,
       status: resolutionType,
       resolutionNotes: fullNote
     } : d));
-
-    if (onResolveDispute) {
-      onResolveDispute(dispute.id, resolutionType);
-    }
 
     showToast(`Dispute #${dispute.id} officially resolved (${resolutionType}). Escrow accounting adjusted.`);
     setResolutionModal(null);

@@ -183,7 +183,7 @@ const router = Router();
 // CATEGORIES ADMIN
 // ==========================================
 
-router.get('/categories', async (_req: Request, res: Response) => {
+async function syncCategoriesFromDb(): Promise<void> {
   if (isPostgresEnabled()) {
     try {
       const persisted = await postgresStore.loadCategories();
@@ -192,10 +192,15 @@ router.get('/categories', async (_req: Request, res: Response) => {
       }
     } catch {}
   }
+}
+
+router.get('/categories', async (_req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   res.json(categories);
 });
 
 router.post('/admin/categories', requireAdmin, async (req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   const { name, slug } = req.body;
   if (!name) return res.status(400).json({ error: 'Category name is required' });
   const catSlug = slug || name.toLowerCase().trim().replace(/[^\w\s-]/g, '').replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -224,6 +229,7 @@ router.post('/admin/categories', requireAdmin, async (req: Request, res: Respons
 });
 
 router.post('/admin/categories/bulk-delete', requireAdmin, async (req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   const { categoryIds = [], subcategoryPairs = [] } = req.body;
   if (Array.isArray(categoryIds) && categoryIds.length > 0) {
     categories = categories.filter(c => !categoryIds.includes(c.id));
@@ -252,6 +258,7 @@ router.post('/admin/categories/bulk-delete', requireAdmin, async (req: Request, 
 });
 
 router.patch('/admin/categories/:id', requireAdmin, async (req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   const cat = categories.find(c => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'Category not found' });
   if (req.body.name) cat.name = req.body.name;
@@ -273,6 +280,7 @@ router.patch('/admin/categories/:id', requireAdmin, async (req: Request, res: Re
 });
 
 router.patch('/admin/categories/:id/toggle', requireAdmin, async (req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   const cat = categories.find(c => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'Category not found' });
   cat.enabled = !cat.enabled;
@@ -292,6 +300,7 @@ router.patch('/admin/categories/:id/toggle', requireAdmin, async (req: Request, 
 });
 
 router.delete('/admin/categories/:id', requireAdmin, async (req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   const index = categories.findIndex(c => c.id === req.params.id);
   if (index === -1) return res.status(404).json({ error: 'Category not found' });
   const deleted = categories[index];
@@ -312,6 +321,7 @@ router.delete('/admin/categories/:id', requireAdmin, async (req: Request, res: R
 });
 
 router.post('/admin/categories/:id/subcategories', requireAdmin, async (req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   const cat = categories.find(c => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'Parent category not found' });
   const { name, slug } = req.body;
@@ -340,6 +350,7 @@ router.post('/admin/categories/:id/subcategories', requireAdmin, async (req: Req
 });
 
 router.patch('/admin/categories/:id/subcategories/:subId', requireAdmin, async (req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   const cat = categories.find(c => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'Parent category not found' });
   const sub = cat.subcategories.find(s => s.id === req.params.subId);
@@ -363,6 +374,7 @@ router.patch('/admin/categories/:id/subcategories/:subId', requireAdmin, async (
 });
 
 router.patch('/admin/categories/:id/subcategories/:subId/toggle', requireAdmin, async (req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   const cat = categories.find(c => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'Parent category not found' });
   const sub = cat.subcategories.find(s => s.id === req.params.subId);
@@ -384,6 +396,7 @@ router.patch('/admin/categories/:id/subcategories/:subId/toggle', requireAdmin, 
 });
 
 router.delete('/admin/categories/:id/subcategories/:subId', requireAdmin, async (req: Request, res: Response) => {
+  await syncCategoriesFromDb();
   const cat = categories.find(c => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'Parent category not found' });
   const subIndex = cat.subcategories.findIndex(s => s.id === req.params.subId);
@@ -935,9 +948,32 @@ export async function handleDeleteUserAccount(req: Request, res: Response) {
         throw conflictErr;
       }
 
-      await client.query('DELETE FROM gigs WHERE freelancer_id = $1', [target.id]);
-      await client.query('DELETE FROM projects WHERE buyer_id = $1', [target.id]);
-      await client.query('DELETE FROM users WHERE id = $1', [target.id]);
+      await client.query('SAVEPOINT sp_delete_user');
+      try {
+        await client.query('DELETE FROM gigs WHERE freelancer_id = $1', [target.id]);
+        await client.query('DELETE FROM projects WHERE buyer_id = $1', [target.id]);
+        await client.query(
+          'DELETE FROM wallets WHERE user_id = $1 AND available_balance = 0 AND funds_on_hold = 0 AND pending_withdrawals = 0',
+          [target.id]
+        );
+        await client.query('DELETE FROM users WHERE id = $1', [target.id]);
+        await client.query('RELEASE SAVEPOINT sp_delete_user');
+      } catch (_fkErr) {
+        // Preserve historical financial, order, message, proposal, and review records while archiving the account
+        await client.query('ROLLBACK TO SAVEPOINT sp_delete_user');
+        await client.query(
+          "UPDATE gigs SET status = 'deleted', featured = FALSE, is_featured = FALSE, featured_until = NULL WHERE freelancer_id = $1",
+          [target.id]
+        );
+        await client.query(
+          "UPDATE projects SET status = 'suspended', moderation_status = 'rejected', featured = FALSE, is_featured = FALSE WHERE buyer_id = $1",
+          [target.id]
+        );
+        await client.query(
+          "UPDATE users SET status = 'deactivated', is_flagged = TRUE, flag_reason = 'ACCOUNT_DELETED_BY_ADMIN', session_version = COALESCE(session_version, 1) + 1, is_available_now = FALSE WHERE id = $1",
+          [target.id]
+        );
+      }
     });
 
     const admin = (req as any).authenticatedUser;
@@ -947,7 +983,7 @@ export async function handleDeleteUserAccount(req: Request, res: Response) {
       role: admin?.role || 'admin',
       action: 'USER_DELETED',
       target: `User ${target.name}`,
-      details: `Permanently deleted user account ${target.email} and cleared their associated gigs & projects`,
+      details: `Removed user account ${target.email} and deactivated their gigs & projects while preserving historical records`,
       timestamp: new Date().toLocaleString()
     });
 
@@ -976,7 +1012,7 @@ router.patch('/admin/disputes/:id/resolve', requireAdmin, async (req: Request, r
       return res.status(400).json({ error: 'Invalid dispute status.' });
     }
     if (d.status.startsWith('resolved')) return res.status(409).json({ error: `Dispute is already ${d.status}.` });
-    const notes = String(req.body.notes || '');
+    const notes = String(req.body.notes ?? req.body.resolutionNotes ?? '');
     const reason = notes.trim().length >= 5 ? notes.trim() : 'Dispute resolved by administrator';
     const order = await store.getOrder(d.orderId);
 
@@ -1004,7 +1040,19 @@ router.patch('/admin/disputes/:id/resolve', requireAdmin, async (req: Request, r
         } else if (status === 'resolved_refund') {
           await refundOrderFunds(order, undefined, actor, reason, undefined, undefined, true, client);
         } else {
-          await splitOrderFunds(order, Number(req.body.refundAmount), actor, reason, undefined, client);
+          let computedRefundAmount = req.body.refundAmount !== undefined ? Number(req.body.refundAmount) : NaN;
+          if (!Number.isFinite(computedRefundAmount)) {
+            const rawBuyerPercent = req.body.buyerPercent ?? req.body.partialSplit?.buyerPercent;
+            if (rawBuyerPercent !== undefined && Number.isFinite(Number(rawBuyerPercent))) {
+              const pct = Math.max(1, Math.min(99, Number(rawBuyerPercent)));
+              const escRes = await client.query('SELECT remaining, amount FROM escrows WHERE order_id = $1 FOR UPDATE', [order.id]);
+              const escRemaining = escRes.rows.length > 0
+                ? Number(escRes.rows[0].remaining ?? escRes.rows[0].amount ?? order.amount ?? 0)
+                : Number(order.amount || 0);
+              computedRefundAmount = Math.round(escRemaining * (pct / 100) * 100) / 100;
+            }
+          }
+          await splitOrderFunds(order, computedRefundAmount, actor, reason, undefined, client);
         }
       }
 
@@ -1127,9 +1175,9 @@ router.get('/admin/gigs', requireAdmin, async (_req: Request, res: Response) => 
   }
 });
 
-router.patch('/admin/gigs/:id', requireAdmin, async (req: Request, res: Response) => {
+router.patch(['/admin/gigs/:id', '/admin/gigs/:id/moderation', '/admin/gigs/:id/status', '/admin/gigs/:id/feature'], requireAdmin, async (req: Request, res: Response) => {
   try {
-    const { status, moderationStatus, moderationNotes } = req.body;
+    const { status, moderationStatus, moderationNotes, featured } = req.body || {};
     const gig = await store.getGig(req.params.id);
     if (!gig) return res.status(404).json({ error: 'Gig not found' });
 
@@ -1164,12 +1212,23 @@ router.patch('/admin/gigs/:id', requireAdmin, async (req: Request, res: Response
       (gig as any).moderationNotes = String(moderationNotes).slice(0, 1000);
     }
 
+    const isFeatureEndpoint = req.path.endsWith('/feature');
+    const shouldToggleFeatured = isFeatureEndpoint || typeof featured === 'boolean';
+    const nextFeatured = typeof featured === 'boolean' ? featured : (isFeatureEndpoint ? !Boolean(gig.featured) : gig.featured);
+
     const adminUpdates: any = {
       status: gig.status,
       moderationStatus: (gig as any).moderationStatus
     };
     if (moderationNotes !== undefined) {
       adminUpdates.moderationNotes = (gig as any).moderationNotes;
+    }
+    if (shouldToggleFeatured) {
+      adminUpdates.featured = Boolean(nextFeatured);
+      adminUpdates.isFeatured = Boolean(nextFeatured);
+      adminUpdates.featuredUntil = nextFeatured
+        ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+        : null;
     }
 
     const updatedGig = await store.updateGig(gig.id, adminUpdates);
@@ -1194,12 +1253,34 @@ router.patch('/admin/gigs/:id', requireAdmin, async (req: Request, res: Response
         freelancerId: updatedGig.freelancerId,
         title: updatedGig.title,
         status: updatedGig.status,
+        featured: updatedGig.featured,
+        featuredUntil: (updatedGig as any).featuredUntil,
         moderationStatus: (updatedGig as any).moderationStatus,
         moderationNotes: (updatedGig as any).moderationNotes
       }
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to update gig as admin' });
+  }
+});
+
+router.delete('/admin/gigs/:id', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const gig = await store.getGig(req.params.id);
+    if (!gig) return res.status(404).json({ error: 'Gig not found' });
+    await store.deleteGig(gig.id);
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
+      actor: adminActor(req),
+      role: (req as any).authenticatedUser?.role || 'admin',
+      action: 'GIG_DELETED',
+      target: `Gig #${gig.id} (${gig.title})`,
+      details: `Administrative deletion of gig "${gig.title}" (ID: ${gig.id})`,
+      timestamp: new Date().toLocaleString()
+    });
+    res.json({ success: true, id: gig.id });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to delete gig' });
   }
 });
 

@@ -289,9 +289,33 @@ export class SiteSettingsService {
     this.syncFeesToLedger();
   }
 
+  private lastRefreshedAt = 0;
+  private refreshInFlight: Promise<void> | null = null;
+
+  public async refreshFromDatabase(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && now - this.lastRefreshedAt < 5000) return;
+    if (this.refreshInFlight) return this.refreshInFlight;
+    this.refreshInFlight = (async () => {
+      try {
+        const { postgresStore, isPostgresEnabled } = await import('../../db/postgresStore.js');
+        if (!isPostgresEnabled()) return;
+        const persisted = await postgresStore.loadSiteSettings();
+        if (persisted && typeof persisted === 'object' && Object.keys(persisted).length > 0) {
+          this.loadFromState(persisted);
+        }
+        this.lastRefreshedAt = Date.now();
+      } catch {} finally {
+        this.refreshInFlight = null;
+      }
+    })();
+    return this.refreshInFlight;
+  }
+
   public async saveToDatabase(): Promise<void> {
     const { postgresStore } = await import('../../db/postgresStore.js');
     await postgresStore.saveSiteSettings(this.settings);
+    this.lastRefreshedAt = Date.now();
   }
 
   public saveToDisk() {
@@ -301,6 +325,9 @@ export class SiteSettingsService {
   }
 
   public getSettings(): SiteSettingsState {
+    if (Date.now() - this.lastRefreshedAt > 5000) {
+      void this.refreshFromDatabase(false);
+    }
     return JSON.parse(JSON.stringify(this.settings));
   }
 

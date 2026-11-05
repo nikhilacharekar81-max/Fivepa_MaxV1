@@ -115,22 +115,29 @@ export const AdminReviewsModule: React.FC<AdminReviewsModuleProps> = ({
     setModerateModalReview(null);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!deleteConfirmReview) return;
     const idToDelete = deleteConfirmReview.id;
     try {
-      const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_reviews') || '[]');
-      if (!deletedIds.includes(idToDelete)) {
-        deletedIds.push(idToDelete);
-        localStorage.setItem('workperhour_deleted_reviews', JSON.stringify(deletedIds));
+      if (onDeleteReview) {
+        await Promise.resolve(onDeleteReview(idToDelete));
       }
-    } catch (e) {
-      console.error("Error saving deleted review ID to localStorage", e);
-    }
+      try {
+        const deletedIds = JSON.parse(localStorage.getItem('workperhour_deleted_reviews') || '[]');
+        if (!deletedIds.includes(idToDelete)) {
+          deletedIds.push(idToDelete);
+          localStorage.setItem('workperhour_deleted_reviews', JSON.stringify(deletedIds));
+        }
+      } catch (e) {
+        console.error("Error saving deleted review ID to localStorage", e);
+      }
 
-    setReviews(prev => prev.filter(r => r.id !== idToDelete));
-    if (onDeleteReview) onDeleteReview(idToDelete);
-    setDeleteConfirmReview(null);
+      setReviews(prev => prev.filter(r => r.id !== idToDelete));
+    } catch (err: any) {
+      alert(err?.message || 'Failed to delete review.');
+    } finally {
+      setDeleteConfirmReview(null);
+    }
   };
 
   return (

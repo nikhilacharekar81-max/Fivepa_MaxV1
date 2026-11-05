@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   TrendingUp, Search, Filter, CheckCircle2, Clock, XCircle,
   Building2, CreditCard, DollarSign, Download, Eye, X, AlertCircle,
@@ -8,17 +8,23 @@ import { Payout } from '../../types';
 
 interface AdminPayoutsModuleProps {
   initialPayouts?: Payout[];
-  onApprovePayout?: (payoutId: string) => void;
-  onRejectPayout?: (payoutId: string) => void;
+  onApprovePayout?: (payoutId: string, note?: string) => void | Promise<void>;
+  onProcessPayout?: (payoutId: string, transactionRef?: string, note?: string) => void | Promise<void>;
+  onRejectPayout?: (payoutId: string, note?: string) => void | Promise<void>;
 }
 
 export const AdminPayoutsModule: React.FC<AdminPayoutsModuleProps> = ({
   initialPayouts = [],
   onApprovePayout,
+  onProcessPayout,
   onRejectPayout
 }) => {
   // Local robust state for freelancer withdrawal requests
   const [payouts, setPayouts] = useState<Payout[]>(() => initialPayouts || []);
+
+  useEffect(() => {
+    setPayouts(initialPayouts || []);
+  }, [initialPayouts]);
 
   // Filter & Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -81,20 +87,21 @@ export const AdminPayoutsModule: React.FC<AdminPayoutsModuleProps> = ({
   }, [filteredPayouts, currentPage, pageSize]);
 
   // Action execution
-  const handleExecuteAction = () => {
+  const handleExecuteAction = async () => {
     if (!actionModal) return;
     const { type, payout } = actionModal;
 
     if (type === 'approve') {
+      if (onApprovePayout) await onApprovePayout(payout.id, adminNote);
       setPayouts(prev => prev.map(p => p.id === payout.id ? { ...p, status: 'approved' as const } : p));
-      if (onApprovePayout) onApprovePayout(payout.id);
       showToast(`Payout #${payout.id} approved for disbursement.`);
     } else if (type === 'process') {
+      if (onProcessPayout) await onProcessPayout(payout.id, transactionRef, adminNote);
       setPayouts(prev => prev.map(p => p.id === payout.id ? { ...p, status: 'processed' as const } : p));
       showToast(`Payout #${payout.id} ($${payout.amount}) marked as completed & funds disbursed.`);
     } else if (type === 'reject') {
+      if (onRejectPayout) await onRejectPayout(payout.id, adminNote);
       setPayouts(prev => prev.map(p => p.id === payout.id ? { ...p, status: 'cancelled' as const } : p));
-      if (onRejectPayout) onRejectPayout(payout.id);
       showToast(`Payout #${payout.id} rejected and funds returned to freelancer available balance.`);
     }
 

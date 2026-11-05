@@ -298,7 +298,7 @@ router.get('/orders/:id/invoice', requireAuth, async (req: Request, res: Respons
       pool.query(
         `SELECT COALESCE(SUM(amount), 0) AS net_amount
          FROM earnings_clearing
-         WHERE order_id = $1 AND user_id = $2 AND status IN ('clearing', 'completed') AND amount > 0`,
+         WHERE order_id = $1 AND seller_id = $2 AND status IN ('clearing', 'completed') AND amount > 0`,
         [order.id, order.sellerId]
       )
     ]);

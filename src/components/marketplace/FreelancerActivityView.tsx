@@ -719,19 +719,47 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     if (!gig) return;
     const nextFeatured = !gig.featured;
 
-    setMyGigs(prev => prev.map(g => (g.id === gigId ? { ...g, featured: nextFeatured } : g)));
-    showToast(`Gig "${gig.title}" ${nextFeatured ? 'featured' : 'unfeatured'}.`);
-
     try {
       const token = getAuthToken();
       const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
         'x-device-id': getDeviceId(),
         ...(token ? { Authorization: `Bearer ${token}` } : {})
       };
-      await fetch(`/api/admin/gigs/${gigId}/feature`, { method: 'PATCH', headers });
+      const res = await fetch(`/api/gigs/${gigId}/feature`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ featured: nextFeatured })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.error || `Failed to ${nextFeatured ? 'feature' : 'unfeature'} gig.`);
+        return;
+      }
+
+      const updatedFeatured = typeof data.featured === 'boolean' ? data.featured : nextFeatured;
+      setMyGigs(prev =>
+        prev.map(g =>
+          g.id === gigId
+            ? {
+                ...g,
+                ...(data.gig || {}),
+                featured: updatedFeatured,
+                ...(data.featuredUntil !== undefined ? { featuredUntil: data.featuredUntil } : {})
+              }
+            : g
+        )
+      );
+      showToast(
+        updatedFeatured
+          ? `Gig "${gig.title}" is now featured${data.feeCharged ? ` ($${Number(data.feeCharged).toFixed(2)} fee charged)` : ''}!`
+          : `Gig "${gig.title}" unfeatured.`
+      );
+      await fetchMyGigs();
       if (onRefresh) onRefresh();
     } catch (e) {
       console.warn('API feature error:', e);
+      showToast(`Network error while trying to ${nextFeatured ? 'feature' : 'unfeature'} gig.`);
     }
   };
 
