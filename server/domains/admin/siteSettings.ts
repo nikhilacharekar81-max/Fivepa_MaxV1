@@ -232,10 +232,13 @@ export class SiteSettingsService {
   }
 
   private normalizeCommissionSettings(commission: PlatformCommissionSettings): PlatformCommissionSettings {
-    return {
+    const cleaned = {
       ...commission,
       minimumOrderAmount: 5
     };
+    delete (cleaned as any).featuredGigFee;
+    delete (cleaned as any).featureGigFee;
+    return cleaned;
   }
 
   private normalizeMarketplaceGigLimits(marketplace: GigsProjectsOrdersSettings): GigsProjectsOrdersSettings {
@@ -251,24 +254,64 @@ export class SiteSettingsService {
       Number.isFinite(rawMaxProjectBudget) && rawMaxProjectBudget > 0
         ? Math.max(normalizedMinProjectBudget, rawMaxProjectBudget)
         : 50000;
+    const rawFeaturedGigFee = Number(marketplace.featuredGigFee);
+    const normalizedFeaturedGigFee =
+      Number.isFinite(rawFeaturedGigFee) && rawFeaturedGigFee >= 0
+        ? rawFeaturedGigFee
+        : DEFAULT_SITE_SETTINGS.marketplace.featuredGigFee;
     return {
       ...marketplace,
       minimumGigPrice: normalizedMin,
       maximumGigPrice: normalizedMax,
       minimumProjectBudget: normalizedMinProjectBudget,
-      maximumProjectBudget: normalizedMaxProjectBudget
+      maximumProjectBudget: normalizedMaxProjectBudget,
+      featuredGigFee: normalizedFeaturedGigFee
     };
+  }
+
+  private resolvePersistedFeaturedGigFee(parsed: any): number {
+    const defaultFee = DEFAULT_SITE_SETTINGS.marketplace.featuredGigFee;
+    const rawMarketplaceFee = parsed?.marketplace?.featuredGigFee ?? parsed?.marketplace?.featureGigFee;
+    const rawCommissionFee = parsed?.commission?.featuredGigFee ?? parsed?.commission?.featureGigFee;
+    const rawFlatFee = parsed?.featuredGigFee ?? parsed?.featureGigFee;
+
+    const hasMarketplaceFee = rawMarketplaceFee !== undefined && rawMarketplaceFee !== null && Number.isFinite(Number(rawMarketplaceFee)) && Number(rawMarketplaceFee) >= 0;
+    const hasCommissionFee = rawCommissionFee !== undefined && rawCommissionFee !== null && Number.isFinite(Number(rawCommissionFee)) && Number(rawCommissionFee) >= 0;
+    const hasFlatFee = rawFlatFee !== undefined && rawFlatFee !== null && Number.isFinite(Number(rawFlatFee)) && Number(rawFlatFee) >= 0;
+
+    if (hasMarketplaceFee && hasCommissionFee) {
+      const mFee = Number(rawMarketplaceFee);
+      const cFee = Number(rawCommissionFee);
+      // If marketplace holds the factory default (10) while commission holds a custom non-default value,
+      // preserve the custom value from commission so the default marketplace merge never masks it.
+      if (mFee === defaultFee && cFee !== defaultFee) {
+        return cFee;
+      }
+      return mFee;
+    }
+    if (hasMarketplaceFee) {
+      return Number(rawMarketplaceFee);
+    }
+    if (hasCommissionFee) {
+      return Number(rawCommissionFee);
+    }
+    if (hasFlatFee) {
+      return Number(rawFlatFee);
+    }
+    return defaultFee;
   }
 
   public loadFromState(parsed: any) {
     if (parsed && typeof parsed === 'object') {
+      const resolvedFeaturedGigFee = this.resolvePersistedFeaturedGigFee(parsed);
       const mergedCommission = this.normalizeCommissionSettings({
         ...DEFAULT_SITE_SETTINGS.commission,
         ...(parsed.commission || {})
       });
       const mergedMarketplace = this.normalizeMarketplaceGigLimits({
         ...DEFAULT_SITE_SETTINGS.marketplace,
-        ...(parsed.marketplace || {})
+        ...(parsed.marketplace || {}),
+        featuredGigFee: resolvedFeaturedGigFee
       });
       this.settings = {
         website: { ...DEFAULT_SITE_SETTINGS.website, ...(parsed.website || {}) },
@@ -495,7 +538,7 @@ export class SiteSettingsService {
       minOrderAmount: s.commission.minimumOrderAmount,
       minimumOrder: s.commission.minimumOrderAmount,
       minimumOrderAmount: s.commission.minimumOrderAmount,
-      featuredGigFee: (s.marketplace as any).featuredGigFee ?? 10,
+      featuredGigFee: s.marketplace.featuredGigFee ?? DEFAULT_SITE_SETTINGS.marketplace.featuredGigFee,
       urgentProjectFee: (s.marketplace as any).urgentProjectFee ?? 25,
       escrowHoldDays: s.commission.escrowProtectionDays,
       autoCompleteDeliveredDays: s.marketplace.autoCompleteDeliveredDays,
@@ -571,8 +614,15 @@ export class SiteSettingsService {
     if (body.projectModerationRequired !== undefined) {
       marketplaceUpdates.projectModerationRequired = Boolean(body.projectModerationRequired);
     }
-    if (body.featuredGigFee !== undefined || body.featureGigFee !== undefined) {
-      marketplaceUpdates.featuredGigFee = Number(body.featuredGigFee ?? body.featureGigFee);
+    const incomingFeaturedFee =
+      body.featuredGigFee ??
+      body.featureGigFee ??
+      body.marketplace?.featuredGigFee ??
+      body.marketplace?.featureGigFee ??
+      body.commission?.featuredGigFee ??
+      body.commission?.featureGigFee;
+    if (incomingFeaturedFee !== undefined) {
+      marketplaceUpdates.featuredGigFee = Number(incomingFeaturedFee);
     }
     if (body.urgentProjectFee !== undefined) {
       marketplaceUpdates.urgentProjectFee = Number(body.urgentProjectFee);

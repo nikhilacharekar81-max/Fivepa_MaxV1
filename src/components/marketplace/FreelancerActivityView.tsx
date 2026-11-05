@@ -714,28 +714,59 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     }
   };
 
+  const inFlightFeatureGigIdsRef = React.useRef<Set<string>>(new Set());
+  const pendingFeatureActionKeyRef = React.useRef<Record<string, { stateSignature: string; idempotencyKey: string }>>({});
+
   const handleFeatureGig = async (gigId: string) => {
+    if (inFlightFeatureGigIdsRef.current.has(gigId)) {
+      return;
+    }
     const gig = myGigs.find(g => g.id === gigId);
     if (!gig) return;
     const nextFeatured = !gig.featured;
 
+    const stateSignature = `${gig.id}:${gig.featured ? '1' : '0'}:${gig.featuredUntil || 'none'}:${nextFeatured ? '1' : '0'}`;
+    let idempotencyKey: string | undefined;
+    if (nextFeatured) {
+      const existingAction = pendingFeatureActionKeyRef.current[gigId];
+      if (existingAction && existingAction.stateSignature === stateSignature) {
+        idempotencyKey = existingAction.idempotencyKey;
+      } else {
+        const nonce = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        idempotencyKey = `IDEMP-FEATGIG-${gig.id}-${currentUser?.id || 'seller'}-${nonce}`;
+        pendingFeatureActionKeyRef.current[gigId] = { stateSignature, idempotencyKey };
+      }
+    }
+
+    inFlightFeatureGigIdsRef.current.add(gigId);
     try {
       const token = getAuthToken();
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'x-device-id': getDeviceId(),
-        ...(token ? { Authorization: `Bearer ${token}` } : {})
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey, 'X-Idempotency-Key': idempotencyKey } : {})
       };
       const res = await fetch(`/api/gigs/${gigId}/feature`, {
         method: 'PATCH',
         headers,
-        body: JSON.stringify({ featured: nextFeatured })
+        body: JSON.stringify({
+          featured: nextFeatured,
+          ...(idempotencyKey ? { idempotencyKey, operationId: idempotencyKey } : {})
+        })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+          delete pendingFeatureActionKeyRef.current[gigId];
+        }
         showToast(data.error || `Failed to ${nextFeatured ? 'feature' : 'unfeature'} gig.`);
         return;
       }
+
+      delete pendingFeatureActionKeyRef.current[gigId];
 
       const updatedFeatured = typeof data.featured === 'boolean' ? data.featured : nextFeatured;
       setMyGigs(prev =>
@@ -760,6 +791,8 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
     } catch (e) {
       console.warn('API feature error:', e);
       showToast(`Network error while trying to ${nextFeatured ? 'feature' : 'unfeature'} gig.`);
+    } finally {
+      inFlightFeatureGigIdsRef.current.delete(gigId);
     }
   };
 

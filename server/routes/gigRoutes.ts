@@ -464,13 +464,10 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
       });
     }
 
+    await siteSettings.refreshFromDatabase();
     const activeSettings = siteSettings.getSettings();
-    const fee = Number(
-      activeSettings.marketplace?.featuredGigFee ??
-      (activeSettings.commission as any)?.featuredGigFee ??
-      10
-    );
-    if (isNaN(fee) || fee < 0) {
+    const fee = Number(activeSettings.marketplace.featuredGigFee);
+    if (!Number.isFinite(fee) || fee < 0) {
       return res.status(500).json({ error: 'Feature fee is not configured.' });
     }
 
@@ -484,8 +481,7 @@ gigRouter.patch('/gigs/:id/feature', requireAuth, requireActiveStatus, async (re
 
     const callerOpId = (
       req.body?.operationId ||
-      req.headers['x-request-id'] ||
-      (req as any).requestId
+      req.headers['x-operation-id']
     ) as string | undefined;
     const trimmedOpId = callerOpId && String(callerOpId).trim() ? String(callerOpId).trim() : undefined;
 

@@ -422,7 +422,8 @@ router.delete('/admin/categories/:id/subcategories/:subId', requireAdmin, async 
 // SITE & FEE SETTINGS
 // ==========================================
 
-const handleGetSiteSettings = (req: Request, res: Response) => {
+const handleGetSiteSettings = async (req: Request, res: Response) => {
+  await siteSettings.refreshFromDatabase();
   const flattened = siteSettings.getFlattenedSettings();
   res.json({ success: true, settings: flattened, ...flattened });
 };

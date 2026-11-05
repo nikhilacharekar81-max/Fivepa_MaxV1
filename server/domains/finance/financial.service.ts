@@ -1868,14 +1868,13 @@ export class FinancialTransactionService {
 
     const rawIdempKey = params.idempotencyKey && params.idempotencyKey.trim();
     const rawOpId = params.operationId && params.operationId.trim();
-    const operationIdempKey = rawIdempKey
+    const explicitIdempKey = rawIdempKey
       ? rawIdempKey
       : rawOpId
         ? `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${rawOpId}`
-        : `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${randomUUID()}`;
+        : null;
 
     const run = async (client: any) => {
-      const idempKey = operationIdempKey;
       const days = params.extensionDays && params.extensionDays > 0 ? params.extensionDays : 7;
       const payloadFingerprint = {
         gigId: params.gigId,
@@ -1884,9 +1883,6 @@ export class FinancialTransactionService {
         extensionDays: days
       };
 
-      const check = await checkOrRecordIdempotency(client, idempKey, 'chargeFeaturedGigFee', payloadFingerprint);
-      if (check.replayed) return check.result;
-
       const gigRes = await client.query('SELECT * FROM gigs WHERE id = $1 FOR UPDATE', [params.gigId]);
       if (gigRes.rows.length === 0) throw new Error('Gig not found');
       const gig = gigRes.rows[0];
@@ -1894,6 +1890,42 @@ export class FinancialTransactionService {
       if (gig.freelancer_id !== params.sellerId) {
         throw new Error('Forbidden: You can only feature your own gigs.');
       }
+
+      let idempKey = explicitIdempKey;
+      if (!idempKey) {
+        const existingUntilMs = gig.featured_until ? new Date(gig.featured_until).getTime() : NaN;
+        const isCurrentlyFeaturedActive = Boolean(gig.featured || gig.is_featured) && Number.isFinite(existingUntilMs) && existingUntilMs > Date.now();
+
+        if (isCurrentlyFeaturedActive) {
+          // If a feature fee journal for this gig and seller was just recorded within the duplicate-submission guard window (15s),
+          // reuse its idempotency_key so retries/duplicate submissions without an explicit key replay the original transaction.
+          const recentJournalRes = await client.query(
+            `SELECT idempotency_key FROM ledger_journals
+             WHERE event_type = 'FEATURED_GIG_FEE_COLLECTED'
+               AND reference LIKE $1
+               AND actor = $2
+               AND created_at >= NOW() - INTERVAL '15 seconds'
+             ORDER BY created_at DESC
+             LIMIT 1`,
+            [`FEAT-${params.gigId}-%`, params.actor]
+          );
+          if (recentJournalRes.rows.length > 0 && recentJournalRes.rows[0].idempotency_key) {
+            idempKey = String(recentJournalRes.rows[0].idempotency_key);
+          }
+        }
+
+        if (!idempKey) {
+          const stateDiscriminator = params.featuredUntil
+            ? `until:${params.featuredUntil}`
+            : isCurrentlyFeaturedActive
+              ? `extend:${new Date(existingUntilMs).toISOString()}`
+              : `activate:${gig.featured_until ? new Date(gig.featured_until).toISOString() : 'initial'}:${Math.floor(Date.now() / 15000)}`;
+          idempKey = `IDEMP-FEATGIG-${params.gigId}-${params.sellerId}-${stateDiscriminator}`;
+        }
+      }
+
+      const check = await checkOrRecordIdempotency(client, idempKey, 'chargeFeaturedGigFee', payloadFingerprint);
+      if (check.replayed) return check.result;
 
       await this.ensureWallet({ userId: params.sellerId, role: 'freelancer' }, client);
 
@@ -1932,7 +1964,7 @@ export class FinancialTransactionService {
       );
 
       await client.query(
-        'UPDATE gigs SET featured = TRUE, is_featured = TRUE, featured_until = $1 WHERE id = $2',
+        'UPDATE gigs SET featured = TRUE, is_featured = TRUE, featured_until = $1, updated_at = NOW() WHERE id = $2',
         [calculatedExpiresAt, params.gigId]
       );
 
