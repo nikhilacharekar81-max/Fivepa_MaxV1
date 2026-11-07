@@ -985,37 +985,13 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
         body: JSON.stringify({ amount: amt })
       });
       if (res.ok) {
-        const data = await res.json();
-        if (typeof data.codeRequired === 'boolean') {
-          setCodeRequired(data.codeRequired);
-        }
+        setCodeRequired(true);
         setShowWithdrawModal(false);
         setShowCodeModal(true);
         setVerificationCode('');
       } else {
         const errPayload = await res.json().catch(() => ({}));
-        if (res.status === 400 || res.status === 403 || res.status === 429) {
-          throw new Error(errPayload.error || 'Failed to initiate withdrawal.');
-        }
-        // Fallback to direct payout endpoint if verification code route isn't required for demo session
-        const directRes = await fetch('/api/payments/withdraw', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            freelancerId: currentUser?.id,
-            amount: amt,
-            method: withdrawMethod
-          })
-        });
-        const directData = await directRes.json();
-        if (!directRes.ok) {
-          throw new Error(directData.error || 'Failed to submit withdrawal request.');
-        }
-        setShowWithdrawModal(false);
-        setWithdrawAmount('');
-        showToast(`Withdrawal request of ${formatUsd(amt)} USD submitted!`);
-        if (onBalanceUpdate) onBalanceUpdate();
-        await fetchData();
+        throw new Error(errPayload.error || 'Failed to initiate withdrawal.');
       }
     } catch (err: any) {
       setWithdrawError(err.message || 'Error initiating withdrawal.');
@@ -1026,7 +1002,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
 
   const handleVerifyAndWithdraw = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (codeRequired && (!verificationCode || verificationCode.trim().length !== 6)) {
+    if (!verificationCode || verificationCode.trim().length !== 6) {
       setWithdrawError('Please enter the 6-digit verification code sent to your email.');
       return;
     }

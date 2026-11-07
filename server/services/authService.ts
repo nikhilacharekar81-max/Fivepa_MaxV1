@@ -51,6 +51,9 @@ export function isValidMobile(v: string): boolean {
   return /^\+?[0-9][0-9\s\-()]{6,18}$/.test(v);
 }
 
+export const WITHDRAWAL_MAX_ATTEMPTS = 3;
+export const WITHDRAWAL_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+
 export async function verifyAndConsumeWithdrawalCode(
   userId: string,
   code: unknown,
@@ -60,6 +63,7 @@ export async function verifyAndConsumeWithdrawalCode(
     return { ok: false, status: 400, error: 'Email verification code is required for withdrawal. Please request a code first via /api/auth/withdrawal/request-code.' };
   }
   const trimmedCode = code.trim();
+  const now = Date.now();
 
   if (isPostgresEnabled()) {
     const runVerification = async (client: any): Promise<{ ok: true } | { ok: false; status: number; error: string }> => {
@@ -74,26 +78,50 @@ export async function verifyAndConsumeWithdrawalCode(
         return { ok: false, status: 400, error: 'No active withdrawal verification code found. Please request a new code via /api/auth/withdrawal/request-code.' };
       }
       const row = res.rows[0];
-      if (new Date() > new Date(row.expires_at)) {
+      const currentAttempts = Number(row.attempts || 0);
+      const lastTimestamp = Number(row.last_resend_at || 0);
+
+      if (currentAttempts >= WITHDRAWAL_MAX_ATTEMPTS) {
+        const elapsed = now - lastTimestamp;
+        if (elapsed < WITHDRAWAL_COOLDOWN_MS) {
+          const remainingMins = Math.max(1, Math.ceil((WITHDRAWAL_COOLDOWN_MS - elapsed) / 60_000));
+          return {
+            ok: false,
+            status: 429,
+            error: `Too many failed attempts. Please wait ${remainingMins} minute${remainingMins === 1 ? '' : 's'} before trying again.`
+          };
+        }
         await client.query(`DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'withdrawal'`, [row.email]);
         return { ok: false, status: 400, error: 'Withdrawal verification code has expired. Please request a new code.' };
       }
-      if (Number(row.attempts || 0) >= 5) {
+
+      if (new Date(now) > new Date(row.expires_at)) {
         await client.query(`DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'withdrawal'`, [row.email]);
-        return { ok: false, status: 429, error: 'Too many incorrect attempts. Verification code invalidated. Please request a new code.' };
+        return { ok: false, status: 400, error: 'Withdrawal verification code has expired. Please request a new code.' };
       }
+
       if (row.code !== trimmedCode) {
-        const upd = await client.query(
-          `UPDATE auth_verification_codes SET attempts = attempts + 1 WHERE email = $1 AND type = 'withdrawal' RETURNING attempts`,
-          [row.email]
+        const nextAttempts = currentAttempts + 1;
+        const cooldownStart = nextAttempts >= WITHDRAWAL_MAX_ATTEMPTS ? now : lastTimestamp;
+        await client.query(
+          `UPDATE auth_verification_codes SET attempts = $1, last_resend_at = $2 WHERE email = $3 AND type = 'withdrawal'`,
+          [nextAttempts, cooldownStart, row.email]
         );
-        const newAttempts = Number(upd.rows[0]?.attempts || 0);
-        if (newAttempts >= 5) {
-          await client.query(`DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'withdrawal'`, [row.email]);
-          return { ok: false, status: 429, error: 'Too many incorrect attempts. Verification code invalidated. Please request a new code.' };
+        if (nextAttempts >= WITHDRAWAL_MAX_ATTEMPTS) {
+          return {
+            ok: false,
+            status: 429,
+            error: 'Too many failed attempts (3 maximum). Please wait 10 minutes before trying again.'
+          };
         }
-        return { ok: false, status: 400, error: 'Invalid verification code.' };
+        const remaining = WITHDRAWAL_MAX_ATTEMPTS - nextAttempts;
+        return {
+          ok: false,
+          status: 400,
+          error: `Invalid verification code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+        };
       }
+
       await client.query(`DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'withdrawal'`, [row.email]);
       return { ok: true };
     };
@@ -112,17 +140,39 @@ export async function verifyAndConsumeWithdrawalCode(
   if (!record) {
     return { ok: false, status: 400, error: 'No active withdrawal verification code found. Please request a new code via /api/auth/withdrawal/request-code.' };
   }
-  if (Date.now() > record.expiresAt) {
+  if (record.attempts >= WITHDRAWAL_MAX_ATTEMPTS) {
+    const elapsed = now - record.lastResendAt;
+    if (elapsed < WITHDRAWAL_COOLDOWN_MS) {
+      const remainingMins = Math.max(1, Math.ceil((WITHDRAWAL_COOLDOWN_MS - elapsed) / 60_000));
+      return {
+        ok: false,
+        status: 429,
+        error: `Too many failed attempts. Please wait ${remainingMins} minute${remainingMins === 1 ? '' : 's'} before trying again.`
+      };
+    }
     withdrawalVerificationCodes.delete(userId);
     return { ok: false, status: 400, error: 'Withdrawal verification code has expired. Please request a new code.' };
   }
-  if (record.attempts >= 5) {
+  if (now > record.expiresAt) {
     withdrawalVerificationCodes.delete(userId);
-    return { ok: false, status: 429, error: 'Too many incorrect attempts. Verification code invalidated. Please request a new code.' };
+    return { ok: false, status: 400, error: 'Withdrawal verification code has expired. Please request a new code.' };
   }
   if (record.code !== trimmedCode) {
     record.attempts++;
-    return { ok: false, status: 400, error: 'Invalid verification code.' };
+    if (record.attempts >= WITHDRAWAL_MAX_ATTEMPTS) {
+      record.lastResendAt = now;
+      return {
+        ok: false,
+        status: 429,
+        error: 'Too many failed attempts (3 maximum). Please wait 10 minutes before trying again.'
+      };
+    }
+    const remaining = WITHDRAWAL_MAX_ATTEMPTS - record.attempts;
+    return {
+      ok: false,
+      status: 400,
+      error: `Invalid verification code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+    };
   }
   withdrawalVerificationCodes.delete(userId);
   return { ok: true };

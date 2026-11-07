@@ -29,6 +29,8 @@ import {
   smsVerificationCodes,
   forgotPasswordCodes,
   withdrawalVerificationCodes,
+   WITHDRAWAL_MAX_ATTEMPTS,
+  WITHDRAWAL_COOLDOWN_MS,
   generate6DigitCode,
   isValidEmail,
   isValidMobile,
@@ -762,6 +764,7 @@ authRouter.post('/withdrawal/request-code', requireAuth, requireFinancialActiveS
   const now = Date.now();
   const expiresAtMs = now + 30 * 60 * 1000;
   let code = generate6DigitCode();
+  let preservedAttempts = 0;
 
   if (isPostgresEnabled()) {
     const pool = postgresStore.getPool();
@@ -772,21 +775,31 @@ authRouter.post('/withdrawal/request-code', requireAuth, requireFinancialActiveS
       );
       if (existingRes.rows.length > 0) {
         const row = existingRes.rows[0];
-        const lastResendAt = Number(row.last_resend_at || 0);
-        if (now - lastResendAt < 30_000) {
-          return res.status(429).json({ error: 'Please wait 30 seconds before requesting a new withdrawal code.' });
-        }
-        const isUnexpired = row.expires_at && new Date(row.expires_at).getTime() > now;
-        const hasRemainingAttempts = Number(row.attempts || 0) < 5;
-        if (isUnexpired && hasRemainingAttempts && typeof row.code === 'string' && row.code.trim()) {
-          code = row.code.trim();
+        const currentAttempts = Number(row.attempts || 0);
+        const lastTimestamp = Number(row.last_resend_at || 0);
+        if (currentAttempts >= WITHDRAWAL_MAX_ATTEMPTS) {
+          const elapsed = now - lastTimestamp;
+          if (elapsed < WITHDRAWAL_COOLDOWN_MS) {
+            const remainingMins = Math.max(1, Math.ceil((WITHDRAWAL_COOLDOWN_MS - elapsed) / 60_000));
+            return res.status(429).json({
+              error: `Too many failed attempts. Please wait ${remainingMins} minute${remainingMins === 1 ? '' : 's'} before requesting a new withdrawal code.`
+            });
+          }
+          // Cooldown elapsed: reset attempts to 0 and issue a new code
+          preservedAttempts = 0;
+        } else {
+          const isUnexpired = row.expires_at && new Date(row.expires_at).getTime() > now;
+          if (isUnexpired && typeof row.code === 'string' && row.code.trim()) {
+            code = row.code.trim();
+            preservedAttempts = currentAttempts;
+          }
         }
       }
       await pool.query(
         `INSERT INTO auth_verification_codes (email, code, type, attempts, last_resend_at, expires_at, created_at)
-         VALUES ($1, $2, 'withdrawal', 0, $3, $4, NOW())
-         ON CONFLICT (email, type) DO UPDATE SET code = $2, attempts = 0, last_resend_at = $3, expires_at = $4, created_at = NOW()`,
-        [caller.id, code, now, new Date(expiresAtMs)]
+         VALUES ($1, $2, 'withdrawal', $3, $4, $5, NOW())
+         ON CONFLICT (email, type) DO UPDATE SET code = $2, attempts = $3, last_resend_at = $4, expires_at = $5, created_at = NOW()`,
+        [caller.id, code, preservedAttempts, now, new Date(expiresAtMs)]
       );
     } catch (e) {
       console.error('[Auth] Failed to persist withdrawal verification code to DB:', e);
@@ -798,18 +811,25 @@ authRouter.post('/withdrawal/request-code', requireAuth, requireFinancialActiveS
     }
     const existing = withdrawalVerificationCodes.get(caller.id);
     if (existing) {
-      if (now - existing.lastResendAt < 30_000) {
-        return res.status(429).json({ error: 'Please wait 30 seconds before requesting a new withdrawal code.' });
-      }
-      if (existing.expiresAt > now && existing.attempts < 5 && existing.code) {
+      if (existing.attempts >= WITHDRAWAL_MAX_ATTEMPTS) {
+        const elapsed = now - existing.lastResendAt;
+        if (elapsed < WITHDRAWAL_COOLDOWN_MS) {
+          const remainingMins = Math.max(1, Math.ceil((WITHDRAWAL_COOLDOWN_MS - elapsed) / 60_000));
+          return res.status(429).json({
+            error: `Too many failed attempts. Please wait ${remainingMins} minute${remainingMins === 1 ? '' : 's'} before requesting a new withdrawal code.`
+          });
+        }
+        preservedAttempts = 0;
+      } else if (existing.expiresAt > now && existing.code) {
         code = existing.code;
+        preservedAttempts = existing.attempts;
       }
     }
     withdrawalVerificationCodes.set(caller.id, {
       code,
       expiresAt: expiresAtMs,
       lastResendAt: now,
-      attempts: 0
+      attempts: preservedAttempts
     });
   }
 
@@ -830,7 +850,7 @@ authRouter.post('/withdrawal/request-code', requireAuth, requireFinancialActiveS
   res.json({
     success: true,
     message: 'Withdrawal verification code sent to your registered email.',
-    codeRequired: EMAIL_DELIVERY_ENABLED || !IS_PRODUCTION
+    codeRequired: true
   });
 });
 
