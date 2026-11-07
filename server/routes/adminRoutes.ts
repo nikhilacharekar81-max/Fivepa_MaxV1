@@ -499,6 +499,11 @@ router.post('/api/admin/payment-gateways/paypal/environment', requireAdmin, asyn
           error: 'Cannot switch to PayPal Live mode: PayPal Live credentials (Client ID and Client Secret) are not configured.'
         });
       }
+      if (!prodGw.webhookId || prodGw.webhookId.trim() === '') {
+        return res.status(400).json({
+          error: 'Cannot switch to PayPal Live mode: PayPal Production Webhook ID is not configured. A valid Live Webhook ID is required for signature verification and settlement.'
+        });
+      }
       if (!prodGw.enabled) {
         return res.status(400).json({
           error: 'Cannot switch to PayPal Live mode: PayPal Production gateway is currently disabled in settings.'

@@ -945,21 +945,45 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
       }
     }
 
-    // Atomic pending session check: reuse existing active pending checkout session for order payments to prevent duplicate PayPal orders
-    if (normalizedOrderId && ['order_payment', 'order', 'order_escrow'].includes(resolvedPurpose)) {
-      const activeSessRes = await pool.query(
-        `SELECT * FROM payment_checkout_sessions
-          WHERE order_id = $1::text
-            AND user_id = $2::text
-            AND gateway = $3::text
-            AND environment = $4::text
-            AND status IN ('pending', 'approved')
-            AND created_at > NOW() - INTERVAL '15 minutes'
-          ORDER BY created_at DESC LIMIT 1`,
-        [normalizedOrderId, authUserId, normalizedGateway, activeEnv]
-      );
+    // Execute atomic session creation & pending session reuse inside a database transaction with FOR UPDATE row locks
+    const checkoutResult = await postgresStore.executeInTransaction(async (client) => {
+      // 1. Acquire row lock to serialize concurrent checkout creation requests for the same order or user deposit
+      if (normalizedOrderId) {
+        await client.query('SELECT id FROM orders WHERE id = $1::text FOR UPDATE', [normalizedOrderId]);
+      } else {
+        await client.query('SELECT user_id FROM wallets WHERE user_id = $1::text FOR UPDATE', [authUserId]).catch(() => {});
+      }
 
-      if (activeSessRes.rows.length > 0) {
+      // 2. Check for an existing active pending session under lock
+      let activeSessRes;
+      if (normalizedOrderId && ['order_payment', 'order', 'order_escrow'].includes(resolvedPurpose)) {
+        activeSessRes = await client.query(
+          `SELECT * FROM payment_checkout_sessions
+            WHERE order_id = $1::text
+              AND user_id = $2::text
+              AND gateway = $3::text
+              AND environment = $4::text
+              AND status IN ('pending', 'approved')
+              AND created_at > NOW() - INTERVAL '15 minutes'
+            ORDER BY created_at DESC LIMIT 1`,
+          [normalizedOrderId, authUserId, normalizedGateway, activeEnv]
+        );
+      } else {
+        activeSessRes = await client.query(
+          `SELECT * FROM payment_checkout_sessions
+            WHERE user_id = $1::text
+              AND order_id IS NULL
+              AND gateway = $2::text
+              AND environment = $3::text
+              AND expected_amount = $4::numeric
+              AND status IN ('pending', 'approved')
+              AND created_at > NOW() - INTERVAL '5 minutes'
+            ORDER BY created_at DESC LIMIT 1`,
+          [authUserId, normalizedGateway, activeEnv, authoritativeAmount]
+        );
+      }
+
+      if (activeSessRes && activeSessRes.rows.length > 0) {
         const activeSess = activeSessRes.rows[0];
         const activeMeta = typeof activeSess.metadata === 'string'
           ? (() => { try { return JSON.parse(activeSess.metadata); } catch { return {}; } })()
@@ -970,7 +994,7 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
           ? `https://www.${activeSess.environment === 'sandbox' ? 'sandbox.' : ''}paypal.com/checkoutnow?token=${activePayPalOrderId}`
           : `/checkout/pay?session_id=${encodeURIComponent(activeSess.id)}`;
 
-        return res.json({
+        return {
           success: true,
           replayed: true,
           reusedPendingSession: true,
@@ -987,64 +1011,67 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
           redirectUrl: activeCheckoutUrl,
           checkoutUrl: activeCheckoutUrl,
           metadata: activeMeta
-        });
+        };
       }
-    }
 
-    const providerSession = await paymentGatewayManager.createCheckoutSession({
-      gateway: normalizedGateway as any,
-      amount: authoritativeAmount,
-      currency: 'USD',
-      userId: authUserId,
-      orderId: normalizedOrderId || undefined,
-      purpose: resolvedPurpose,
-      description: resolvedDescription,
-      checkoutId,
-      env: activeEnv
+      // 3. Create external provider checkout session
+      const providerSession = await paymentGatewayManager.createCheckoutSession({
+        gateway: normalizedGateway as any,
+        amount: authoritativeAmount,
+        currency: 'USD',
+        userId: authUserId,
+        orderId: normalizedOrderId || undefined,
+        purpose: resolvedPurpose,
+        description: resolvedDescription,
+        checkoutId,
+        env: activeEnv
+      });
+
+      const paypalOrderId = normalizedGateway === 'paypal' ? providerSession.providerSessionId : null;
+
+      try {
+        await client.query(
+          `INSERT INTO payment_checkout_sessions
+             (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, paypal_order_id, environment, metadata, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, $9, $10, NOW(), NOW())`,
+          [
+            checkoutId,
+            authUserId,
+            normalizedOrderId,
+            normalizedGateway,
+            authoritativeAmount,
+            resolvedPurpose,
+            providerSession.providerSessionId,
+            paypalOrderId,
+            activeEnv,
+            JSON.stringify(safeMetadata)
+          ]
+        );
+      } catch {
+        await client.query(
+          `INSERT INTO payment_checkout_sessions (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, environment, created_at)
+           VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, NOW())`,
+          [checkoutId, authUserId, normalizedOrderId, normalizedGateway, authoritativeAmount, resolvedPurpose, providerSession.providerSessionId, activeEnv]
+        );
+      }
+
+      return {
+        success: true,
+        checkoutId,
+        sessionId: checkoutId,
+        gateway: normalizedGateway,
+        paypalOrderId: paypalOrderId || undefined,
+        providerOrderId: providerSession.providerSessionId,
+        orderId: normalizedOrderId || undefined,
+        purpose: resolvedPurpose,
+        amount: authoritativeAmount,
+        currency: 'USD',
+        environment: activeEnv,
+        redirectUrl: providerSession.checkoutUrl || `/checkout/success?session_id=${checkoutId}&amount=${authoritativeAmount}`
+      };
     });
 
-    const paypalOrderId = normalizedGateway === 'paypal' ? providerSession.providerSessionId : null;
-
-    try {
-      await pool.query(
-        `INSERT INTO payment_checkout_sessions
-           (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, paypal_order_id, environment, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, $9, $10, NOW(), NOW())`,
-        [
-          checkoutId,
-          authUserId,
-          normalizedOrderId,
-          normalizedGateway,
-          authoritativeAmount,
-          resolvedPurpose,
-          providerSession.providerSessionId,
-          paypalOrderId,
-          activeEnv,
-          JSON.stringify(safeMetadata)
-        ]
-      );
-    } catch {
-      // Fallback for legacy schema without new columns
-      await pool.query(
-        `INSERT INTO payment_checkout_sessions (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, environment, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, NOW())`,
-        [checkoutId, authUserId, normalizedOrderId, normalizedGateway, authoritativeAmount, resolvedPurpose, providerSession.providerSessionId, activeEnv]
-      );
-    }
-
-      res.json({
-      success: true,
-      checkoutId,
-      sessionId: checkoutId,
-      gateway: normalizedGateway,
-      paypalOrderId: paypalOrderId || undefined,
-      providerOrderId: providerSession.providerSessionId,
-      orderId: normalizedOrderId || undefined,
-      purpose: resolvedPurpose,
-      amount: authoritativeAmount,
-      currency: 'USD',
-      redirectUrl: providerSession.checkoutUrl || `/checkout/success?session_id=${checkoutId}&amount=${authoritativeAmount}`
-    });
+    res.json(checkoutResult);
   } catch (err: any) {
     res.status(500).json(formatApiError(err));
   }
@@ -1680,19 +1707,47 @@ export const handlePaymentWebhook = async (req: Request, res: Response) => {
     }
   }
   const gateway = detectedGateway;
+  const pool = postgresStore.getPool();
+  await ensurePaymentCheckoutSchema(pool);
+
+  // Extract candidate identity parameters to resolve stored session environment for webhook verification
+  const candidateId = String(
+    payload?.resource?.custom_id ||
+    payload?.resource?.invoice_id ||
+    payload?.resource?.purchase_units?.[0]?.custom_id ||
+    payload?.resource?.purchase_units?.[0]?.reference_id ||
+    payload?.resource?.purchase_units?.[0]?.invoice_id ||
+    payload?.resource?.supplementary_data?.related_ids?.order_id ||
+    payload?.resource?.id ||
+    payload?.data?.object?.id ||
+    ''
+  ).trim();
+
+  let candidateEnv: 'production' | 'sandbox' | undefined;
+  if (candidateId) {
+    try {
+      const candRes = await pool.query(
+        `SELECT environment FROM payment_checkout_sessions
+          WHERE (id = $1::text OR paypal_order_id = $1::text OR provider_tx_id = $1::text OR paypal_capture_id = $1::text)
+          LIMIT 1`,
+        [candidateId]
+      );
+      if (candRes.rows.length > 0 && candRes.rows[0].environment) {
+        candidateEnv = candRes.rows[0].environment as 'production' | 'sandbox';
+      }
+    } catch {}
+  }
 
   const isVerified = await paymentGatewayManager.verifyWebhookSignature({
     gateway,
     headers: req.headers,
-    rawBody: Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(bodyStr, 'utf8')
+    rawBody: Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(bodyStr, 'utf8'),
+    env: candidateEnv
   });
 
   if (!isVerified) {
     return res.status(403).json({ error: 'Unauthorized: Invalid or missing provider webhook signature' });
   }
-
-  const pool = postgresStore.getPool();
-  await ensurePaymentCheckoutSchema(pool);
 
   const rawEvent = String(payload?.event_type || payload?.event || payload?.type || '').trim().toLowerCase();
   const webhookEventId = String(payload?.id || payload?.eventId || '').trim();

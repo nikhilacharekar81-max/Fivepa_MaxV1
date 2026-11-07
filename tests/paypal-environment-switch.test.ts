@@ -10,6 +10,7 @@ import { paymentGatewayManager, resolvePayPalEnv } from '../server/domains/finan
 
 async function runEnvironmentSwitchTests() {
   process.env.NODE_ENV = 'test';
+  process.env.PAYMENT_SIMULATION_ENABLED = 'true';
   console.log('================================================================================');
   console.log('  FivePA — PayPal Sandbox & Live Environment Switching & Session Isolation Test ');
   console.log('================================================================================\n');
@@ -104,63 +105,68 @@ async function runEnvironmentSwitchTests() {
   console.log('✓ PASS: Admin active environment switching works cleanly with safeguards.\n');
 
   // =========================================================================
-  // TEST 4: Checkout Session Environment Binding & Session Isolation
+  // TEST 4: Session-Bound Webhook Verification Across Global Environment Switches
   // =========================================================================
-  console.log('Scenario 4: Testing Session Environment Isolation (Sandbox vs Live)...');
+  console.log('Scenario 4: Testing Session-Bound Webhook Verification when Global Mode is Switched...');
 
-  // Ensure active mode is sandbox
+  // Ensure active mode is Sandbox initially
   await paymentGatewayManager.setActivePayPalEnvironment('sandbox');
 
-  // Create session 1 while active mode is Sandbox
-  const sess1Id = 'chk_env_sb_100';
+  const sbSessId = 'chk_env_sb_300';
   await pool.query(
     `INSERT INTO payment_checkout_sessions
        (id, user_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, paypal_order_id, environment)
-     VALUES ($1, $2, 'paypal', 50.00, 'USD', 'deposit', 'pending', 'PP_ORD_SB_100', 'PP_ORD_SB_100', 'sandbox')`,
-    [sess1Id, testUserId]
+     VALUES ($1, $2, 'paypal', 50.00, 'USD', 'deposit', 'pending', 'PP_ORD_SB_300', 'PP_ORD_SB_300', 'sandbox')`,
+    [sbSessId, testUserId]
   );
 
-  // Switch global active mode to production
+  // Switch global active mode to Production
   await paymentGatewayManager.setActivePayPalEnvironment('production');
+  assert.equal(paymentGatewayManager.getActivePayPalEnvironment(), 'production');
 
-  // Create session 2 while active mode is Production
-  const sess2Id = 'chk_env_live_200';
-  await pool.query(
-    `INSERT INTO payment_checkout_sessions
-       (id, user_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, paypal_order_id, environment)
-     VALUES ($1, $2, 'paypal', 100.00, 'USD', 'deposit', 'pending', 'PP_ORD_LIVE_200', 'PP_ORD_LIVE_200', 'production')`,
-    [sess2Id, testUserId]
-  );
+  // Configure signature verification mock to verify against candidate session environment credentials
+  paymentGatewayManager.verifyWebhookSignature = async (params) => {
+    // If params.env is passed as 'sandbox', it correctly resolved the candidate session environment!
+    if (params.env === 'sandbox') return true;
+    // If it defaulted to global active mode ('production'), flag failure
+    return false;
+  };
 
-  // Verify stored session environment columns
-  const r1 = await pool.query('SELECT environment FROM payment_checkout_sessions WHERE id = $1::text', [sess1Id]);
-  const r2 = await pool.query('SELECT environment FROM payment_checkout_sessions WHERE id = $1::text', [sess2Id]);
+  paymentGatewayManager.verifyPaymentEvent = async (params) => {
+    return { verified: true, captureId: params.transactionId, paypalOrderId: params.paypalOrderId };
+  };
 
-  assert.equal(r1.rows[0].environment, 'sandbox', 'Session 1 must be bound to sandbox');
-  assert.equal(r2.rows[0].environment, 'production', 'Session 2 must be bound to production');
+  const sandboxWebhookPayload = {
+    event_type: 'PAYMENT.CAPTURE.COMPLETED',
+    id: 'WH-EVT-ENV-300',
+    resource: {
+      id: 'CAP_SB_300',
+      status: 'COMPLETED',
+      amount: { value: '50.00', currency_code: 'USD' },
+      custom_id: sbSessId,
+      supplementary_data: { related_ids: { order_id: 'PP_ORD_SB_300' } }
+    }
+  };
 
-  // Verify that settling session 1 (created in sandbox) succeeds even when active global environment is set to production
-  const settled1 = await settleCompletedCheckoutSession({
-    sessionId: sess1Id,
-    gateway: 'paypal',
-    txId: 'CAP_SB_100',
-    paypalOrderId: 'PP_ORD_SB_100',
-    paypalCaptureId: 'CAP_SB_100',
-    paidAmount: 50.00,
-    paidCurrency: 'USD',
-    expectedUserId: testUserId,
-    preVerifiedSessionId: sess1Id,
-    preExpectedAmount: 50.00,
-    actor: 'Test Sandbox Settlement',
-    source: 'gateway'
-  });
+  const req: any = {
+    query: { gateway: 'paypal' },
+    headers: { 'content-type': 'application/json', 'paypal-transmission-id': 'tx-env-300' },
+    body: Buffer.from(JSON.stringify(sandboxWebhookPayload))
+  };
 
-  assert.equal(settled1.received, true, 'Settlement for sandbox session must succeed');
+  let resCode = 200;
+  let resBody: any = null;
+  const res: any = { status: (c: number) => { resCode = c; return res; }, json: (d: any) => { resBody = d; return res; } };
 
-  const balAfter1 = await financialRepository.getWalletBalance(testUserId);
-  assert.equal(balAfter1, 50.00, 'User wallet balance must be credited $50.00 from sandbox session');
+  await handlePaymentWebhook(req, res);
 
-  console.log('✓ PASS: Session environment isolation verified. Sandbox session processed cleanly while active mode is Live.\n');
+  assert.equal(resCode, 200, 'Sandbox webhook delivered after global mode switched to Live MUST return HTTP 200');
+  assert.equal(resBody.received, true, 'Sandbox webhook response must confirm receipt');
+
+  const bal4 = await financialRepository.getWalletBalance(testUserId);
+  assert.equal(bal4, 50.00, 'User wallet balance must be credited $50.00 from candidate session environment verification');
+
+  console.log('✓ PASS: Sandbox webhook verified & settled successfully using session-bound environment credentials while global mode is set to Live.\n');
 
   // Reset active mode back to sandbox
   await paymentGatewayManager.setActivePayPalEnvironment('sandbox');
@@ -170,7 +176,6 @@ async function runEnvironmentSwitchTests() {
   // =========================================================================
   console.log('Scenario 5: Testing Strict Independent Capture Identity Validation...');
 
-  process.env.PAYMENT_SIMULATION_ENABLED = 'true';
   const capValRes1 = await paymentGatewayManager.capturePayPalOrder({
     paypalOrderId: 'sess_sim_order_id_500',
     expectedSessionId: 'chk_target_500',
@@ -179,7 +184,6 @@ async function runEnvironmentSwitchTests() {
   });
 
   assert.equal(capValRes1.verified, true, 'Simulated capture with matching expectedSessionId must succeed');
-  process.env.PAYMENT_SIMULATION_ENABLED = 'false';
 
   console.log('✓ PASS: Strict independent capture identity validation verified.\n');
 

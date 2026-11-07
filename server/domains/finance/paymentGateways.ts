@@ -188,10 +188,15 @@ export function resolveValidatedAppUrl(): string {
 }
 
 export function resolvePayPalEnv(): 'production' | 'sandbox' {
+  // Database-managed Admin Panel selection is authoritative.
+  const activeEnv = paymentGatewayManager.getActivePayPalEnvironment();
+  if (activeEnv === 'production' || activeEnv === 'sandbox') {
+    return activeEnv;
+  }
   const explicitMode = (process.env.PAYPAL_MODE || '').trim().toLowerCase();
   if (explicitMode === 'live' || explicitMode === 'production') return 'production';
   if (explicitMode === 'sandbox' || explicitMode === 'test') return 'sandbox';
-  return paymentGatewayManager.getActivePayPalEnvironment();
+  return 'sandbox';
 }
 
 export function encryptSecret(plaintext: string): string {
