@@ -10,7 +10,8 @@ import {
   adminActor,
   safeUser,
   isStaffUser,
-  escapeHtml,
+  ASSIGNABLE_USER_ROLES,
+  normalizeUserRole,
   signToken,
   resolveAuthenticatedUserId
 } from '../middleware/auth.js';
@@ -71,19 +72,19 @@ userRouter.patch('/users/profile', requireAuth, async (req: Request, res: Respon
     }
 
     if (typeof name === 'string' && name.trim()) {
-      user.name = escapeHtml(name.trim().slice(0, 80));
+      user.name = name.trim().slice(0, 80);
     }
     if (typeof title === 'string') {
-      user.title = escapeHtml(title.trim().slice(0, 120));
+      user.title = title.trim().slice(0, 120);
     }
     if (typeof tagline === 'string') {
-      (user as any).tagline = escapeHtml(tagline.trim().slice(0, 200));
+      (user as any).tagline = tagline.trim().slice(0, 200);
     }
     if (typeof bio === 'string') {
-      user.bio = escapeHtml(bio.trim());
+      user.bio = bio.trim();
     }
     if (typeof location === 'string') {
-      user.location = escapeHtml(location.trim().slice(0, 120));
+      user.location = location.trim().slice(0, 120);
     }
     if (typeof hourlyRate === 'number' && Number.isFinite(hourlyRate) && hourlyRate >= 0) {
       user.hourlyRate = hourlyRate;
@@ -276,6 +277,9 @@ userRouter.get('/users/:id', async (req: Request, res: Response) => {
     if (callerId === user.id || isStaff) {
       return res.json(safeUser(user));
     }
+    if (!isUserPublic(user)) {
+      return res.status(404).json({ error: 'User not found' });
+    }
     return res.json(sanitizePublicUser(user));
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch user' });
@@ -308,18 +312,14 @@ const handleUserUpdate = async (req: Request, res: Response) => {
       if (!isFullAdmin) {
         return res.status(403).json({ error: 'Forbidden: Only administrators can modify roles.' });
       }
-      const allowedRoles = [
-        'Format', 'Freelancer', 'Employer', 'Both',
-        'admin', 'super_admin', 'support', 'moderator', 'finance_manager',
-        'buyer', 'freelancer', 'member', 'user', 'both'
-      ];
-      if (!allowedRoles.includes(req.body.role)) {
-        return res.status(400).json({ error: `Invalid role "${req.body.role}". Allowed roles: ${allowedRoles.join(', ')}` });
+      const normalizedRole = normalizeUserRole(req.body.role);
+      if (!normalizedRole) {
+        return res.status(400).json({ error: `Invalid role "${req.body.role}". Allowed roles: ${ASSIGNABLE_USER_ROLES.join(', ')}` });
       }
-      if ((targetUser.role === 'super_admin' || req.body.role === 'super_admin') && !isSuperAdminUser) {
+      if ((targetUser.role === 'super_admin' || normalizedRole === 'super_admin') && !isSuperAdminUser) {
         return res.status(403).json({ error: 'Forbidden: Only super_admin can grant or revoke super_admin role.' });
       }
-      targetUser.role = req.body.role;
+      targetUser.role = normalizedRole as any;
     }
 
     let newToken: string | undefined;
@@ -339,7 +339,7 @@ const handleUserUpdate = async (req: Request, res: Response) => {
         }
         const pool = postgresStore.getPool();
         const userRowRes = await pool.query("SELECT password, password_hash FROM users WHERE id = $1", [targetUser.id]);
-        const currentHash = userRowRes.rows[0]?.password_hash || userRowRes.rows[0]?.password || (targetUser as any).password;
+        const currentHash = userRowRes.rows[0]?.password || userRowRes.rows[0]?.password_hash || (targetUser as any).password;
         const matches = currentHash && (await verifyPassword(currentPassword, currentHash));
         if (!matches) {
           return res.status(400).json({ error: 'Current password does not match' });
@@ -377,10 +377,18 @@ const handleUserUpdate = async (req: Request, res: Response) => {
       disconnectUserSockets(targetUser.id);
     }
 
-    if (req.body.name) targetUser.name = escapeHtml(String(req.body.name).trim().slice(0, 80));
-    if (req.body.title) targetUser.title = escapeHtml(String(req.body.title).trim().slice(0, 120));
-    if (req.body.bio) targetUser.bio = escapeHtml(String(req.body.bio).trim());
-    if (req.body.avatar) targetUser.avatar = String(req.body.avatar).trim();
+    if (typeof req.body.name === 'string' && req.body.name.trim()) {
+      targetUser.name = req.body.name.trim().slice(0, 80);
+    }
+    if (typeof req.body.title === 'string') {
+      targetUser.title = req.body.title.trim().slice(0, 120);
+    }
+    if (typeof req.body.bio === 'string') {
+      targetUser.bio = req.body.bio.trim();
+    }
+    if (typeof req.body.avatar === 'string' && req.body.avatar.trim()) {
+      targetUser.avatar = req.body.avatar.trim();
+    }
 
     await store.saveUser(targetUser);
 
@@ -446,11 +454,11 @@ userRouter.get('/user/quota-status', requireAuth, async (req: Request, res: Resp
 
     const [bidsRes, jobPostsRes] = await Promise.all([
       postgresStore.getPool().query(
-        'SELECT count(*) FROM proposals WHERE freelancer_id = $1 AND created_at >= $2',
+        'SELECT count(*) FROM proposals WHERE freelancer_id = $1 AND SUBSTRING(created_at FROM 1 FOR 10) >= $2',
         [user.id, thirtyDaysAgo]
       ),
       postgresStore.getPool().query(
-        'SELECT count(*) FROM projects WHERE buyer_id = $1 AND created_at >= $2',
+        'SELECT count(*) FROM projects WHERE buyer_id = $1 AND SUBSTRING(created_at FROM 1 FOR 10) >= $2',
         [user.id, thirtyDaysAgo]
       )
     ]);

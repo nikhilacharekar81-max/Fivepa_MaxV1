@@ -27,10 +27,10 @@ export class IdentityRepo {
             `INSERT INTO users (
               id, name, username, email, mobile, role, avatar, title, rating, reviews_count, 
               hourly_rate, earned, spent, completed_jobs, bio, skills, status, verified, email_verified, 
-              mobile_verified, wallet_balance, created_at, is_flagged, flag_reason, password, 
+              mobile_verified, wallet_balance, created_at, is_flagged, flag_reason, password, password_hash, 
               session_version, known_devices, is_available_now, notification_preferences,
               membership_tier, buyer_membership_tier, location, tagline, cover_url, languages, education, portfolio
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)
             ON CONFLICT (id) DO UPDATE SET
               name = EXCLUDED.name,
               username = EXCLUDED.username,
@@ -56,6 +56,7 @@ export class IdentityRepo {
               is_flagged = EXCLUDED.is_flagged,
               flag_reason = EXCLUDED.flag_reason,
               password = EXCLUDED.password,
+              password_hash = EXCLUDED.password_hash,
               session_version = EXCLUDED.session_version,
               known_devices = EXCLUDED.known_devices,
               is_available_now = EXCLUDED.is_available_now,
@@ -108,8 +109,10 @@ export class IdentityRepo {
     const res = await this.ctx.getPool().query(`
       SELECT * FROM users 
       WHERE status = 'active' 
+      AND id != 'system'
       AND (is_flagged = FALSE OR is_flagged IS NULL)
-      AND role NOT IN ('admin', 'super_admin', 'support', 'moderator', 'staff', 'internal')
+      AND COALESCE(flag_reason, '') != 'ACCOUNT_DELETED_BY_ADMIN'
+      AND LOWER(role) NOT IN ('admin', 'super_admin', 'support', 'moderator', 'finance_manager', 'staff', 'internal')
     `);
     return res.rows.map(mapUserRow);
   }

@@ -238,6 +238,10 @@ export async function registerNewUserSessionAtomic(user: User): Promise<number> 
   return nextVersion;
 }
 
+const LEGACY_TOKEN_COMPAT_UNTIL_MS = Number(process.env.LEGACY_TOKEN_COMPAT_UNTIL_MS) > 0
+  ? Number(process.env.LEGACY_TOKEN_COMPAT_UNTIL_MS)
+  : Date.now() + 24 * 60 * 60 * 1000;
+
 export function signToken(
   payload: { id: string; role: string; email: string; sessionVersion?: number },
   expiresInMs?: number
@@ -245,13 +249,24 @@ export function signToken(
   const secret = resolveJwtSecret();
   const defaultTtlMs = (siteSettings.getSettings()?.security?.sessionTimeoutMinutes || 60) * 60 * 1000;
   const ttl = typeof expiresInMs === 'number' ? expiresInMs : defaultTtlMs;
-  const data = JSON.stringify({ ...payload, exp: Date.now() + ttl });
+  const normalizedSessionVersion =
+    typeof payload.sessionVersion === 'number' && Number.isInteger(payload.sessionVersion) && payload.sessionVersion >= 1
+      ? payload.sessionVersion
+      : 1;
+  const now = Date.now();
+  const data = JSON.stringify({
+    ...payload,
+    sessionVersion: normalizedSessionVersion,
+    ver: 2,
+    iat: now,
+    exp: now + ttl
+  });
   const base64Data = Buffer.from(data).toString('base64url');
   const signature = createHmac('sha256', secret).update(base64Data).digest('base64url');
   return `${base64Data}.${signature}`;
 }
 
-export function verifyToken(token: string): { id: string; role: string; email: string; sessionVersion?: number } | null {
+export function verifyToken(token: string): { id: string; role: string; email: string; sessionVersion?: number; ver?: number; iat?: number } | null {
   try {
     const secret = resolveJwtSecret();
     const parts = token.split('.');
@@ -276,6 +291,39 @@ export function verifyToken(token: string): { id: string; role: string; email: s
   }
 }
 
+export function validateTokenSessionVersion(
+  payload: { sessionVersion?: number; ver?: number; iat?: number },
+  dbUser: User
+): boolean {
+  const hasExplicitSessionVersion = payload.sessionVersion !== undefined && payload.sessionVersion !== null;
+  const isNewFormatToken = payload.ver !== undefined || payload.iat !== undefined;
+
+  if (!hasExplicitSessionVersion) {
+    if (isNewFormatToken) {
+      return false;
+    }
+    // Legacy token compatibility window: only accept if within compatibility period AND user has not rotated/revoked sessions
+    if (Date.now() > LEGACY_TOKEN_COMPAT_UNTIL_MS) {
+      return false;
+    }
+    return Number(dbUser.sessionVersion || 1) <= 1;
+  }
+
+  if (typeof payload.sessionVersion !== 'number' || !Number.isInteger(payload.sessionVersion) || payload.sessionVersion < 1) {
+    return false;
+  }
+
+  const activeSessions = getUserActiveSessions(dbUser);
+  if (activeSessions.includes(payload.sessionVersion)) {
+    return true;
+  }
+  if (payload.sessionVersion === dbUser.sessionVersion) {
+    activeSessions.push(payload.sessionVersion);
+    return true;
+  }
+  return false;
+}
+
 // Global Authentication Middleware: verifies cryptographic signed JWT/session and populates req.user
 export async function verifyAuthTokenMiddleware(req: Request, res: Response, next: NextFunction) {
   (req as any).authDbError = false;
@@ -289,18 +337,11 @@ export async function verifyAuthTokenMiddleware(req: Request, res: Response, nex
       try {
         const dbUser = await store.getUser(payload.id);
         if (dbUser) {
-          if (payload.sessionVersion !== undefined) {
-            const activeSessions = getUserActiveSessions(dbUser);
-            if (!activeSessions.includes(payload.sessionVersion)) {
-              if (payload.sessionVersion === dbUser.sessionVersion) {
-                activeSessions.push(payload.sessionVersion);
-              } else {
-                (req as any).user = null;
-                (req as any).authenticatedUserId = null;
-                (req as any).authenticatedUser = null;
-                return next();
-              }
-            }
+          if (!validateTokenSessionVersion(payload, dbUser)) {
+            (req as any).user = null;
+            (req as any).authenticatedUserId = null;
+            (req as any).authenticatedUser = null;
+            return next();
           }
           (req as any).user = {
             id: dbUser.id,
@@ -447,6 +488,9 @@ export function requireActiveStatus(req: Request, res: Response, next: NextFunct
   if (u.status === 'restricted') {
     return res.status(403).json({ error: 'Action forbidden: Your account privileges are restricted. Please contact support.' });
   }
+  if (u.status === 'frozen') {
+    return res.status(403).json({ error: 'Action forbidden: Your account is frozen. Please contact support.' });
+  }
 
   // Enforce Maintenance Mode: non-staff mutating operations are paused while maintenance mode is active
   if (siteSettings.getSettings().website?.maintenanceMode && !isStaffUser(u)) {
@@ -473,8 +517,59 @@ export function requireFinancialActiveStatus(req: Request, res: Response, next: 
 }
 
 export const STAFF_ROLES = ['admin', 'super_admin', 'support'];
+export const EXCLUDED_STAFF_ROLES = [
+  'admin',
+  'super_admin',
+  'support',
+  'moderator',
+  'finance_manager',
+  'staff',
+  'internal'
+] as const;
+
+export const ASSIGNABLE_USER_ROLES = [
+  'buyer',
+  'freelancer',
+  'both',
+  'member',
+  'user',
+  'admin',
+  'super_admin',
+  'support',
+  'moderator',
+  'finance_manager'
+] as const;
+
+const LEGACY_ROLE_MAP: Record<string, string> = {
+  freelancer: 'freelancer',
+  employer: 'buyer',
+  buyer: 'buyer',
+  both: 'both',
+  member: 'member',
+  user: 'user',
+  admin: 'admin',
+  super_admin: 'super_admin',
+  support: 'support',
+  moderator: 'moderator',
+  finance_manager: 'finance_manager'
+};
+
+export function normalizeUserRole(rawRole: unknown): string | null {
+  if (typeof rawRole !== 'string') return null;
+  const trimmed = rawRole.trim();
+  if (!trimmed) return null;
+  // Reject invalid legacy typo role 'Format'
+  if (trimmed.toLowerCase() === 'format') return null;
+  return LEGACY_ROLE_MAP[trimmed.toLowerCase()] || null;
+}
+
 export function isStaffUser(user: any): boolean {
-  return !!user && STAFF_ROLES.includes(user.role);
+  return !!user && typeof user.role === 'string' && STAFF_ROLES.includes(user.role.trim().toLowerCase());
+}
+
+export function isExcludedStaffRole(role: unknown): boolean {
+  if (typeof role !== 'string') return false;
+  return (EXCLUDED_STAFF_ROLES as readonly string[]).includes(role.trim().toLowerCase());
 }
 
 export function canAccessOrderWorkstream(user: any, order: { buyerId: string; sellerId: string } | undefined): boolean {

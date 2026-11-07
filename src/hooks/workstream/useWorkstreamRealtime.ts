@@ -59,8 +59,9 @@ export function useWorkstreamRealtime({
       wsRef.current = socket;
 
       socket.onopen = () => {
+        const activeToken = getAuthToken() || token;
         console.log('Workstream WebSocket connected, authenticating...');
-        socket.send(JSON.stringify({ type: 'AUTHENTICATE', token }));
+        socket.send(JSON.stringify({ type: 'AUTHENTICATE', token: activeToken }));
         if (onReconnectRef.current) onReconnectRef.current();
       };
 

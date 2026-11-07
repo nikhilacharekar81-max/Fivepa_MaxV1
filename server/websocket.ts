@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'http';
 import { store, type Message, type Notification } from './store.js';
-import { verifyToken, getUserActiveSessions, canAccessOrderWorkstream, isStaffUser } from './middleware/auth.js';
+import { verifyToken, getUserActiveSessions, validateTokenSessionVersion, canAccessOrderWorkstream, isStaffUser } from './middleware/auth.js';
 import { recordMessage, sanitizeAndCreateMessage } from './services/messagingService.js';
 import { validateMessageFileInfo, workstreamFilenameFromUrl } from './services/workstreamService.js';
 import { postgresStore } from './db/postgresStore.js';
@@ -93,66 +93,21 @@ export function initWebSocketServer(server: Server): WebSocketServer {
     console.error('WSS Server error:', err);
   });
 
-  wss.on('connection', async (ws, request: any) => {
+  wss.on('connection', async (ws) => {
     try {
       clients.add(ws);
       (ws as any).isAuthenticated = false;
 
-      // Check if token was passed in query parameter (e.g. ws://host?token=...)
-      const urlStr = request?.url || '';
-      const queryIdx = urlStr.indexOf('?');
-      let authTimeout: any = undefined;
-
-      if (queryIdx !== -1) {
-        const queryParams = new URLSearchParams(urlStr.slice(queryIdx));
-        const queryToken = queryParams.get('token');
-        if (queryToken) {
-          diagnosticService.log('security', 'websocket', 'connection', 'server/websocket.ts', 'query_token_usage', 'INFO', {}, 'WebSocket connection established using token in URL query parameter. This may lead to token leakage in logs.');
-          const payload = verifyToken(queryToken);
-          if (!payload || !payload.id) {
-            clients.delete(ws);
-            try { ws.close(1008, 'Invalid token in query'); } catch {}
-            return;
-          }
-          try {
-            const dbUser = await store.getUser(payload.id);
-            if (!dbUser || dbUser.status === 'deactivated') {
-              clients.delete(ws);
-              try { ws.close(1008, 'Account deactivated'); } catch {}
-              return;
-            }
-            if (payload.sessionVersion !== undefined) {
-              const activeSessions = getUserActiveSessions(dbUser);
-              if (!activeSessions.includes(payload.sessionVersion) && payload.sessionVersion !== dbUser.sessionVersion) {
-                clients.delete(ws);
-                try { ws.close(1008, 'Session revoked'); } catch {}
-                return;
-              }
-            }
-            (ws as any).authenticatedUserId = dbUser.id;
-            (ws as any).role = dbUser.role;
-            (ws as any).sessionVersion = payload.sessionVersion !== undefined ? payload.sessionVersion : Number(dbUser.sessionVersion || 1);
-            (ws as any).isAuthenticated = true;
-          } catch (err) {
-            clients.delete(ws);
-            try { ws.close(1008, 'Authentication service unavailable'); } catch {}
-            return;
-          }
+      // Authenticate only via post-connection AUTHENTICATE message
+      const timeoutMs = process.env.NODE_ENV === 'test' ? 1000 : 10000;
+      const authTimeout = setTimeout(() => {
+        if (!(ws as any).isAuthenticated) {
+          clients.delete(ws);
+          try { ws.close(1008, 'Authentication timeout'); } catch {}
         }
-      }
-
-      if (!(ws as any).isAuthenticated) {
-        // Set a timeout to authenticate via AUTHENTICATE message
-        const timeoutMs = process.env.NODE_ENV === 'test' ? 1000 : 10000;
-        authTimeout = setTimeout(() => {
-          if (!(ws as any).isAuthenticated) {
-            clients.delete(ws);
-            try { ws.close(1008, 'Authentication timeout'); } catch {}
-          }
-        }, timeoutMs);
-        if (authTimeout && typeof authTimeout.unref === 'function') {
-          authTimeout.unref();
-        }
+      }, timeoutMs);
+      if (authTimeout && typeof authTimeout.unref === 'function') {
+        authTimeout.unref();
       }
 
       setupWebSocketHandlers(ws, authTimeout);
@@ -389,18 +344,15 @@ function setupWebSocketHandlers(ws: WebSocket, authTimeout?: NodeJS.Timeout) {
           try {
             const dbUser = await store.getUser(payload.id);
             if (dbUser && dbUser.status !== 'deactivated') {
-              if (payload.sessionVersion !== undefined) {
-                const activeSessions = getUserActiveSessions(dbUser);
-                if (!activeSessions.includes(payload.sessionVersion) && payload.sessionVersion !== dbUser.sessionVersion) {
-                  ws.send(JSON.stringify({ error: 'Session revoked' }));
-                  clients.delete(ws);
-                  try { ws.close(1008, 'Session revoked'); } catch {}
-                  return;
-                }
+              if (!validateTokenSessionVersion(payload, dbUser)) {
+                ws.send(JSON.stringify({ error: 'Session revoked' }));
+                clients.delete(ws);
+                try { ws.close(1008, 'Session revoked'); } catch {}
+                return;
               }
               (ws as any).authenticatedUserId = dbUser.id;
               (ws as any).role = dbUser.role;
-              (ws as any).sessionVersion = payload.sessionVersion !== undefined ? payload.sessionVersion : Number(dbUser.sessionVersion || 1);
+              (ws as any).sessionVersion = typeof payload.sessionVersion === 'number' ? payload.sessionVersion : Number(dbUser.sessionVersion || 1);
               (ws as any).isAuthenticated = true;
               if (authTimeout) clearTimeout(authTimeout);
 

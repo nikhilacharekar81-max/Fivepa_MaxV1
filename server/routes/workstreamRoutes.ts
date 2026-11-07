@@ -191,7 +191,7 @@ router.post(
   ['/workstream/upload', '/workstream/uploads'],
   requireAuth,
   rateLimit(10, 60_000),
-  express.raw({ type: '*/*', limit: WORKSTREAM_MAX_UPLOAD_BYTES }),
+  express.raw({ type: '*/*', limit: Math.ceil(WORKSTREAM_MAX_UPLOAD_BYTES * 1.4) }),
   async (req: Request, res: Response) => {
     try {
       const caller = (req as any).authenticatedUser;

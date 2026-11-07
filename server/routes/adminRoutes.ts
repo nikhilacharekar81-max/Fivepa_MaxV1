@@ -21,6 +21,8 @@ import {
   rateLimit,
   safeUser,
   isStaffUser,
+  ASSIGNABLE_USER_ROLES,
+  normalizeUserRole,
   escapeHtml
 } from '../middleware/auth.js';
 import {
@@ -725,18 +727,18 @@ router.patch('/admin/users/:id', requireAdmin, async (req: Request, res: Respons
       if (caller?.role !== 'super_admin') {
         return res.status(403).json({ error: 'Forbidden: Only super_admin can modify or assign roles.' });
       }
-      const ALLOWED_ROLES = ['buyer', 'freelancer', 'admin', 'super_admin', 'support', 'moderator'];
-      if (!ALLOWED_ROLES.includes(req.body.role)) {
-        return res.status(400).json({ error: `Invalid role. Allowed roles: ${ALLOWED_ROLES.join(', ')}` });
+      const normalizedRole = normalizeUserRole(req.body.role);
+      if (!normalizedRole) {
+        return res.status(400).json({ error: `Invalid role. Allowed roles: ${ASSIGNABLE_USER_ROLES.join(', ')}` });
       }
-      u.role = req.body.role;
+      u.role = normalizedRole as any;
     }
 
     if (req.body.email !== undefined) {
       if (u.role === 'admin' && caller?.role !== 'super_admin' && caller?.id !== u.id) {
         return res.status(403).json({ error: 'Forbidden: Only super_admin can change another administrator’s email.' });
       }
-      const nextEmail = escapeHtml(String(req.body.email).trim());
+      const nextEmail = String(req.body.email).trim();
       if (nextEmail) {
         const conflictRes = await postgresStore.getPool().query(
           'SELECT id FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2 LIMIT 1',
@@ -749,9 +751,9 @@ router.patch('/admin/users/:id', requireAdmin, async (req: Request, res: Respons
       u.email = nextEmail;
     }
 
-    if (req.body.name !== undefined) u.name = escapeHtml(String(req.body.name));
-    if (req.body.title !== undefined) u.title = escapeHtml(String(req.body.title));
-    if (req.body.bio !== undefined) u.bio = escapeHtml(String(req.body.bio));
+    if (req.body.name !== undefined) u.name = String(req.body.name).trim().slice(0, 80);
+    if (req.body.title !== undefined) u.title = String(req.body.title).trim().slice(0, 120);
+    if (req.body.bio !== undefined) u.bio = String(req.body.bio).trim();
     if (req.body.skills !== undefined) u.skills = Array.isArray(req.body.skills) ? req.body.skills : req.body.skills.split(',').map((s: string) => s.trim()).filter(Boolean);
     if (req.body.hourlyRate !== undefined) {
       const hr = Number(req.body.hourlyRate);

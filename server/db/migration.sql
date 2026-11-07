@@ -43,7 +43,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS cover_url TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS languages TEXT[];
 ALTER TABLE users ADD COLUMN IF NOT EXISTS education JSONB DEFAULT '[]'::jsonb;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS portfolio JSONB DEFAULT '[]'::jsonb;
-UPDATE users SET password_hash = password WHERE password_hash IS NULL AND password IS NOT NULL;
+UPDATE users SET password_hash = password WHERE password IS NOT NULL AND (password_hash IS NULL OR password_hash IS DISTINCT FROM password);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower ON users (LOWER(email));
 
 CREATE TABLE IF NOT EXISTS gigs (

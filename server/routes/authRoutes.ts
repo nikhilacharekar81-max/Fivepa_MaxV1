@@ -7,6 +7,7 @@ import {
   rateLimit,
   requireAuth,
   requireActiveStatus,
+  requireFinancialActiveStatus,
   resolveAuthenticatedUserId,
   safeUser,
   signToken,
@@ -728,7 +729,7 @@ authRouter.post('/forgot-password/reset', async (req: Request, res: Response) =>
 });
 
 // 8. Withdrawal Code Request & Execute
-authRouter.post('/withdrawal/request-code', requireAuth, async (req: Request, res: Response) => {
+authRouter.post('/withdrawal/request-code', requireAuth, requireFinancialActiveStatus, async (req: Request, res: Response) => {
   const authUserId = resolveAuthenticatedUserId(req);
   const caller = authUserId ? await store.getUser(authUserId) : null;
   if (!caller || !caller.email) return res.status(400).json({ error: 'User email not found.' });
@@ -758,13 +759,30 @@ authRouter.post('/withdrawal/request-code', requireAuth, async (req: Request, re
     }
   }
 
-  const code = generate6DigitCode();
   const now = Date.now();
   const expiresAtMs = now + 30 * 60 * 1000;
+  let code = generate6DigitCode();
 
   if (isPostgresEnabled()) {
+    const pool = postgresStore.getPool();
     try {
-      await postgresStore.getPool().query(
+      const existingRes = await pool.query(
+        `SELECT code, attempts, last_resend_at, expires_at FROM auth_verification_codes WHERE email = $1 AND type = 'withdrawal'`,
+        [caller.id]
+      );
+      if (existingRes.rows.length > 0) {
+        const row = existingRes.rows[0];
+        const lastResendAt = Number(row.last_resend_at || 0);
+        if (now - lastResendAt < 30_000) {
+          return res.status(429).json({ error: 'Please wait 30 seconds before requesting a new withdrawal code.' });
+        }
+        const isUnexpired = row.expires_at && new Date(row.expires_at).getTime() > now;
+        const hasRemainingAttempts = Number(row.attempts || 0) < 5;
+        if (isUnexpired && hasRemainingAttempts && typeof row.code === 'string' && row.code.trim()) {
+          code = row.code.trim();
+        }
+      }
+      await pool.query(
         `INSERT INTO auth_verification_codes (email, code, type, attempts, last_resend_at, expires_at, created_at)
          VALUES ($1, $2, 'withdrawal', 0, $3, $4, NOW())
          ON CONFLICT (email, type) DO UPDATE SET code = $2, attempts = 0, last_resend_at = $3, expires_at = $4, created_at = NOW()`,
@@ -777,6 +795,15 @@ authRouter.post('/withdrawal/request-code', requireAuth, async (req: Request, re
   } else {
     if (IS_PRODUCTION) {
       return res.status(500).json({ error: 'Security verification requires database connection in production.' });
+    }
+    const existing = withdrawalVerificationCodes.get(caller.id);
+    if (existing) {
+      if (now - existing.lastResendAt < 30_000) {
+        return res.status(429).json({ error: 'Please wait 30 seconds before requesting a new withdrawal code.' });
+      }
+      if (existing.expiresAt > now && existing.attempts < 5 && existing.code) {
+        code = existing.code;
+      }
     }
     withdrawalVerificationCodes.set(caller.id, {
       code,
@@ -807,7 +834,7 @@ authRouter.post('/withdrawal/request-code', requireAuth, async (req: Request, re
   });
 });
 
-authRouter.post('/withdrawal/verify-and-execute', requireAuth, requireActiveStatus, rateLimit(10, 60_000), (req: Request, res: Response) => {
+authRouter.post('/withdrawal/verify-and-execute', requireAuth, requireActiveStatus, requireFinancialActiveStatus, rateLimit(10, 60_000), (req: Request, res: Response) => {
   const caller = (req as any).authenticatedUser;
   req.body.userId = caller.id;
   return handlePayoutRequest(req, res);

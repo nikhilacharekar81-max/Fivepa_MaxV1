@@ -282,22 +282,31 @@ export function mapOrderRow(r: any): Order {
 
 export function mapUserRow(r: any): User {
   if (!r) return undefined as any;
+  const rawRole = typeof r.role === 'string' ? r.role.trim() : 'freelancer';
+  const normalizedRole =
+    rawRole.toLowerCase() === 'format' || rawRole === 'Freelancer'
+      ? 'freelancer'
+      : rawRole === 'Employer'
+        ? 'buyer'
+        : rawRole === 'Both'
+          ? 'both'
+          : rawRole;
   return {
     id: r.id,
-    name: r.name,
+    name: unescapeHtml(r.name || ''),
     username: r.username || undefined,
-    email: r.email,
+    email: unescapeHtml(r.email || ''),
     mobile: r.mobile || undefined,
-    role: r.role,
+    role: normalizedRole as any,
     avatar: r.avatar || '',
-    title: r.title || '',
+    title: unescapeHtml(r.title || ''),
     rating: Number(r.rating || 5.0),
     reviewsCount: Number(r.reviews_count || 0),
     hourlyRate: Number(r.hourly_rate || 0),
     earned: Number(r.earned || 0),
     spent: Number(r.spent || 0),
     completedJobs: Number(r.completed_jobs || 0),
-    bio: r.bio || '',
+    bio: unescapeHtml(r.bio || ''),
     skills: typeof r.skills === 'string' ? JSON.parse(r.skills) : (r.skills || []),
     status: r.status,
     verified: Boolean(r.verified),
@@ -307,15 +316,15 @@ export function mapUserRow(r: any): User {
     createdAt: r.created_at,
     isFlagged: Boolean(r.is_flagged),
     flagReason: r.flag_reason || undefined,
-    password: r.password || undefined,
+    password: r.password || r.password_hash || undefined,
     sessionVersion: Number(r.session_version || 1),
     knownDevices: typeof r.known_devices === 'string' ? JSON.parse(r.known_devices) : (r.known_devices || []),
     isAvailableNow: Boolean(r.is_available_now),
     notificationPreferences: typeof r.notification_preferences === 'string' ? JSON.parse(r.notification_preferences) : (r.notification_preferences || undefined),
     membershipTier: r.membership_tier || 'free',
     buyerMembershipTier: r.buyer_membership_tier || 'standard',
-    location: r.location || undefined,
-    tagline: r.tagline || undefined,
+    location: r.location ? unescapeHtml(r.location) : undefined,
+    tagline: r.tagline ? unescapeHtml(r.tagline) : undefined,
     coverUrl: r.cover_url || undefined,
     languages: typeof r.languages === 'string' ? JSON.parse(r.languages) : (r.languages || undefined),
     education: typeof r.education === 'string' ? JSON.parse(r.education) : (r.education || undefined),
@@ -685,7 +694,13 @@ export class PostgresAsyncStore implements StoreInterface {
 
   async listPublicUsers(): Promise<User[]> {
     const res = await postgresStore.getPool().query(
-      "SELECT * FROM users WHERE status = 'active' AND id != 'system' AND COALESCE(flag_reason, '') != 'ACCOUNT_DELETED_BY_ADMIN' ORDER BY rating DESC, earned DESC"
+      `SELECT * FROM users
+       WHERE status = 'active'
+         AND id != 'system'
+         AND (is_flagged = FALSE OR is_flagged IS NULL)
+         AND COALESCE(flag_reason, '') != 'ACCOUNT_DELETED_BY_ADMIN'
+         AND LOWER(role) NOT IN ('admin', 'super_admin', 'support', 'moderator', 'finance_manager', 'staff', 'internal')
+       ORDER BY rating DESC, earned DESC`
     );
     return res.rows.map(mapUserRow);
   }
@@ -1417,10 +1432,10 @@ export class PostgresAsyncStore implements StoreInterface {
       `INSERT INTO users (
         id, name, username, email, mobile, role, avatar, title, rating, reviews_count, 
         hourly_rate, earned, spent, completed_jobs, bio, skills, status, verified, email_verified, 
-        mobile_verified, wallet_balance, created_at, is_flagged, flag_reason, password, 
+        mobile_verified, wallet_balance, created_at, is_flagged, flag_reason, password, password_hash, 
         session_version, known_devices, is_available_now, notification_preferences,
         membership_tier, buyer_membership_tier, location, tagline, cover_url, languages, education, portfolio
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37)
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name,
         username = EXCLUDED.username,
@@ -1446,6 +1461,7 @@ export class PostgresAsyncStore implements StoreInterface {
         is_flagged = EXCLUDED.is_flagged,
         flag_reason = EXCLUDED.flag_reason,
         password = EXCLUDED.password,
+        password_hash = EXCLUDED.password_hash,
         session_version = EXCLUDED.session_version,
         known_devices = EXCLUDED.known_devices,
         is_available_now = EXCLUDED.is_available_now,

@@ -119,7 +119,12 @@ app.use((req, res, next) => {
     return res.status(503).json({ error: 'Server is shutting down. Please retry shortly.' });
   }
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https: http:; media-src 'self' data: blob: https:; connect-src 'self' ws: wss: https: http:; object-src 'none'; base-uri 'self'; form-action 'self';"
+  );
   if (IS_PRODUCTION) res.setHeader('Strict-Transport-Security', 'max-age=15552000');
   (req as any).requestId = randomUUID();
   res.setHeader('X-Request-ID', (req as any).requestId);
@@ -139,9 +144,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// JSON Body Parser with raw body exemption for webhook endpoints
+// JSON Body Parser with raw body exemption for webhook and WorkStream upload endpoints
 app.use((req, res, next) => {
-  if ((req.path === '/api/payments/webhook' || req.path === '/api/webhooks/payment') && req.method === 'POST') {
+  if (
+    (req.path === '/api/payments/webhook' ||
+      req.path === '/api/webhooks/payment' ||
+      req.path === '/api/workstream/upload' ||
+      req.path === '/api/workstream/uploads') &&
+    req.method === 'POST'
+  ) {
     return next();
   }
   return express.json({ limit: '10mb' })(req, res, next);

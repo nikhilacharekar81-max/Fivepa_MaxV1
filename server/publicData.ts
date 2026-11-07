@@ -4,8 +4,9 @@
  */
 
 import type { UserAccount, Gig, Project } from '../src/types.js';
+import { EXCLUDED_STAFF_ROLES, isExcludedStaffRole } from './middleware/auth.js';
 
-const EXCLUDED_STAFF_ROLES = ['admin', 'super_admin', 'support', 'moderator', 'finance_manager', 'staff', 'internal'];
+export { EXCLUDED_STAFF_ROLES };
 
 export function isUserPublic(u: any): boolean {
   if (!u || typeof u !== 'object') return false;
@@ -18,8 +19,7 @@ export function isUserPublic(u: any): boolean {
   if (u.isFlagged === true || u.flagged === true) return false;
 
   // Exclude admin, super_admin, support, and other internal/staff roles
-  const role = typeof u.role === 'string' ? u.role.trim().toLowerCase() : '';
-  if (EXCLUDED_STAFF_ROLES.includes(role)) return false;
+  if (isExcludedStaffRole(u.role)) return false;
 
   return true;
 }
