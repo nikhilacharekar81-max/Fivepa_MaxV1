@@ -463,8 +463,9 @@ router.patch('/admin/site-settings', requireAdmin, handlePostSiteSettings);
 // PAYMENT GATEWAYS
 // ==========================================
 
-router.get('/admin/payment-gateways', requireAdmin, (req: Request, res: Response) => {
+router.get('/admin/payment-gateways', requireAdmin, async (req: Request, res: Response) => {
   try {
+    await paymentGatewayManager.refreshFromDatabase(true);
     const maskedState = paymentGatewayManager.getMaskedState();
     res.json({
       success: true,
