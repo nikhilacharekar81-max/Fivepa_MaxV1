@@ -27,6 +27,7 @@ import { Gig, Order, Project, Proposal, UserAccount, WorkstreamOffer } from '../
 import { getAuthToken, setAuthToken, requestDemoSession } from '../utils/authToken';
 import { getDeviceId } from '../utils/deviceId';
 import { calculateOrderFees, MAX_ORDER_AMOUNT } from '../shared/fees';
+import { initiateGatewayCheckout } from '../utils/gatewayCheckout';
 
 interface PaymentsModuleProps {
   gigs?: Gig[];
@@ -621,7 +622,21 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
             amount: amt
           })
         });
-        const data = await res.json();
+        if (res.status === 501) {
+          await initiateGatewayCheckout({
+            amount: amt,
+            purpose: 'deposit',
+            description: 'FivePA USD Wallet Top-Up',
+            headers,
+            metadata: {
+              returnAction: 'wallet_topup',
+              returnPath: '/payments',
+              title: 'FivePA USD Wallet Top-Up'
+            }
+          });
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || 'Failed to deposit funds into wallet.');
         showToast(`Successfully deposited ${formatUsd(amt)} into your FivePA USD Account.`);
         setShowEscrowModal(false);
@@ -664,6 +679,23 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                 amount: depositAmt
               })
             });
+            if (depRes.status === 501) {
+              await initiateGatewayCheckout({
+                amount: depositAmt,
+                purpose: 'escrow_funding',
+                orderId: selectedEscrowOrderId,
+                description: pendingOffer.title || `Escrow Deposit (${targetRow?.title || selectedEscrowOrderId})`,
+                headers,
+                metadata: {
+                  returnAction: 'accept_offer',
+                  offerId: pendingOffer.id,
+                  orderId: selectedEscrowOrderId,
+                  returnPath: '/payments',
+                  title: pendingOffer.title || targetRow?.title || 'Escrow Deposit'
+                }
+              });
+              return;
+            }
             if (!depRes.ok) {
               const depErr = await depRes.json().catch(() => ({}));
               throw new Error(depErr.error || 'Unable to top up wallet for deposit request.');
@@ -674,8 +706,31 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
             headers,
             body: JSON.stringify({})
           });
-          const accData = await accRes.json();
-          if (!accRes.ok) throw new Error(accData.error || 'Failed to accept and fund deposit request.');
+          const accData = await accRes.json().catch(() => ({}));
+          if (!accRes.ok) {
+            if (
+              accRes.status === 400 &&
+              (accData.code === 'INSUFFICIENT_FUNDS' || /insufficient funds/i.test(String(accData.error || '')))
+            ) {
+              const topUpAmt = Number(accData.shortfall || accData.requiredAmount || requiredCharge);
+              await initiateGatewayCheckout({
+                amount: topUpAmt,
+                purpose: 'escrow_funding',
+                orderId: selectedEscrowOrderId,
+                description: pendingOffer.title || `Escrow Deposit (${targetRow?.title || selectedEscrowOrderId})`,
+                headers,
+                metadata: {
+                  returnAction: 'accept_offer',
+                  offerId: pendingOffer.id,
+                  orderId: selectedEscrowOrderId,
+                  returnPath: '/payments',
+                  title: pendingOffer.title || targetRow?.title || 'Escrow Deposit'
+                }
+              });
+              return;
+            }
+            throw new Error(accData.error || 'Failed to accept and fund deposit request.');
+          }
           showToast(`Escrow deposit of ${formatUsd(amt)} funded for "${targetRow?.title}".`);
         } else {
           // Direct buyer escrow deposit / top-up on order
@@ -690,8 +745,35 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
               autoDeposit: escrowFundSource === 'instant_deposit'
             })
           });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error || 'Failed to deposit funds into order escrow.');
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            if (
+              res.status === 400 &&
+              (data.code === 'INSUFFICIENT_FUNDS' || /insufficient funds/i.test(String(data.error || '')))
+            ) {
+              const topUpAmt = Number(data.shortfall || data.requiredAmount || amt);
+              await initiateGatewayCheckout({
+                amount: topUpAmt,
+                purpose: 'escrow_funding',
+                orderId: selectedEscrowOrderId,
+                description: escrowDepositTitle.trim() || `Escrow Deposit (${targetRow?.title || selectedEscrowOrderId})`,
+                headers,
+                metadata: {
+                  returnAction: 'escrow_deposit',
+                  orderId: selectedEscrowOrderId,
+                  returnPath: '/payments',
+                  title: escrowDepositTitle.trim() || targetRow?.title || 'Escrow Deposit',
+                  escrowPayload: {
+                    orderId: selectedEscrowOrderId,
+                    amount: amt,
+                    title: escrowDepositTitle.trim() || undefined
+                  }
+                }
+              });
+              return;
+            }
+            throw new Error(data.error || 'Failed to deposit funds into order escrow.');
+          }
           showToast(`Successfully deposited ${formatUsd(amt)} USD into Buyer Escrow.`);
         }
 
@@ -769,6 +851,23 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
             amount: shortfall
           })
         });
+        if (depRes.status === 501) {
+          await initiateGatewayCheckout({
+            amount: shortfall,
+            purpose: 'escrow_funding',
+            orderId: orderRow.id,
+            description: offer.title || `${offer.kind.toUpperCase()} #${offer.number}`,
+            headers,
+            metadata: {
+              returnAction: 'accept_offer',
+              offerId: offer.id,
+              orderId: orderRow.id,
+              returnPath: '/payments',
+              title: offer.title || orderRow.title
+            }
+          });
+          return;
+        }
         if (!depRes.ok) {
           const depErr = await depRes.json().catch(() => ({}));
           throw new Error(depErr.error || `Insufficient wallet balance (${formatUsd(availableBalance)}). Please deposit ${formatUsd(shortfall)} first.`);
@@ -780,8 +879,31 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
         headers,
         body: JSON.stringify({})
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `Failed to process ${offer.kind}.`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (
+          res.status === 400 &&
+          (data.code === 'INSUFFICIENT_FUNDS' || /insufficient funds/i.test(String(data.error || '')))
+        ) {
+          const shortfallAmt = Number(data.shortfall || data.requiredAmount || needed || amt);
+          await initiateGatewayCheckout({
+            amount: shortfallAmt,
+            purpose: 'escrow_funding',
+            orderId: orderRow.id,
+            description: offer.title || `${offer.kind.toUpperCase()} #${offer.number}`,
+            headers,
+            metadata: {
+              returnAction: 'accept_offer',
+              offerId: offer.id,
+              orderId: orderRow.id,
+              returnPath: '/payments',
+              title: offer.title || orderRow.title
+            }
+          });
+          return;
+        }
+        throw new Error(data.error || `Failed to process ${offer.kind}.`);
+      }
 
       showToast(
         offer.kind === 'invoice'

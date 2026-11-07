@@ -104,8 +104,8 @@ export function escapeHtml(text: string): string {
 }
 
 export function areSimulatedDepositsAllowed(): boolean {
-  if (process.env.NODE_ENV === 'production') return false;
-  return !(IS_PRODUCTION || resolveIsProduction(import.meta.url));
+  if (process.env.NODE_ENV === 'production' || IS_PRODUCTION || resolveIsProduction(import.meta.url)) return false;
+  return process.env.PAYMENT_SIMULATION_ENABLED === 'true';
 }
 
 export function apiError(res: Response, message: string, status: number = 400) {

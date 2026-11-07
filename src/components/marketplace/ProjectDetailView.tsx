@@ -32,6 +32,7 @@ import { Project, User as UserType, Proposal, Order, ProjectClarification } from
 import { calculateOrderFees } from '../../shared/fees';
 import { getAuthToken } from '../../utils/authToken';
 import { fetchWithRetry } from '../../utils/fetchRetry';
+import { initiateGatewayCheckout } from '../../utils/gatewayCheckout';
 import { DEFAULT_AVATAR } from '../../constants';
 
 interface ProjectDetailViewProps {
@@ -138,6 +139,26 @@ export const ProjectDetailView: React.FC<ProjectDetailViewProps> = ({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        if (
+          action === 'accept' &&
+          res.status === 400 &&
+          (data.code === 'INSUFFICIENT_FUNDS' || /insufficient funds/i.test(String(data.error || '')))
+        ) {
+          const topUpAmount = Number(data.shortfall || data.requiredAmount || prop.bidAmount);
+          await initiateGatewayCheckout({
+            amount: topUpAmount,
+            purpose: 'escrow_funding',
+            description: `Project Proposal: ${project.title}`,
+            metadata: {
+              returnAction: 'accept_proposal',
+              proposalId: prop.id,
+              projectId: project.id,
+              returnPath: `/projects/${project.id}`,
+              title: project.title
+            }
+          });
+          return;
+        }
         setProposalActionError(data.error || `Failed to ${action} proposal.`);
         setBusyProposalId(null);
         return;

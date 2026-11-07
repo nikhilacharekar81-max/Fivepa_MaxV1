@@ -872,6 +872,9 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
             sellerId
           });
         } catch (fundingErr: any) {
+          if (fundingErr && typeof fundingErr === 'object' && fundingErr.code) {
+            throw fundingErr;
+          }
           throw new Error(fundingErr.message || 'Failed to fund escrow.');
         }
       }
@@ -931,7 +934,10 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
   } catch (err: any) {
     const msg = String(err?.message || 'Failed to create order');
     const status = err?.status || (/conflict|idempotency/i.test(msg) ? 409 : 400);
-    res.status(status).json({ error: msg });
+    res.status(status).json({
+      error: msg,
+      ...(err?.code ? { code: err.code, requiredAmount: err.requiredAmount, availableBalance: err.availableBalance, shortfall: err.shortfall } : {})
+    });
   }
 });
 

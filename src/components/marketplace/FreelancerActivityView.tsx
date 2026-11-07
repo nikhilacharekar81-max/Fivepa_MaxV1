@@ -902,7 +902,14 @@ export const FreelancerActivityView: React.FC<FreelancerActivityViewProps> = ({
             amount: amt,
             currency: 'USD',
             gateway: featureGateway,
-            purpose: 'deposit'
+            purpose: 'deposit',
+            description: `Feature Gig: ${gig.title}`,
+            metadata: {
+              returnAction: 'feature_gig',
+              featureGigId: gig.id,
+              returnPath: '/freelance-activity',
+              title: `Feature Gig: ${gig.title}`
+            }
           })
         });
         const chkData = await chkRes.json().catch(() => ({}));

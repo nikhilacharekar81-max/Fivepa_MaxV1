@@ -1456,7 +1456,13 @@ async function executeUnifiedOfferAccept(
       order.status = prevStatus;
       order.amount = prevAmount;
       order.title = prevTitle;
-      return { status: 400, body: { error: fundingErr.message || 'Failed to fund escrow for offer.' } };
+      return {
+        status: 400,
+        body: {
+          error: fundingErr.message || 'Failed to fund escrow for offer.',
+          ...(fundingErr?.code ? { code: fundingErr.code, requiredAmount: fundingErr.requiredAmount, availableBalance: fundingErr.availableBalance, shortfall: fundingErr.shortfall } : {})
+        }
+      };
     }
     return {
       status: 200,
@@ -1565,7 +1571,13 @@ async function executeUnifiedOfferAccept(
         await postOfferMessage(enrichedOrder, offer, null, `Follow-on ${OFFER_LABEL[offer.kind]} ${offer.number} ("${offer.title}") was accepted and $${offer.amount.toLocaleString()} was funded into escrow in a new Order (#${newOrderId}).`, 'offer_accepted', client);
       });
     } catch (fundingErr: any) {
-      return { status: 400, body: { error: fundingErr.message || 'Failed to fund escrow for follow-on order.' } };
+      return {
+        status: 400,
+        body: {
+          error: fundingErr.message || 'Failed to fund escrow for follow-on order.',
+          ...(fundingErr?.code ? { code: fundingErr.code, requiredAmount: fundingErr.requiredAmount, availableBalance: fundingErr.availableBalance, shortfall: fundingErr.shortfall } : {})
+        }
+      };
     }
 
     const enrichedFollowOnResult = enrichOrderWithServiceInfo(enrichedOrder);
@@ -1843,7 +1855,13 @@ async function executeWorkspaceInquiryOfferAccept(
         };
       }
     }
-    return { status: 400, body: { error: fundingErr.message || 'Failed to fund escrow for inquiry proposal.' } };
+    return {
+      status: 400,
+      body: {
+        error: fundingErr.message || 'Failed to fund escrow for inquiry proposal.',
+        ...(fundingErr?.code ? { code: fundingErr.code, requiredAmount: fundingErr.requiredAmount, availableBalance: fundingErr.availableBalance, shortfall: fundingErr.shortfall } : {})
+      }
+    };
   }
 
   const finalOrder = enrichOrderWithServiceInfo(enrichedOrder);
@@ -1974,7 +1992,10 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
       const acceptResult = await executeWorkspaceInquiryOfferAccept(offer, workspace, caller, idempotencyKey);
       return res.status(acceptResult.status).json(acceptResult.body);
     } catch (err: any) {
-      return res.status(400).json({ error: err.message });
+      return res.status(400).json({
+        error: err.message,
+        ...(err?.code ? { code: err.code, requiredAmount: err.requiredAmount, availableBalance: err.availableBalance, shortfall: err.shortfall } : {})
+      });
     } finally {
       releaseOrderLock(lockKey);
     }
@@ -2108,7 +2129,10 @@ router.post('/offers/:id/:action(accept|decline|cancel)', requireAuth, rateLimit
     const acceptResult = await executeUnifiedOfferAccept(offer, order, caller, idempotencyKey);
     return res.status(acceptResult.status).json(acceptResult.body);
   } catch (err: any) {
-    res.status(400).json({ error: err.message });
+    res.status(400).json({
+      error: err.message,
+      ...(err?.code ? { code: err.code, requiredAmount: err.requiredAmount, availableBalance: err.availableBalance, shortfall: err.shortfall } : {})
+    });
   } finally {
     releaseOrderLock(lockedOrderId);
   }

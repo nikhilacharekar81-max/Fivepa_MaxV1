@@ -807,7 +807,7 @@ export class FinancialTransactionService {
         const initBal = Number(params.initialBalance || 0);
         await client.query(
           `INSERT INTO wallets (user_id, user_name, user_email, user_role, available_balance, funds_on_hold, pending_withdrawals, status)
-           VALUES ($1, $2, $3, $4, $5, COALESCE((SELECT SUM(remaining) FROM escrows WHERE buyer_id = $1 AND status IN ('held', 'split')), 0.00), 0.00, 'active')`,
+           VALUES ($1::text, $2, $3, $4, $5, COALESCE((SELECT SUM(remaining) FROM escrows WHERE buyer_id = $1::text AND status IN ('held', 'split')), 0.00), 0.00, 'active')`,
           [params.userId, resolvedName || `User ${params.userId}`, resolvedEmail || `${params.userId}@example.com`, resolvedRole, initBal]
         );
         if (initBal > 0) {
@@ -1033,7 +1033,17 @@ export class FinancialTransactionService {
         throw new Error(`Seller wallet is ${seller.status}`);
       }
 
-      if (Number(buyer.available_balance) < clientTotal) throw new Error('Insufficient funds');
+      const availCents = toCents(Number(buyer.available_balance || 0));
+      const reqCents = toCents(clientTotal);
+      if (availCents < reqCents) {
+        const shortfall = Math.max(1, Number(((reqCents - availCents) / 100).toFixed(2)));
+        const err: any = new Error(`Insufficient funds: $${(availCents / 100).toFixed(2)} available, $${(reqCents / 100).toFixed(2)} required.`);
+        err.code = 'INSUFFICIENT_FUNDS';
+        err.requiredAmount = Number((reqCents / 100).toFixed(2));
+        err.availableBalance = Number((availCents / 100).toFixed(2));
+        err.shortfall = shortfall;
+        throw err;
+      }
 
       // Update Authoritative Wallet
       await client.query('UPDATE wallets SET available_balance = available_balance - $1, funds_on_hold = funds_on_hold + $2 WHERE user_id = $3', [clientTotal, gigPrice, params.buyerId]);
@@ -1550,7 +1560,17 @@ export class FinancialTransactionService {
       const smallOrderFee = diff.additionalSmallOrderFee;
       const clientTotal = diff.additionalClientTotal;
 
-      if (Number(buyer.available_balance) < clientTotal) throw new Error('Insufficient funds');
+      const availTopUpCents = toCents(Number(buyer.available_balance || 0));
+      const reqTopUpCents = toCents(clientTotal);
+      if (availTopUpCents < reqTopUpCents) {
+        const shortfall = Math.max(1, Number(((reqTopUpCents - availTopUpCents) / 100).toFixed(2)));
+        const err: any = new Error(`Insufficient funds: $${(availTopUpCents / 100).toFixed(2)} available, $${(reqTopUpCents / 100).toFixed(2)} required.`);
+        err.code = 'INSUFFICIENT_FUNDS';
+        err.requiredAmount = Number((reqTopUpCents / 100).toFixed(2));
+        err.availableBalance = Number((availTopUpCents / 100).toFixed(2));
+        err.shortfall = shortfall;
+        throw err;
+      }
 
       // Update Authoritative Wallet
       await client.query('UPDATE wallets SET available_balance = available_balance - $1, funds_on_hold = funds_on_hold + $2 WHERE user_id = $3', [clientTotal, gigPrice, params.buyerId]);
@@ -1661,11 +1681,13 @@ export class FinancialTransactionService {
         throw new Error(`Cannot deposit to a ${wallet.status} wallet`);
       }
 
-      const depAmount = Number(params.amount.toFixed(2));
-      const newBal = Number((Number(wallet.available_balance || 0) + depAmount).toFixed(2));
+      const depCents = toCents(params.amount);
+      const curBalCents = toCents(Number(wallet.available_balance || 0));
+      const depAmount = Number((depCents / 100).toFixed(2));
+      const newBal = Number(((curBalCents + depCents) / 100).toFixed(2));
 
-      await client.query('UPDATE wallets SET available_balance = $1 WHERE user_id = $2', [newBal, params.userId]);
-      await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [params.userId]);
+      await client.query('UPDATE wallets SET available_balance = $1 WHERE user_id = $2::text', [newBal, params.userId]);
+      await client.query('UPDATE users SET wallet_balance = $1 WHERE id = $2::text', [newBal, params.userId]);
 
       const ref = params.reference || `DEP-${idempotencyKey.slice(0, 12)}`;
       await client.query(
@@ -1680,7 +1702,7 @@ export class FinancialTransactionService {
         [journalId, ref, `Wallet deposit credited to user #${params.userId}`, 'WALLET_DEPOSIT_CREDITED', idempotencyKey, params.actor]
       );
 
-      const debitAcct = params.source === 'gateway' ? '1020' : '1010';
+      const debitAcct = (params.source === 'gateway' || params.source === 'webhook') ? '1020' : '1010';
       const creditAcct = (params as any).roleContext === 'freelancer' ? '2020' : '2010';
       const entries = [
         { account_code: debitAcct, debit: depAmount, credit: 0, description: 'Deposit asset', user_id: null },
@@ -1698,6 +1720,83 @@ export class FinancialTransactionService {
       await recordIdempotencyResult(client, idempotencyKey, 'creditDeposit', result, payloadFingerprint);
       
       return result;
+    };
+    if (externalClient) return run(externalClient);
+    return postgresStore.executeInTransaction(run);
+  }
+
+  async reverseGatewayDeposit(params: {
+    userId: string;
+    amount: number;
+    reference: string;
+    idempotencyKey: string;
+    reason?: string;
+  }, externalClient?: any) {
+    assertValidMoneyAmount(params.amount, 'refund reversal amount');
+    assertPostgresAvailable();
+
+    const run = async (client: any) => {
+      const payloadFingerprint = {
+        userId: params.userId,
+        amount: params.amount,
+        reference: params.reference
+      };
+      const check = await checkOrRecordIdempotency(client, params.idempotencyKey, 'reverseGatewayDeposit', payloadFingerprint);
+      if (check.replayed) return check.result;
+
+      await this.ensureWallet({ userId: params.userId, role: 'buyer' }, client);
+      const walletRes = await client.query('SELECT * FROM wallets WHERE user_id = $1 FOR UPDATE', [params.userId]);
+      const wallet = walletRes.rows[0];
+      const availCents = toCents(Number(wallet?.available_balance || 0));
+      const revCents = toCents(params.amount);
+      const revAmount = Number((revCents / 100).toFixed(2));
+
+      if (availCents >= revCents) {
+        const newBal = Number(((availCents - revCents) / 100).toFixed(2));
+        await client.query('UPDATE wallets SET available_balance = $1 WHERE user_id = $2', [newBal, params.userId]);
+        await client.query('UPDATE users SET wallet_balance = (SELECT available_balance FROM wallets WHERE user_id = $1) WHERE id = $1', [params.userId]);
+        await client.query(
+          'INSERT INTO wallet_movements (id, user_id, amount, type, description) VALUES ($1, $2, $3, $4, $5)',
+          [randomUUID(), params.userId, -revAmount, 'refund_reversal', `Gateway deposit refunded/reversed: ${params.reference}`]
+        );
+
+        const journalId = 'jnl_' + randomUUID().slice(0, 12);
+        await client.query(
+          `INSERT INTO ledger_journals (id, reference, description, event_type, idempotency_key, actor)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [journalId, params.reference, `Gateway deposit reversed for user #${params.userId}`, 'WALLET_DEPOSIT_REVERSED', params.idempotencyKey, 'Gateway Webhook']
+        );
+        const entries = [
+          { account_code: '2010', debit: revAmount, credit: 0, description: 'Buyer wallet liability reversed on gateway refund', user_id: params.userId },
+          { account_code: '1020', debit: 0, credit: revAmount, description: 'Gateway clearing asset reversed on refund', user_id: null }
+        ];
+        await this.assertJournalBalanced(client, entries);
+        for (const e of entries) {
+          await client.query(
+            'INSERT INTO ledger_entries (id, journal_id, account_code, debit, credit, description, user_id) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+            [randomUUID(), journalId, e.account_code, e.debit, e.credit, e.description, e.user_id]
+          );
+        }
+        const resObj = { reversed: true, flaggedForReview: false, newBalance: newBal };
+        await recordIdempotencyResult(client, params.idempotencyKey, 'reverseGatewayDeposit', resObj, payloadFingerprint);
+        return resObj;
+      } else {
+        await client.query(
+          `INSERT INTO reconciliation_exceptions (id, type, entity_id, amount, description, detected_at)
+           VALUES ($1, $2, $3, $4, $5, NOW()::text)
+           ON CONFLICT (id) DO NOTHING`,
+          [
+            randomUUID(),
+            'GATEWAY_CHARGEBACK_OR_REFUND',
+            params.userId,
+            revAmount,
+            `Gateway refund/reversal (${params.reference}) of $${revAmount.toFixed(2)} exceeds buyer available wallet balance ($${(availCents / 100).toFixed(2)}). Flagged for admin review.`
+          ]
+        ).catch(() => {});
+        const resObj = { reversed: false, flaggedForReview: true, availableBalance: Number((availCents / 100).toFixed(2)) };
+        await recordIdempotencyResult(client, params.idempotencyKey, 'reverseGatewayDeposit', resObj, payloadFingerprint);
+        return resObj;
+      }
     };
     if (externalClient) return run(externalClient);
     return postgresStore.executeInTransaction(run);

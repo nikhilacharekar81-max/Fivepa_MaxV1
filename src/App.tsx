@@ -40,6 +40,8 @@ import { getAuthToken, setAuthToken, clearAuthToken, requestDemoSession } from '
 import { getDeviceId } from './utils/deviceId';
 import { DEFAULT_GIG_IMAGE } from './constants';
 import { RESERVED_ROUTES } from './shared/routes';
+import { CheckoutResultView } from './components/checkout/CheckoutResultView';
+import { initiateGatewayCheckout } from './utils/gatewayCheckout';
 import type { UserAccount, Gig, Order, GigExtra } from './types';
 
 export interface AppProps {
@@ -749,6 +751,35 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
           if (res.status === 400 || res.status === 403 || res.status === 409 || res.status === 422) {
             try { sessionStorage.removeItem(payloadKey); } catch {}
           }
+          if (
+            res.status === 400 &&
+            (errData.code === 'INSUFFICIENT_FUNDS' || /insufficient funds/i.test(String(errMsg)))
+          ) {
+            const topUpAmount = Number(errData.shortfall || errData.requiredAmount || priceUSD);
+            setOrderFeedback({
+              type: 'success',
+              message: `Redirecting to PayPal Checkout to fund $${topUpAmount.toFixed(2)} USD for "${orderTitle}"...`
+            });
+            await initiateGatewayCheckout({
+              amount: topUpAmount,
+              purpose: 'order_payment',
+              description: `Gig Order: ${orderTitle}`,
+              metadata: {
+                returnAction: 'create_gig_order',
+                returnPath: typeof window !== 'undefined' ? window.location.pathname : '/',
+                title: orderTitle,
+                gigOrderPayload: {
+                  title: orderTitle,
+                  amount: priceUSD,
+                  buyerId: activeUser.id,
+                  sellerId,
+                  gigId,
+                  extraIds: normalizedExtraIds
+                }
+              }
+            });
+            return;
+          }
           setOrderFeedback({
             type: 'error',
             message: errMsg
@@ -1037,6 +1068,20 @@ export default function App({ initialPath = '/', initialData }: AppProps) {
         navigate={navigate}
         refresh={refresh}
         getDeviceId={getDeviceId}
+      />
+    );
+  } else if (cleanPath.startsWith('/checkout')) {
+    const checkoutMode = cleanPath.startsWith('/checkout/cancel')
+      ? 'cancel'
+      : cleanPath.startsWith('/checkout/pay')
+      ? 'pay'
+      : 'success';
+    mainContent = (
+      <CheckoutResultView
+        mode={checkoutMode}
+        currentPath={currentPath}
+        navigate={navigate}
+        onRefreshUser={() => refresh(activeUser?.id)}
       />
     );
   } else if (cleanPath === '/settings') {

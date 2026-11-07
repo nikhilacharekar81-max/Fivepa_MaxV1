@@ -20,6 +20,7 @@ import { getAuthToken } from '../../utils/authToken';
 import { fetchWithRetry } from '../../utils/fetchRetry';
 import { classifyFileUrl, openWebLink } from '../../utils/safeFileLink';
 import { useWorkstreamOffers } from '../../hooks/workstream/useWorkstreamOffers';
+import { initiateGatewayCheckout } from '../../utils/gatewayCheckout';
 
 interface WorkstreamWorkspaceProps {
   order: WorkstreamItem;
@@ -290,7 +291,34 @@ export const WorkstreamWorkspace: React.FC<WorkstreamWorkspaceProps> = ({
 
   const handleOfferAction = async (offerId: string, action: 'accept' | 'decline' | 'cancel', reason?: string) => {
     const result = await respond(offerId, action, reason);
-    if (result.ok) onOrderChanged?.(result.order || null, result.newOrder);
+    if (result.ok) {
+      onOrderChanged?.(result.order || null, result.newOrder);
+      return result;
+    }
+    if (
+      action === 'accept' &&
+      (result.code === 'INSUFFICIENT_FUNDS' || /insufficient funds/i.test(String(result.error || '')))
+    ) {
+      const matchedOffer = offers.find(o => o.id === offerId);
+      const topUpAmount = Number(result.shortfall || result.requiredAmount || matchedOffer?.amount || 5);
+      try {
+        await initiateGatewayCheckout({
+          amount: topUpAmount,
+          purpose: 'escrow_funding',
+          orderId: order.id,
+          description: matchedOffer?.title || `WorkStream Payment (${order.title})`,
+          metadata: {
+            returnAction: 'accept_offer',
+            offerId,
+            orderId: order.id,
+            returnPath: `/workstream/${order.id}`,
+            title: matchedOffer?.title || order.title
+          }
+        });
+      } catch (err: any) {
+        return { ok: false, error: err?.message || result.error };
+      }
+    }
     return result;
   };
 

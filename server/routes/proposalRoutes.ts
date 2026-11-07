@@ -392,7 +392,10 @@ export async function processProposalAccept(req: any, res: any) {
         offer: offerView
       });
     } catch (acceptErr: any) {
-      return res.status(400).json({ error: acceptErr.message || 'Failed to accept proposal.' });
+      return res.status(400).json({
+        error: acceptErr.message || 'Failed to accept proposal.',
+        ...(acceptErr?.code ? { code: acceptErr.code, requiredAmount: acceptErr.requiredAmount, availableBalance: acceptErr.availableBalance, shortfall: acceptErr.shortfall } : {})
+      });
     }
   } finally {
     releaseOrderLock(proposal.id);

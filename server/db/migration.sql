@@ -624,13 +624,42 @@ CREATE TABLE IF NOT EXISTS payment_checkout_sessions (
   purpose VARCHAR(32) NOT NULL DEFAULT 'deposit',
   status VARCHAR(32) NOT NULL DEFAULT 'pending',
   provider_tx_id VARCHAR(128),
+  paypal_order_id VARCHAR(128),
+  paypal_capture_id VARCHAR(128),
+  last_webhook_event_id VARCHAR(128),
+  metadata JSONB DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_at TIMESTAMPTZ
 );
 
+ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS paypal_order_id VARCHAR(128);
+ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS paypal_capture_id VARCHAR(128);
+ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS last_webhook_event_id VARCHAR(128);
+ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
+ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 CREATE INDEX IF NOT EXISTS idx_payment_checkout_sessions_user ON payment_checkout_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_payment_checkout_sessions_status ON payment_checkout_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_payment_checkout_sessions_paypal_order_id ON payment_checkout_sessions(paypal_order_id) WHERE paypal_order_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_checkout_sessions_provider_tx_id ON payment_checkout_sessions (provider_tx_id) WHERE provider_tx_id IS NOT NULL AND status = 'completed';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_checkout_sessions_paypal_capture_id ON payment_checkout_sessions (paypal_capture_id) WHERE paypal_capture_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS payment_webhook_events (
+  event_id VARCHAR(128) PRIMARY KEY,
+  gateway VARCHAR(32) NOT NULL,
+  event_type VARCHAR(128) NOT NULL,
+  resource_id VARCHAR(128),
+  session_id VARCHAR(64),
+  status VARCHAR(32) NOT NULL DEFAULT 'received',
+  payload JSONB,
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  processed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_payment_webhook_events_resource_id ON payment_webhook_events(resource_id) WHERE resource_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_payment_webhook_events_session_id ON payment_webhook_events(session_id) WHERE session_id IS NOT NULL;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_order_reviewer ON reviews (order_id, reviewer_id) WHERE order_id IS NOT NULL AND reviewer_id IS NOT NULL;
 
 -- Consolidated Schema Enhancements (Columns, Tables, Indexes)

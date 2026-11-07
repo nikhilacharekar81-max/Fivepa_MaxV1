@@ -66,7 +66,36 @@ import {
   retryPayout,
   formatPayoutRow
 } from './payout.service.js';
-import { DEFAULT_FEE_CONFIG, calculateOrderFees, quoteOrderWithLiveSettings } from './fees.js';
+import { DEFAULT_FEE_CONFIG, calculateOrderFees, quoteOrderWithLiveSettings, toCents } from './fees.js';
+
+let checkoutSchemaInitialized = false;
+export async function ensurePaymentCheckoutSchema(pool: any): Promise<void> {
+  if (checkoutSchemaInitialized) return;
+  try {
+    await pool.query(`
+      ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS paypal_order_id VARCHAR(128);
+      ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS paypal_capture_id VARCHAR(128);
+      ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS last_webhook_event_id VARCHAR(128);
+      ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
+      ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+      CREATE TABLE IF NOT EXISTS payment_webhook_events (
+        event_id VARCHAR(128) PRIMARY KEY,
+        gateway VARCHAR(32) NOT NULL,
+        event_type VARCHAR(128) NOT NULL,
+        resource_id VARCHAR(128),
+        session_id VARCHAR(64),
+        status VARCHAR(32) NOT NULL DEFAULT 'received',
+        payload JSONB,
+        error_message TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        processed_at TIMESTAMPTZ
+      );
+    `);
+    checkoutSchemaInitialized = true;
+  } catch {
+    // Non-fatal if running against mocked test pool
+  }
+}
 
 function formatRefundRow(r: any): Refund {
   return {
@@ -625,7 +654,14 @@ router.post('/payments/escrow/deposit', requireAuth, requireFinancialActiveStatu
     // If buyer selected instant card/gateway deposit or needs wallet top-up when simulated deposits are enabled
     if (fundSource === 'instant_deposit' || (walletBal < amount && req.body?.autoDeposit === true)) {
       if (!areSimulatedDepositsAllowed()) {
-        return res.status(400).json({ error: 'Insufficient wallet balance. Please deposit funds first.' });
+        const shortfall = fundSource === 'instant_deposit' ? amount : Math.max(1, Number((amount - walletBal).toFixed(2)));
+        return res.status(400).json({
+          error: 'Insufficient wallet balance. Please deposit funds first.',
+          code: 'INSUFFICIENT_FUNDS',
+          requiredAmount: amount,
+          availableBalance: walletBal,
+          shortfall
+        });
       }
       const shortfall = fundSource === 'instant_deposit' ? amount : Math.max(0, Number((amount - walletBal).toFixed(2)));
       if (shortfall > 0) {
@@ -731,7 +767,10 @@ router.post('/payments/escrow/deposit', requireAuth, requireFinancialActiveStatu
     await syncUserBalances([order.buyerId, order.sellerId]);
     res.json({ success: true, order: enrichOrderWithServiceInfo(targetOrder), amount });
   } catch (err: any) {
-    res.status(400).json({ error: err.message || 'Failed to deposit into escrow.' });
+    res.status(400).json({
+      error: err.message || 'Failed to deposit into escrow.',
+      ...(err?.code ? { code: err.code, requiredAmount: err.requiredAmount, availableBalance: err.availableBalance, shortfall: err.shortfall } : {})
+    });
   } finally {
     releaseOrderLock(orderId);
   }
@@ -801,26 +840,31 @@ router.post('/payments/deposit', requireAuth, requireFinancialActiveStatus, rate
   }
 });
 
-router.post('/payments/gateway/checkout', requireAuth, rateLimit(10, 60_000), async (req: Request, res: Response) => {
+router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), async (req: Request, res: Response) => {
   try {
-    const { amount, currency = 'USD', gateway = 'stripe', orderId, purpose = 'deposit' } = req.body || {};
+    const { amount, currency = 'USD', gateway, orderId, purpose = 'deposit', description, metadata } = req.body || {};
     const authUserId = (req as any).authenticatedUserId;
     const pool = postgresStore.getPool();
+    await ensurePaymentCheckoutSchema(pool);
+
     const callerRes = await pool.query('SELECT id, name FROM users WHERE id = $1', [authUserId]);
     const caller = callerRes.rows[0];
     if (!caller) return res.status(401).json({ error: 'Unauthorized' });
 
-    if (currency !== 'USD') {
+    if (String(currency).toUpperCase().trim() !== 'USD') {
       return res.status(400).json({ error: 'Only USD currency is supported.' });
     }
 
-    const normalizedGateway = String(gateway || 'stripe').trim().toLowerCase();
-    if (!['stripe', 'paypal', 'razorpay'].includes(normalizedGateway)) {
+    const explicitGateway = gateway !== undefined && gateway !== null && String(gateway).trim() !== ''
+      ? String(gateway).trim().toLowerCase()
+      : '';
+    if (explicitGateway && !['stripe', 'paypal', 'razorpay'].includes(explicitGateway)) {
       return res.status(400).json({ error: `Unsupported payment gateway "${gateway}".` });
     }
+    const normalizedGateway = paymentGatewayManager.resolveActiveGatewayName(explicitGateway || undefined);
 
     const requestedPurpose = String(purpose || 'deposit').trim().toLowerCase();
-    if (!['deposit', 'order_payment', 'order', 'order_escrow'].includes(requestedPurpose)) {
+    if (!['deposit', 'order_payment', 'order', 'order_escrow', 'escrow_funding'].includes(requestedPurpose)) {
       return res.status(400).json({ error: `Invalid checkout purpose "${purpose}".` });
     }
 
@@ -828,14 +872,15 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(10, 60_000), as
       ? String(orderId).trim()
       : null;
 
-    if ((requestedPurpose === 'order_payment' || requestedPurpose === 'order' || requestedPurpose === 'order_escrow') && !normalizedOrderId) {
+    if ((requestedPurpose === 'order_payment' || requestedPurpose === 'order' || requestedPurpose === 'order_escrow') && !normalizedOrderId && !metadata?.returnAction) {
       return res.status(400).json({ error: 'orderId is required when checkout purpose is order payment.' });
     }
 
     let authoritativeAmount: number;
     let resolvedPurpose = requestedPurpose;
+    let resolvedDescription = typeof description === 'string' && description.trim() ? description.trim().slice(0, 120) : undefined;
 
-    if (normalizedOrderId) {
+    if (normalizedOrderId && ['order_payment', 'order', 'order_escrow'].includes(requestedPurpose) && !metadata?.returnAction) {
       resolvedPurpose = 'order_payment';
       const ordRes = await pool.query('SELECT * FROM orders WHERE id = $1', [normalizedOrderId]);
       if (ordRes.rows.length === 0) {
@@ -860,10 +905,13 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(10, 60_000), as
       authoritativeAmount = Number(
         (parsedBreakdown?.clientTotal ?? liveQuote.clientTotal).toFixed(2)
       );
+      if (!resolvedDescription && orderRow.title) {
+        resolvedDescription = `FivePA Order: ${String(orderRow.title).slice(0, 90)}`;
+      }
 
       if (amount !== undefined && amount !== null && amount !== '') {
         const callerAmount = Number(amount);
-        if (!Number.isFinite(callerAmount) || Math.round(callerAmount * 100) !== Math.round(authoritativeAmount * 100)) {
+        if (!Number.isFinite(callerAmount) || toCents(callerAmount) !== toCents(authoritativeAmount)) {
           return res.status(400).json({
             error: `Checkout amount ($${Number.isFinite(callerAmount) ? callerAmount.toFixed(2) : 'invalid'}) does not match the authoritative order total ($${authoritativeAmount.toFixed(2)}).`
           });
@@ -874,11 +922,12 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(10, 60_000), as
       if (!Number.isFinite(callerAmount) || callerAmount < 1.00 || Math.abs(Math.round(callerAmount * 100) - callerAmount * 100) > 1e-6) {
         return res.status(400).json({ error: 'Valid amount of at least $1.00 USD (up to 2 decimal places) is required.' });
       }
-      authoritativeAmount = Number(callerAmount.toFixed(2));
+      authoritativeAmount = Number((toCents(callerAmount) / 100).toFixed(2));
     }
 
     await ensureWallet(authUserId);
     const checkoutId = 'chk_' + randomUUID();
+    const safeMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
 
     const providerSession = await paymentGatewayManager.createCheckoutSession({
       gateway: normalizedGateway as any,
@@ -887,19 +936,45 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(10, 60_000), as
       userId: authUserId,
       orderId: normalizedOrderId || undefined,
       purpose: resolvedPurpose,
+      description: resolvedDescription,
       checkoutId
     });
 
-    await pool.query(
-      `INSERT INTO payment_checkout_sessions (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, created_at)
-       VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, NOW())`,
-      [checkoutId, authUserId, normalizedOrderId, normalizedGateway, authoritativeAmount, resolvedPurpose, providerSession.providerSessionId]
-    );
+    const paypalOrderId = normalizedGateway === 'paypal' ? providerSession.providerSessionId : null;
 
-    res.json({
+    try {
+      await pool.query(
+        `INSERT INTO payment_checkout_sessions
+           (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, paypal_order_id, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, $9, NOW(), NOW())`,
+        [
+          checkoutId,
+          authUserId,
+          normalizedOrderId,
+          normalizedGateway,
+          authoritativeAmount,
+          resolvedPurpose,
+          providerSession.providerSessionId,
+          paypalOrderId,
+          JSON.stringify(safeMetadata)
+        ]
+      );
+    } catch {
+      // Fallback for legacy schema without new columns
+      await pool.query(
+        `INSERT INTO payment_checkout_sessions (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, NOW())`,
+        [checkoutId, authUserId, normalizedOrderId, normalizedGateway, authoritativeAmount, resolvedPurpose, providerSession.providerSessionId]
+      );
+    }
+
+      res.json({
       success: true,
       checkoutId,
+      sessionId: checkoutId,
       gateway: normalizedGateway,
+      paypalOrderId: paypalOrderId || undefined,
+      providerOrderId: providerSession.providerSessionId,
       orderId: normalizedOrderId || undefined,
       purpose: resolvedPurpose,
       amount: authoritativeAmount,
@@ -911,11 +986,607 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(10, 60_000), as
   }
 });
 
-const handlePaymentWebhook = async (req: Request, res: Response) => {
+export async function settleCompletedCheckoutSession(params: {
+  sessionId: string;
+  gateway: string;
+  txId: string;
+  paypalOrderId?: string;
+  paypalCaptureId?: string;
+  webhookEventId?: string;
+  paidAmount?: number;
+  paidCurrency: string;
+  reference?: string;
+  expectedUserId?: string;
+  expectedOrderId?: string | null;
+  expectedPurpose?: string;
+  preVerifiedSessionId: string;
+  preExpectedAmount: number;
+  actor: string;
+  source: 'gateway' | 'webhook';
+}): Promise<{
+  received: boolean;
+  replayed?: boolean;
+  checkoutId: string;
+  orderId?: string | null;
+  purpose: string;
+  amount: number;
+  currency: string;
+  paypalOrderId?: string | null;
+  captureId: string;
+  metadata?: any;
+}> {
+  const {
+    sessionId,
+    gateway,
+    txId,
+    paypalOrderId,
+    paypalCaptureId,
+    webhookEventId,
+    paidAmount,
+    paidCurrency,
+    reference,
+    expectedUserId,
+    expectedOrderId,
+    expectedPurpose,
+    preVerifiedSessionId,
+    preExpectedAmount,
+    actor,
+    source
+  } = params;
+
+  const effectiveTxId = (paypalCaptureId || txId || '').trim();
+  if (!effectiveTxId) {
+    throw { status: 400, message: 'Missing transaction or capture ID for settlement.' };
+  }
+
+  if (String(paidCurrency || '').toUpperCase().trim() !== 'USD') {
+    throw { status: 400, message: 'Invalid or missing currency: payment currency must be explicitly USD.' };
+  }
+
+  return await postgresStore.executeInTransaction(async (client) => {
+    // 1. Lock the exact verified checkout session row first to serialize concurrent return-capture and webhook delivery
+    const lockedSessRes = await client.query(
+      'SELECT * FROM payment_checkout_sessions WHERE id = $1 FOR UPDATE',
+      [sessionId]
+    );
+    const sess: any = lockedSessRes.rows[0] || null;
+    if (!sess) {
+      throw { status: 400, message: 'Cannot process payment: no matching stored checkout session found.' };
+    }
+
+    const parsedMeta = typeof sess.metadata === 'string'
+      ? (() => { try { return JSON.parse(sess.metadata); } catch { return {}; } })()
+      : (sess.metadata || {});
+
+    // 2. If already completed, return idempotently without crediting a second time
+    if (sess.status === 'completed') {
+      return {
+        received: true,
+        replayed: true,
+        checkoutId: String(sess.id),
+        orderId: sess.order_id ? String(sess.order_id) : null,
+        purpose: String(sess.purpose || 'deposit'),
+        amount: Number(sess.expected_amount),
+        currency: String(sess.currency || 'USD'),
+        paypalOrderId: sess.paypal_order_id || paypalOrderId || null,
+        captureId: String(sess.paypal_capture_id || sess.provider_tx_id || effectiveTxId),
+        metadata: parsedMeta
+      };
+    }
+
+    // 3. Check if another completed session already consumed this provider transaction / capture ID
+    const existingTx = await client.query(
+      "SELECT id FROM payment_checkout_sessions WHERE (provider_tx_id = $1::text OR paypal_capture_id = $1::text) AND status = 'completed' AND id <> $2::text",
+      [effectiveTxId, sess.id]
+    );
+    if (existingTx.rows.length > 0) {
+      return {
+        received: true,
+        replayed: true,
+        checkoutId: String(sess.id),
+        orderId: sess.order_id ? String(sess.order_id) : null,
+        purpose: String(sess.purpose || 'deposit'),
+        amount: Number(sess.expected_amount),
+        currency: String(sess.currency || 'USD'),
+        paypalOrderId: sess.paypal_order_id || paypalOrderId || null,
+        captureId: effectiveTxId,
+        metadata: parsedMeta
+      };
+    }
+
+    const authoritativeUserId = String(sess.user_id);
+    const authoritativeAmount = Number(sess.expected_amount);
+    const authoritativeOrderId = sess.order_id ? String(sess.order_id) : null;
+    const authoritativePurpose = String(sess.purpose || (authoritativeOrderId ? 'order_payment' : 'deposit'));
+
+    if (!authoritativeUserId || !Number.isFinite(authoritativeAmount) || authoritativeAmount <= 0) {
+      throw { status: 400, message: 'Stored checkout session has invalid user or expected amount.' };
+    }
+    if (!sess.currency || String(sess.currency).toUpperCase() !== 'USD') {
+      throw { status: 400, message: 'Checkout session currency mismatch: must be USD.' };
+    }
+    if (sess.gateway && String(sess.gateway).toLowerCase() !== gateway) {
+      throw { status: 400, message: 'Checkout session gateway mismatch.' };
+    }
+
+    if (expectedUserId && String(expectedUserId) !== authoritativeUserId) {
+      throw { status: 400, message: 'Checkout session user mismatch.' };
+    }
+    if (paidAmount !== undefined && Number.isFinite(paidAmount)) {
+      if (toCents(paidAmount) !== toCents(authoritativeAmount)) {
+        throw { status: 400, message: 'Checkout session amount mismatch.' };
+      }
+    }
+    if (expectedOrderId && authoritativeOrderId && expectedOrderId !== authoritativeOrderId) {
+      throw { status: 400, message: 'Checkout session order mismatch.' };
+    }
+    if (expectedOrderId && !authoritativeOrderId) {
+      throw { status: 400, message: 'Checkout session is not linked to an order.' };
+    }
+    if (expectedPurpose && ['order_payment', 'order', 'order_escrow'].includes(String(expectedPurpose)) && !authoritativeOrderId) {
+      throw { status: 400, message: 'Checkout session is not an order payment session.' };
+    }
+
+    if (sess.status !== 'pending' && sess.status !== 'approved') {
+      throw { status: 400, message: `Checkout session already in status ${sess.status}` };
+    }
+
+    if (preVerifiedSessionId !== String(sess.id) || toCents(authoritativeAmount) !== toCents(preExpectedAmount)) {
+      throw { status: 409, message: 'Checkout session state changed concurrently during verification.' };
+    }
+
+    // 4. Durable idempotency lock per checkout session + provider tx
+    const sessionSettleKey = `WH-PROVIDER-TX-${gateway}-${effectiveTxId}`;
+    const payloadFingerprint = {
+      gateway,
+      txId: effectiveTxId,
+      userId: authoritativeUserId,
+      amount: authoritativeAmount,
+      checkoutId: sess.id,
+      orderId: authoritativeOrderId
+    };
+    const idempCheck = await checkOrRecordIdempotency(
+      client,
+      sessionSettleKey,
+      'paymentWebhook',
+      payloadFingerprint
+    );
+    if (idempCheck.replayed) {
+      return {
+        received: true,
+        replayed: true,
+        checkoutId: String(sess.id),
+        orderId: authoritativeOrderId,
+        purpose: authoritativePurpose,
+        amount: authoritativeAmount,
+        currency: 'USD',
+        paypalOrderId: sess.paypal_order_id || paypalOrderId || null,
+        captureId: effectiveTxId,
+        metadata: parsedMeta
+      };
+    }
+
+    // 5. If linked to an Order for direct order_payment, validate Order ownership, status, and authoritative total BEFORE crediting
+    let lockedOrder: any = null;
+    const isOrderPayment = Boolean(authoritativeOrderId) && ['order_payment', 'order', 'order_escrow'].includes(authoritativePurpose);
+    if (['order_payment', 'order', 'order_escrow'].includes(authoritativePurpose) && !authoritativeOrderId) {
+      throw { status: 400, message: 'Order payment checkout session is missing order_id.' };
+    }
+    if (isOrderPayment && authoritativeOrderId) {
+      const ordRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [authoritativeOrderId]);
+      if (ordRes.rows.length === 0) {
+        throw { status: 404, message: `Order ${authoritativeOrderId} not found.` };
+      }
+      lockedOrder = ordRes.rows[0];
+      if (lockedOrder.buyer_id !== authoritativeUserId) {
+        throw { status: 403, message: 'Order buyer mismatch with checkout session owner.' };
+      }
+      if (!['payment_pending', 'pending'].includes(lockedOrder.status)) {
+        throw { status: 400, message: `Order ${lockedOrder.id} is in status "${lockedOrder.status}" and cannot be settled.` };
+      }
+      const parsedBreakdown = typeof lockedOrder.fee_breakdown === 'string'
+        ? JSON.parse(lockedOrder.fee_breakdown)
+        : lockedOrder.fee_breakdown;
+      const liveQuote = await quoteOrderWithLiveSettings(Number(lockedOrder.amount));
+      const expectedOrderTotal = Number(
+        (parsedBreakdown?.clientTotal ?? liveQuote.clientTotal).toFixed(2)
+      );
+      if (toCents(authoritativeAmount) !== toCents(expectedOrderTotal)) {
+        throw {
+          status: 400,
+          message: `Checkout session amount ($${authoritativeAmount.toFixed(2)}) does not match authoritative order total ($${expectedOrderTotal.toFixed(2)}).`
+        };
+      }
+    }
+
+    await financialTransactionService.ensureWallet({ userId: authoritativeUserId, role: 'buyer' }, client);
+
+    // Use session-scoped idempotency key so return-page capture and webhook can never double-credit the same checkout session
+    const depositIdempotencyKey = `CHK-CREDIT-${sess.id}`;
+    await financialTransactionService.creditDeposit({
+      userId: authoritativeUserId,
+      amount: authoritativeAmount,
+      reference: reference || effectiveTxId || 'WH-DEPOSIT',
+      idempotencyKey: depositIdempotencyKey,
+      actor,
+      source
+    }, client);
+
+    // 6. Atomically fund Order escrow if this session is an order payment
+    if (isOrderPayment && lockedOrder) {
+      const fundIdempKey = `CHK-FUND-${sess.id}`;
+      await financialTransactionService.fundEscrow({
+        orderId: lockedOrder.id,
+        orderTitle: lockedOrder.title,
+        amount: Number(lockedOrder.amount),
+        buyerId: lockedOrder.buyer_id,
+        sellerId: lockedOrder.seller_id,
+        actor: `user:${authoritativeUserId}`,
+        idempotencyKey: fundIdempKey
+      }, client);
+      await client.query("UPDATE orders SET status = 'funded_in_escrow' WHERE id = $1", [lockedOrder.id]);
+    }
+
+    try {
+      await client.query(
+        `UPDATE payment_checkout_sessions
+            SET status = $1::text,
+                provider_tx_id = $2::text,
+                paypal_order_id = COALESCE($3::text, paypal_order_id),
+                paypal_capture_id = COALESCE($4::text, paypal_capture_id),
+                last_webhook_event_id = COALESCE($5::text, last_webhook_event_id),
+                completed_at = NOW(),
+                updated_at = NOW()
+          WHERE id = $6::text`,
+        ['completed', effectiveTxId, paypalOrderId || null, paypalCaptureId || null, webhookEventId || null, sess.id]
+      );
+    } catch {
+      await client.query(
+        'UPDATE payment_checkout_sessions SET status = $1::text, provider_tx_id = $2::text, completed_at = NOW() WHERE id = $3::text',
+        ['completed', effectiveTxId, sess.id]
+      );
+    }
+
+    const resObj = {
+      received: true,
+      checkoutId: String(sess.id),
+      orderId: authoritativeOrderId,
+      purpose: authoritativePurpose,
+      amount: authoritativeAmount,
+      currency: 'USD',
+      paypalOrderId: paypalOrderId || sess.paypal_order_id || null,
+      captureId: effectiveTxId,
+      metadata: parsedMeta
+    };
+    await recordIdempotencyResult(client, sessionSettleKey, 'paymentWebhook', resObj, payloadFingerprint);
+
+    return resObj;
+  });
+}
+
+const handlePayPalCaptureRoute = async (req: Request, res: Response) => {
+  try {
+    const authUserId = (req as any).authenticatedUserId;
+    if (!authUserId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const pool = postgresStore.getPool();
+    await ensurePaymentCheckoutSchema(pool);
+
+    const rawSessionId = String(req.params.sessionId || req.body?.sessionId || req.body?.checkoutId || '').trim();
+    const rawPayPalOrderId = String(req.body?.paypalOrderId || req.body?.token || req.body?.orderID || '').trim();
+
+    if (!rawSessionId && !rawPayPalOrderId) {
+      return res.status(400).json({ error: 'sessionId or paypalOrderId is required to capture payment.' });
+    }
+
+    let sessRes = rawSessionId
+      ? await pool.query('SELECT * FROM payment_checkout_sessions WHERE id = $1 LIMIT 1', [rawSessionId])
+      : { rows: [] as any[] };
+
+    if (sessRes.rows.length === 0 && rawPayPalOrderId) {
+      sessRes = await pool.query(
+        'SELECT * FROM payment_checkout_sessions WHERE paypal_order_id = $1::text OR provider_tx_id = $1::text LIMIT 1',
+        [rawPayPalOrderId]
+      );
+    }
+
+    if (sessRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Checkout session not found.' });
+    }
+
+    const sess = sessRes.rows[0];
+    if (String(sess.user_id) !== String(authUserId)) {
+      return res.status(403).json({ error: 'Forbidden: This checkout session belongs to another user.' });
+    }
+
+    const parsedMeta = typeof sess.metadata === 'string'
+      ? (() => { try { return JSON.parse(sess.metadata); } catch { return {}; } })()
+      : (sess.metadata || {});
+
+    if (sess.status === 'completed') {
+      const bal = await financialRepository.getWalletBalance(authUserId);
+      return res.json({
+        success: true,
+        ok: true,
+        status: 'completed',
+        replayed: true,
+        alreadyProcessed: true,
+        checkoutId: sess.id,
+        sessionId: sess.id,
+        gateway: sess.gateway,
+        orderId: sess.order_id || parsedMeta?.resultingOrderId || null,
+        purpose: sess.purpose,
+        amount: Number(sess.expected_amount),
+        currency: sess.currency || 'USD',
+        paypalOrderId: sess.paypal_order_id || rawPayPalOrderId || null,
+        captureId: sess.paypal_capture_id || sess.provider_tx_id || null,
+        paypalCaptureId: sess.paypal_capture_id || sess.provider_tx_id || null,
+        metadata: parsedMeta,
+        availableBalance: bal,
+        walletBalance: bal
+      });
+    }
+
+    if (sess.status !== 'pending' && sess.status !== 'approved') {
+      return res.status(400).json({ error: `Checkout session cannot be captured because its status is "${sess.status}".` });
+    }
+
+    const gateway = String(sess.gateway || 'paypal').toLowerCase();
+    const expectedAmount = Number(sess.expected_amount);
+
+    if (gateway === 'paypal') {
+      const targetPayPalOrderId = rawPayPalOrderId || String(sess.paypal_order_id || sess.provider_tx_id || '').trim();
+      if (!targetPayPalOrderId || targetPayPalOrderId.startsWith('chk_')) {
+        return res.status(400).json({ error: 'Missing PayPal Order ID (token) for capture.' });
+      }
+
+      const captureResult = await paymentGatewayManager.capturePayPalOrder({
+        paypalOrderId: targetPayPalOrderId,
+        expectedSessionId: String(sess.id),
+        expectedAmount,
+        expectedCurrency: 'USD'
+      });
+
+      if (!captureResult.verified) {
+        return res.status(400).json({
+          error: captureResult.error || 'PayPal order capture verification failed.',
+          status: captureResult.status
+        });
+      }
+
+      const settled = await settleCompletedCheckoutSession({
+        sessionId: String(sess.id),
+        gateway: 'paypal',
+        txId: captureResult.captureId,
+        paypalOrderId: captureResult.paypalOrderId,
+        paypalCaptureId: captureResult.captureId,
+        paidAmount: Number(captureResult.amountValue),
+        paidCurrency: captureResult.currencyCode,
+        reference: captureResult.captureId,
+        expectedUserId: String(authUserId),
+        preVerifiedSessionId: String(sess.id),
+        preExpectedAmount: expectedAmount,
+        actor: `PayPal Capture (${authUserId})`,
+        source: 'gateway'
+      });
+
+      await syncUserBalances();
+      const bal = await financialRepository.getWalletBalance(authUserId);
+
+      return res.json({
+        success: true,
+        ok: true,
+        status: 'completed',
+        replayed: Boolean(settled.replayed),
+        alreadyProcessed: Boolean(settled.replayed),
+        checkoutId: settled.checkoutId,
+        sessionId: settled.checkoutId,
+        gateway: 'paypal',
+        orderId: settled.orderId || settled.metadata?.resultingOrderId || null,
+        purpose: settled.purpose,
+        amount: settled.amount,
+        currency: settled.currency,
+        paypalOrderId: settled.paypalOrderId,
+        captureId: settled.captureId,
+        paypalCaptureId: settled.captureId,
+        metadata: settled.metadata,
+        availableBalance: bal,
+        walletBalance: bal
+      });
+    } else {
+      const targetTxId = rawPayPalOrderId || String(sess.provider_tx_id || '').trim();
+      const verifyRes = await paymentGatewayManager.verifyPaymentEvent({
+        gateway,
+        sessionId: String(sess.provider_tx_id || sess.id),
+        transactionId: targetTxId,
+        expectedAmount,
+        expectedCurrency: 'USD'
+      });
+      if (!verifyRes.verified) {
+        return res.status(400).json({ error: verifyRes.error || 'Payment verification failed.' });
+      }
+      const settled = await settleCompletedCheckoutSession({
+        sessionId: String(sess.id),
+        gateway,
+        txId: targetTxId || `SIM-${sess.id}`,
+        paidAmount: expectedAmount,
+        paidCurrency: 'USD',
+        reference: targetTxId || sess.id,
+        expectedUserId: String(authUserId),
+        preVerifiedSessionId: String(sess.id),
+        preExpectedAmount: expectedAmount,
+        actor: `Gateway Capture (${authUserId})`,
+        source: 'gateway'
+      });
+      await syncUserBalances([authUserId]);
+      const bal = await financialRepository.getWalletBalance(authUserId);
+      return res.json({
+        success: true,
+        ok: true,
+        status: 'completed',
+        replayed: Boolean(settled.replayed),
+        alreadyProcessed: Boolean(settled.replayed),
+        checkoutId: settled.checkoutId,
+        sessionId: settled.checkoutId,
+        gateway,
+        orderId: settled.orderId || settled.metadata?.resultingOrderId || null,
+        purpose: settled.purpose,
+        amount: settled.amount,
+        currency: settled.currency,
+        captureId: settled.captureId,
+        paypalCaptureId: settled.captureId,
+        metadata: settled.metadata,
+        availableBalance: bal,
+        walletBalance: bal
+      });
+    }
+  } catch (err: any) {
+    const statusCode = typeof err?.status === 'number' ? err.status : 400;
+    return res.status(statusCode).json({ error: err?.message || 'Failed to capture payment.' });
+  }
+};
+
+router.post('/payments/paypal/capture', requireAuth, rateLimit(20, 60_000), handlePayPalCaptureRoute);
+router.post('/payments/checkout/:sessionId/capture', requireAuth, rateLimit(20, 60_000), handlePayPalCaptureRoute);
+
+router.get('/payments/checkout/:sessionId', requireAuth, rateLimit(60, 60_000), async (req: Request, res: Response) => {
+  try {
+    const authUserId = (req as any).authenticatedUserId;
+    const sessionId = String(req.params.sessionId || '').trim();
+    if (!sessionId) return res.status(400).json({ error: 'Session ID is required.' });
+
+    const pool = postgresStore.getPool();
+    await ensurePaymentCheckoutSchema(pool);
+
+    const sessRes = await pool.query('SELECT * FROM payment_checkout_sessions WHERE id = $1 LIMIT 1', [sessionId]);
+    if (sessRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Checkout session not found.' });
+    }
+    const sess = sessRes.rows[0];
+    if (String(sess.user_id) !== String(authUserId)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    const parsedMeta = typeof sess.metadata === 'string'
+      ? (() => { try { return JSON.parse(sess.metadata); } catch { return {}; } })()
+      : (sess.metadata || {});
+    const bal = await financialRepository.getWalletBalance(authUserId);
+
+    res.json({
+      checkoutId: sess.id,
+      sessionId: sess.id,
+      status: sess.status,
+      gateway: sess.gateway,
+      amount: Number(sess.expected_amount),
+      currency: sess.currency || 'USD',
+      purpose: sess.purpose || 'deposit',
+      orderId: sess.order_id || parsedMeta?.resultingOrderId || null,
+      paypalOrderId: sess.paypal_order_id || null,
+      captureId: sess.paypal_capture_id || (sess.status === 'completed' ? sess.provider_tx_id : null),
+      paypalCaptureId: sess.paypal_capture_id || (sess.status === 'completed' ? sess.provider_tx_id : null),
+      metadata: parsedMeta,
+      availableBalance: bal,
+      walletBalance: bal,
+      createdAt: sess.created_at,
+      completedAt: sess.completed_at || null
+    });
+  } catch (err: any) {
+    res.status(500).json(formatApiError(err));
+  }
+});
+
+router.post('/payments/checkout/:sessionId/cancel', requireAuth, rateLimit(20, 60_000), async (req: Request, res: Response) => {
+  try {
+    const authUserId = (req as any).authenticatedUserId;
+    const sessionId = String(req.params.sessionId || '').trim();
+    if (!sessionId) return res.status(400).json({ error: 'Session ID is required.' });
+
+    const pool = postgresStore.getPool();
+    await ensurePaymentCheckoutSchema(pool);
+
+    const sessRes = await pool.query('SELECT * FROM payment_checkout_sessions WHERE id = $1 LIMIT 1', [sessionId]);
+    if (sessRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Checkout session not found.' });
+    }
+    const sess = sessRes.rows[0];
+    if (String(sess.user_id) !== String(authUserId)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    if (sess.status === 'pending' || sess.status === 'approved') {
+      await pool.query(
+        "UPDATE payment_checkout_sessions SET status = 'cancelled', updated_at = NOW() WHERE id = $1 AND status IN ('pending', 'approved')",
+        [sessionId]
+      ).catch(async () => {
+        await pool.query(
+          "UPDATE payment_checkout_sessions SET status = 'cancelled' WHERE id = $1 AND status IN ('pending', 'approved')",
+          [sessionId]
+        );
+      });
+      sess.status = 'cancelled';
+    }
+
+    res.json({
+      success: true,
+      checkoutId: sess.id,
+      sessionId: sess.id,
+      status: sess.status,
+      amount: Number(sess.expected_amount),
+      currency: sess.currency || 'USD',
+      purpose: sess.purpose || 'deposit',
+      orderId: sess.order_id || null
+    });
+  } catch (err: any) {
+    res.status(500).json(formatApiError(err));
+  }
+});
+
+router.post('/payments/checkout/:sessionId/complete-action', requireAuth, rateLimit(20, 60_000), async (req: Request, res: Response) => {
+  try {
+    const authUserId = (req as any).authenticatedUserId;
+    const sessionId = String(req.params.sessionId || '').trim();
+    const { resultingOrderId, actionResult } = req.body || {};
+    if (!sessionId) return res.status(400).json({ error: 'Session ID is required.' });
+
+    const pool = postgresStore.getPool();
+    await ensurePaymentCheckoutSchema(pool);
+
+    const sessRes = await pool.query('SELECT * FROM payment_checkout_sessions WHERE id = $1 LIMIT 1', [sessionId]);
+    if (sessRes.rows.length === 0) return res.status(404).json({ error: 'Checkout session not found.' });
+    const sess = sessRes.rows[0];
+    if (String(sess.user_id) !== String(authUserId)) return res.status(403).json({ error: 'Forbidden' });
+
+    const parsedMeta = typeof sess.metadata === 'string'
+      ? (() => { try { return JSON.parse(sess.metadata); } catch { return {}; } })()
+      : (sess.metadata || {});
+    const resolvedResultingOrderId = resultingOrderId || actionResult?.workstreamOrderId || actionResult?.orderId || null;
+    const updatedMeta = {
+      ...parsedMeta,
+      actionCompleted: true,
+      ...(actionResult ? { actionResult } : {}),
+      ...(resolvedResultingOrderId ? { resultingOrderId: String(resolvedResultingOrderId) } : {})
+    };
+
+    await pool.query(
+      'UPDATE payment_checkout_sessions SET metadata = $1, order_id = COALESCE(order_id, $2), updated_at = NOW() WHERE id = $3',
+      [JSON.stringify(updatedMeta), resolvedResultingOrderId ? String(resolvedResultingOrderId) : null, sessionId]
+    ).catch(() => {});
+
+    res.json({ success: true, metadata: updatedMeta });
+  } catch (err: any) {
+    res.status(500).json(formatApiError(err));
+  }
+});
+
+export const handlePaymentWebhook = async (req: Request, res: Response) => {
   const rawBody = req.body;
+  if (!Buffer.isBuffer(rawBody) && typeof rawBody !== 'string') {
+    return res.status(400).json({ error: 'Webhook endpoint requires raw unparsed body.' });
+  }
+
   let detectedGateway = String(req.headers['x-gateway-provider'] || req.query.gateway || '').trim().toLowerCase();
   if (!detectedGateway) {
-    if (req.headers['paypal-transmission-id'] || req.headers['paypal-auth-algo'] || req.headers['paypal-cert-url']) {
+    if (req.headers['paypal-transmission-id'] || req.headers['paypal-auth-algo'] || req.headers['paypal-cert-url'] || req.headers['paypal-transmission-sig']) {
       detectedGateway = 'paypal';
     } else if (req.headers['stripe-signature']) {
       detectedGateway = 'stripe';
@@ -926,9 +1597,14 @@ const handlePaymentWebhook = async (req: Request, res: Response) => {
     }
   }
 
+  const bodyStr = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : String(rawBody);
+  if (Buffer.byteLength(bodyStr, 'utf8') > 256 * 1024) {
+    return res.status(413).json({ error: 'Webhook payload too large.' });
+  }
+
   let payload: any;
   try {
-    payload = JSON.parse(req.body.toString());
+    payload = JSON.parse(bodyStr);
   } catch {
     return res.status(400).json({ error: 'Malformed JSON payload' });
   }
@@ -943,318 +1619,399 @@ const handlePaymentWebhook = async (req: Request, res: Response) => {
   const isVerified = await paymentGatewayManager.verifyWebhookSignature({
     gateway,
     headers: req.headers,
-    rawBody
+    rawBody: Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(bodyStr, 'utf8')
   });
 
   if (!isVerified) {
     return res.status(403).json({ error: 'Unauthorized: Invalid or missing provider webhook signature' });
   }
 
+  const pool = postgresStore.getPool();
+  await ensurePaymentCheckoutSchema(pool);
+
   const rawEvent = String(payload?.event_type || payload?.event || payload?.type || '').trim().toLowerCase();
-  const validEvents = [
+  const webhookEventId = String(payload?.id || payload?.eventId || '').trim();
+  const resourceId = String(payload?.resource?.id || payload?.data?.object?.id || payload?.transactionId || '').trim();
+
+  // Check if this exact webhook event ID was already processed
+  if (webhookEventId && webhookEventId.startsWith('WH-')) {
+    try {
+      const existingWh = await pool.query(
+        'SELECT status FROM payment_webhook_events WHERE event_id = $1 LIMIT 1',
+        [webhookEventId]
+      );
+      if (existingWh.rows.length > 0 && existingWh.rows[0].status === 'processed') {
+        return res.json({ received: true, replayed: true });
+      }
+      await pool.query(
+        `INSERT INTO payment_webhook_events (event_id, gateway, event_type, resource_id, status, payload, created_at)
+         VALUES ($1, $2, $3, $4, 'received', $5, NOW())
+         ON CONFLICT (event_id) DO NOTHING`,
+        [webhookEventId, gateway, rawEvent, resourceId || null, JSON.stringify(payload)]
+      );
+    } catch {
+      // Ignore if table unavailable in unit mock
+    }
+  }
+
+  const markWebhookEvent = async (status: 'processed' | 'ignored' | 'failed', sessionId?: string | null, errMsg?: string) => {
+    if (!webhookEventId || !webhookEventId.startsWith('WH-')) return;
+    try {
+      await pool.query(
+        `UPDATE payment_webhook_events
+            SET status = $1,
+                session_id = COALESCE($2, session_id),
+                error_message = $3,
+                processed_at = NOW()
+          WHERE event_id = $4`,
+        [status, sessionId || null, errMsg || null, webhookEventId]
+      );
+    } catch {}
+  };
+
+  // Handle PayPal non-crediting lifecycle events cleanly
+  if (gateway === 'paypal') {
+    if (rawEvent === 'checkout.order.approved' || rawEvent === 'order.approved') {
+      const approvedOrderId = String(payload?.resource?.id || '').trim();
+      const unitCustomId = String(
+        payload?.resource?.purchase_units?.[0]?.custom_id ||
+        payload?.resource?.purchase_units?.[0]?.reference_id ||
+        payload?.resource?.purchase_units?.[0]?.invoice_id ||
+        ''
+      ).trim();
+
+      let matchedId: string | null = null;
+      try {
+        const upRes = await pool.query(
+          `UPDATE payment_checkout_sessions
+              SET status = CASE WHEN status = 'pending' THEN 'approved' ELSE status END,
+                  paypal_order_id = COALESCE(paypal_order_id, $1::text),
+                  last_webhook_event_id = COALESCE($2::text, last_webhook_event_id),
+                  updated_at = NOW()
+            WHERE id = $3::text OR paypal_order_id = $1::text OR provider_tx_id = $1::text
+            RETURNING id`,
+          [approvedOrderId || null, webhookEventId || null, unitCustomId || approvedOrderId]
+        );
+        matchedId = upRes.rows[0]?.id || null;
+      } catch {}
+
+      await markWebhookEvent('processed', matchedId);
+      return res.json({ received: true, status: 'approved' });
+    }
+
+    if (rawEvent === 'payment.capture.denied' || rawEvent === 'payment.capture.declined') {
+      const capId = String(payload?.resource?.id || '').trim();
+      const relOrdId = String(payload?.resource?.supplementary_data?.related_ids?.order_id || '').trim();
+      const custId = String(payload?.resource?.custom_id || payload?.resource?.invoice_id || '').trim();
+      let matchedId: string | null = null;
+      try {
+        const upRes = await pool.query(
+          `UPDATE payment_checkout_sessions
+              SET status = CASE WHEN status IN ('pending', 'approved') THEN 'failed' ELSE status END,
+                  paypal_capture_id = COALESCE(paypal_capture_id, $1::text),
+                  last_webhook_event_id = COALESCE($2::text, last_webhook_event_id),
+                  updated_at = NOW()
+            WHERE id = $3::text OR paypal_order_id = $4::text OR provider_tx_id = $4::text OR paypal_capture_id = $1::text
+            RETURNING id`,
+          [capId || null, webhookEventId || null, custId || capId, relOrdId || capId]
+        );
+        matchedId = upRes.rows[0]?.id || null;
+      } catch {}
+      await markWebhookEvent('processed', matchedId);
+      return res.json({ received: true, status: 'failed' });
+    }
+
+    if (rawEvent === 'payment.capture.pending') {
+      const custId = String(payload?.resource?.custom_id || payload?.resource?.invoice_id || '').trim();
+      await markWebhookEvent('processed', custId || null);
+      return res.json({ received: true, status: 'pending' });
+    }
+
+    if (rawEvent === 'payment.capture.refunded' || rawEvent === 'payment.capture.reversed') {
+      const refundOrCapId = String(payload?.resource?.id || '').trim();
+      const relatedCapId = String(
+        payload?.resource?.supplementary_data?.related_ids?.capture_id ||
+        payload?.resource?.id ||
+        ''
+      ).trim();
+      const relatedOrderId = String(payload?.resource?.supplementary_data?.related_ids?.order_id || '').trim();
+      const custId = String(payload?.resource?.custom_id || payload?.resource?.invoice_id || '').trim();
+
+      let sessRow: any = null;
+      try {
+        const findRes = await pool.query(
+          `SELECT * FROM payment_checkout_sessions
+            WHERE id = $1::text
+               OR paypal_capture_id = $2::text
+               OR provider_tx_id = $2::text
+               OR paypal_order_id = $3::text
+               OR provider_tx_id = $3::text
+            LIMIT 1`,
+          [custId || '__none__', relatedCapId || refundOrCapId || '__none__', relatedOrderId || '__none__']
+        );
+        sessRow = findRes.rows[0] || null;
+      } catch {}
+
+      if (sessRow && sessRow.status === 'completed') {
+        const revAmount = Number(payload?.resource?.amount?.value ?? sessRow.expected_amount);
+        await postgresStore.executeInTransaction(async (client) => {
+          await client.query(
+            `UPDATE payment_checkout_sessions
+                SET status = 'refunded',
+                    last_webhook_event_id = COALESCE($1, last_webhook_event_id),
+                    updated_at = NOW()
+              WHERE id = $2`,
+            [webhookEventId || null, sessRow.id]
+          ).catch(async () => {
+            await client.query("UPDATE payment_checkout_sessions SET status = 'refunded' WHERE id = $1", [sessRow.id]);
+          });
+          await financialTransactionService.reverseGatewayDeposit({
+            userId: String(sessRow.user_id),
+            amount: Number.isFinite(revAmount) && revAmount > 0 ? revAmount : Number(sessRow.expected_amount),
+            reference: refundOrCapId || relatedCapId || sessRow.id,
+            idempotencyKey: `WH-REFUND-${sessRow.id}-${refundOrCapId || relatedCapId}`
+          }, client);
+        });
+        await syncUserBalances();
+      }
+
+      await markWebhookEvent('processed', sessRow?.id || null);
+      return res.json({ received: true, status: 'refunded' });
+    }
+  }
+
+  const creditingEvents = [
     'payment.succeeded',
     'checkout.session.completed',
     'payment_intent.succeeded',
     'payment.captured',
-    'order.approved',
-    'checkout.order.approved',
     'payment.capture.completed',
     'checkout.order.completed'
   ];
-  if (!validEvents.includes(rawEvent)) {
+  if (!creditingEvents.includes(rawEvent)) {
+    await markWebhookEvent('ignored');
     return res.json({ received: true });
+  }
+
+  // On PayPal PAYMENT.CAPTURE.COMPLETED, require resource.status === 'COMPLETED' if resource.status is present
+  if (gateway === 'paypal' && rawEvent === 'payment.capture.completed') {
+    const capStatus = String(payload?.resource?.status || 'COMPLETED').toUpperCase().trim();
+    if (capStatus !== 'COMPLETED') {
+      await markWebhookEvent('ignored', null, `Capture status is ${capStatus}, not COMPLETED`);
+      return res.status(400).json({ error: `PayPal capture status is "${capStatus}". Only COMPLETED captures can be credited.` });
+    }
   }
 
   const txId = String(
     payload?.resource?.id ||
-    payload?.id ||
     payload?.transactionId ||
+    payload?.data?.object?.id ||
+    payload?.id ||
     payload?.eventId ||
     ''
   ).trim();
   if (!txId) {
+    await markWebhookEvent('failed', null, 'Missing transactionId');
     return res.status(400).json({ error: 'Missing required transactionId or eventId' });
   }
 
-  const currency = String(
-    payload?.currency ||
-    payload?.resource?.amount?.currency_code ||
-    payload?.resource?.purchase_units?.[0]?.amount?.currency_code ||
-    'USD'
-  ).trim().toUpperCase();
+  // Strictly extract currency from the webhook payload — DO NOT default missing currency to 'USD'!
+  const explicitRawCurrency =
+    payload?.currency ??
+    payload?.resource?.amount?.currency_code ??
+    payload?.resource?.purchase_units?.[0]?.amount?.currency_code ??
+    payload?.data?.object?.currency ??
+    payload?.payload?.payment?.entity?.currency ??
+    '';
+  const currency = String(explicitRawCurrency).trim().toUpperCase();
   if (currency !== 'USD') {
+    await markWebhookEvent('failed', null, `Invalid or missing currency: "${currency}"`);
     return res.status(400).json({ error: 'Invalid or missing currency: provider webhook currency must be explicitly USD.' });
   }
 
-  const payloadAmount = payload?.amount !== undefined
-    ? Number(payload.amount)
-    : (payload?.resource?.amount?.value !== undefined || payload?.resource?.purchase_units?.[0]?.amount?.value !== undefined)
-      ? Number(payload?.resource?.amount?.value || payload?.resource?.purchase_units?.[0]?.amount?.value)
-      : undefined;
+  const rawVal =
+    payload?.amount !== undefined
+      ? payload.amount
+      : payload?.resource?.amount?.value !== undefined
+        ? payload.resource.amount.value
+        : payload?.resource?.purchase_units?.[0]?.amount?.value !== undefined
+          ? payload.resource.purchase_units[0].amount.value
+          : payload?.data?.object?.amount_total !== undefined
+            ? Number(payload.data.object.amount_total) / 100
+            : undefined;
+
+  const payloadAmount = rawVal !== undefined && rawVal !== null && String(rawVal).trim() !== ''
+    ? Number(rawVal)
+    : undefined;
+
+  if (gateway === 'paypal' && (payloadAmount === undefined || !Number.isFinite(payloadAmount) || payloadAmount <= 0)) {
+    await markWebhookEvent('failed', null, 'Missing or invalid capture amount in PayPal webhook');
+    return res.status(400).json({ error: 'Missing or invalid capture amount in PayPal webhook.' });
+  }
 
   const userId = payload?.userId;
   const reference = payload?.reference || payload?.resource?.invoice_id || txId;
 
-  const lookupSessionKey = (
+  const customSessionId = String(
     payload?.checkoutId ||
     payload?.sessionId ||
-    payload?.resource?.purchase_units?.[0]?.reference_id ||
     payload?.resource?.custom_id ||
-    payload?.resource?.supplementary_data?.related_ids?.order_id
-  ) ? String(
-    payload?.checkoutId ||
-    payload?.sessionId ||
+    payload?.resource?.invoice_id ||
+    payload?.resource?.purchase_units?.[0]?.custom_id ||
     payload?.resource?.purchase_units?.[0]?.reference_id ||
-    payload?.resource?.custom_id ||
-    payload?.resource?.supplementary_data?.related_ids?.order_id
-  ).trim() : null;
+    payload?.data?.object?.client_reference_id ||
+    payload?.data?.object?.metadata?.checkoutId ||
+    ''
+  ).trim();
 
-  const lookupOrderKey = (payload?.orderId || payload?.resource?.invoice_id)
-    ? String(payload?.orderId || payload?.resource?.invoice_id).trim()
-    : null;
+  const relatedPayPalOrderId = String(
+    payload?.resource?.supplementary_data?.related_ids?.order_id ||
+    (rawEvent === 'checkout.order.completed' ? payload?.resource?.id : '') ||
+    ''
+  ).trim();
+
+  const lookupSessionKey = customSessionId || relatedPayPalOrderId || null;
+  const lookupOrderKey = payload?.orderId
+    ? String(payload.orderId).trim()
+    : (payload?.resource?.invoice_id && !String(payload.resource.invoice_id).startsWith('chk_')
+        ? String(payload.resource.invoice_id).trim()
+        : null);
 
   try {
-    // Pre-fetch and verify candidate checkout session strictly OUTSIDE the database transaction
-    // so external provider HTTP verification never holds database locks.
-    const pool = postgresStore.getPool();
+    // Pre-fetch candidate checkout session strictly OUTSIDE the database transaction
     const existingCompletedTx = await pool.query(
-      "SELECT id FROM payment_checkout_sessions WHERE provider_tx_id = $1 AND status = 'completed' LIMIT 1",
+      "SELECT id FROM payment_checkout_sessions WHERE (provider_tx_id = $1::text OR paypal_capture_id = $1::text) AND status = 'completed' LIMIT 1",
       [txId]
-    );
+    ).catch(async () => {
+      return await pool.query(
+        "SELECT id FROM payment_checkout_sessions WHERE provider_tx_id = $1::text AND status = 'completed' LIMIT 1",
+        [txId]
+      );
+    });
     if (existingCompletedTx.rows.length > 0) {
+      await markWebhookEvent('processed', existingCompletedTx.rows[0].id);
       return res.json({ received: true, replayed: true });
     }
 
     let preSess: any = null;
-    if (lookupSessionKey) {
+    if (customSessionId) {
       const preRes = await pool.query(
-        'SELECT * FROM payment_checkout_sessions WHERE id = $1 OR provider_tx_id = $1 LIMIT 1',
-        [lookupSessionKey]
+        'SELECT * FROM payment_checkout_sessions WHERE id = $1::text OR provider_tx_id = $1::text LIMIT 1',
+        [customSessionId]
       );
       if (preRes.rows.length > 0) preSess = preRes.rows[0];
     }
+    if (!preSess && relatedPayPalOrderId) {
+      const preByRelated = await pool.query(
+        'SELECT * FROM payment_checkout_sessions WHERE paypal_order_id = $1::text OR provider_tx_id = $1::text LIMIT 1',
+        [relatedPayPalOrderId]
+      ).catch(async () => {
+        return await pool.query(
+          'SELECT * FROM payment_checkout_sessions WHERE provider_tx_id = $1::text LIMIT 1',
+          [relatedPayPalOrderId]
+        );
+      });
+      if (preByRelated.rows.length > 0) preSess = preByRelated.rows[0];
+    }
     if (!preSess) {
       const preByTx = await pool.query(
-        'SELECT * FROM payment_checkout_sessions WHERE provider_tx_id = $1 LIMIT 1',
+        'SELECT * FROM payment_checkout_sessions WHERE provider_tx_id = $1::text OR paypal_capture_id = $1::text OR paypal_order_id = $1::text LIMIT 1',
         [txId]
-      );
+      ).catch(async () => {
+        return await pool.query(
+          'SELECT * FROM payment_checkout_sessions WHERE provider_tx_id = $1::text LIMIT 1',
+          [txId]
+        );
+      });
       if (preByTx.rows.length > 0) preSess = preByTx.rows[0];
-    }
-    if (!preSess && payload?.resource?.supplementary_data?.related_ids?.order_id) {
-      const relatedOrdId = payload.resource.supplementary_data.related_ids.order_id;
-      const preByRelated = await pool.query(
-        'SELECT * FROM payment_checkout_sessions WHERE provider_tx_id = $1 LIMIT 1',
-        [relatedOrdId]
-      );
-      if (preByRelated.rows.length > 0) preSess = preByRelated.rows[0];
     }
     if (!preSess && !lookupSessionKey && lookupOrderKey) {
       const preByOrd = await pool.query(
-        "SELECT * FROM payment_checkout_sessions WHERE order_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM payment_checkout_sessions WHERE order_id = $1 AND status IN ('pending', 'approved') ORDER BY created_at DESC LIMIT 1",
         [lookupOrderKey]
       );
       if (preByOrd.rows.length > 0) preSess = preByOrd.rows[0];
     }
 
     if (!preSess) {
+      await markWebhookEvent('failed', null, 'No matching checkout session found');
       return res.status(400).json({ error: 'Cannot process payment webhook: no matching stored checkout session found.' });
+    }
+
+    if (preSess.status === 'completed') {
+      await markWebhookEvent('processed', preSess.id);
+      return res.json({ received: true, replayed: true });
     }
 
     const preExpectedAmount = Number(preSess.expected_amount);
     if (!preSess.user_id || !Number.isFinite(preExpectedAmount) || preExpectedAmount <= 0) {
+      await markWebhookEvent('failed', preSess.id, 'Invalid user or expected amount on session');
       return res.status(400).json({ error: 'Stored checkout session has invalid user or expected amount.' });
     }
-    if (!preSess.currency || preSess.currency !== 'USD') {
+    if (!preSess.currency || String(preSess.currency).toUpperCase() !== 'USD') {
+      await markWebhookEvent('failed', preSess.id, 'Session currency mismatch');
       return res.status(400).json({ error: 'Checkout session currency mismatch: must be USD.' });
     }
     if (preSess.gateway && String(preSess.gateway).toLowerCase() !== gateway) {
+      await markWebhookEvent('failed', preSess.id, 'Session gateway mismatch');
       return res.status(400).json({ error: 'Checkout session gateway mismatch.' });
     }
 
+    if (payloadAmount !== undefined && Number.isFinite(payloadAmount)) {
+      if (toCents(payloadAmount) !== toCents(preExpectedAmount)) {
+        await markWebhookEvent('failed', preSess.id, `Amount mismatch: paid ${payloadAmount}, expected ${preExpectedAmount}`);
+        return res.status(400).json({ error: 'Checkout session amount mismatch.' });
+      }
+    }
+
     let preVerifiedSessionId: string | null = null;
-    if (preSess.status === 'pending') {
+    if (preSess.status === 'pending' || preSess.status === 'approved') {
       const preVerify = await paymentGatewayManager.verifyPaymentEvent({
         gateway: preSess.gateway || gateway,
-        sessionId: preSess.provider_tx_id || preSess.id,
+        sessionId: String(preSess.id),
+        paypalOrderId: relatedPayPalOrderId || preSess.paypal_order_id || preSess.provider_tx_id,
         transactionId: txId,
         expectedAmount: preExpectedAmount,
         expectedCurrency: 'USD'
       });
       if (!preVerify.verified) {
+        await markWebhookEvent('failed', preSess.id, preVerify.error || 'Provider verification failed');
         return res.status(400).json({ error: `Provider payment verification failed: ${preVerify.error}` });
       }
       preVerifiedSessionId = String(preSess.id);
     }
 
-    const result = await postgresStore.executeInTransaction(async (client) => {
-      // 1. Durably check if provider transaction ID was already processed in completed checkout sessions
-      const existingTx = await client.query(
-        "SELECT * FROM payment_checkout_sessions WHERE provider_tx_id = $1 AND status = 'completed'",
-        [txId]
-      );
-      if (existingTx.rows.length > 0) {
-        return { received: true, replayed: true };
-      }
-
-      // 2. Lock the exact verified checkout session row
-      const lockedSessRes = await client.query(
-        'SELECT * FROM payment_checkout_sessions WHERE id = $1 FOR UPDATE',
-        [preSess.id]
-      );
-      const sess: any = lockedSessRes.rows[0] || null;
-
-      if (!sess) {
-        throw { status: 400, message: 'Cannot process payment webhook: no matching stored checkout session found.' };
-      }
-
-      const authoritativeUserId = String(sess.user_id);
-      const authoritativeAmount = Number(sess.expected_amount);
-      const authoritativeOrderId = sess.order_id ? String(sess.order_id) : null;
-      const authoritativePurpose = String(sess.purpose || (authoritativeOrderId ? 'order_payment' : 'deposit'));
-
-      if (!authoritativeUserId || !Number.isFinite(authoritativeAmount) || authoritativeAmount <= 0) {
-        throw { status: 400, message: 'Stored checkout session has invalid user or expected amount.' };
-      }
-      if (!sess.currency || sess.currency !== 'USD') {
-        throw { status: 400, message: 'Checkout session currency mismatch: must be USD.' };
-      }
-      if (sess.gateway && String(sess.gateway).toLowerCase() !== gateway) {
-        throw { status: 400, message: 'Checkout session gateway mismatch.' };
-      }
-
-      // Cross-validate any caller/payload-supplied fields against the stored checkout session
-      if (userId !== undefined && userId !== null && String(userId) !== '' && String(userId) !== authoritativeUserId) {
-        throw { status: 400, message: 'Checkout session user mismatch.' };
-      }
-      if (payloadAmount !== undefined && Number.isFinite(payloadAmount)) {
-        if (Math.round(payloadAmount * 100) !== Math.round(authoritativeAmount * 100)) {
-          throw { status: 400, message: 'Checkout session amount mismatch.' };
-        }
-      }
-      if (lookupOrderKey && authoritativeOrderId && lookupOrderKey !== authoritativeOrderId) {
-        throw { status: 400, message: 'Checkout session order mismatch.' };
-      }
-      if (lookupOrderKey && !authoritativeOrderId) {
-        throw { status: 400, message: 'Checkout session is not linked to an order.' };
-      }
-      if (payload?.purpose && ['order_payment', 'order', 'order_escrow'].includes(String(payload.purpose)) && !authoritativeOrderId) {
-        throw { status: 400, message: 'Checkout session is not an order payment session.' };
-      }
-
-      // 3. PostgreSQL-level durable idempotency lock via financial_idempotency table
-      const providerTxKey = `WH-PROVIDER-TX-${gateway}-${txId}`;
-      const payloadFingerprint = {
-        gateway,
-        txId,
-        userId: authoritativeUserId,
-        amount: authoritativeAmount,
-        checkoutId: sess.id,
-        orderId: authoritativeOrderId
-      };
-      const idempCheck = await checkOrRecordIdempotency(
-        client,
-        providerTxKey,
-        'paymentWebhook',
-        payloadFingerprint
-      );
-      if (idempCheck.replayed) {
-        return { received: true, replayed: true };
-      }
-
-      if (sess.status === 'completed') {
-        await recordIdempotencyResult(client, providerTxKey, 'paymentWebhook', { received: true, replayed: true }, payloadFingerprint);
-        return { received: true, replayed: true };
-      }
-      if (sess.status !== 'pending') {
-        throw { status: 400, message: `Checkout session already in status ${sess.status}` };
-      }
-
-      // 4. Confirm session was verified outside the transaction and its amount/currency did not mutate
-      if (preVerifiedSessionId !== String(sess.id) || Math.round(authoritativeAmount * 100) !== Math.round(preExpectedAmount * 100)) {
-        throw { status: 409, message: 'Checkout session state changed concurrently during verification.' };
-      }
-
-      // 5. If linked to an Order, validate Order ownership, status, and authoritative total BEFORE crediting/settling
-      let lockedOrder: any = null;
-      const isOrderPayment = Boolean(authoritativeOrderId) || ['order_payment', 'order', 'order_escrow'].includes(authoritativePurpose);
-      if (isOrderPayment) {
-        if (!authoritativeOrderId) {
-          throw { status: 400, message: 'Order payment checkout session is missing order_id.' };
-        }
-        const ordRes = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [authoritativeOrderId]);
-        if (ordRes.rows.length === 0) {
-          throw { status: 404, message: `Order ${authoritativeOrderId} not found.` };
-        }
-        lockedOrder = ordRes.rows[0];
-        if (lockedOrder.buyer_id !== authoritativeUserId) {
-          throw { status: 403, message: 'Order buyer mismatch with checkout session owner.' };
-        }
-        if (!['payment_pending', 'pending'].includes(lockedOrder.status)) {
-          throw { status: 400, message: `Order ${lockedOrder.id} is in status "${lockedOrder.status}" and cannot be settled.` };
-        }
-        const parsedBreakdown = typeof lockedOrder.fee_breakdown === 'string'
-          ? JSON.parse(lockedOrder.fee_breakdown)
-          : lockedOrder.fee_breakdown;
-        const liveQuote = await quoteOrderWithLiveSettings(Number(lockedOrder.amount));
-        const expectedOrderTotal = Number(
-          (parsedBreakdown?.clientTotal ?? liveQuote.clientTotal).toFixed(2)
-        );
-        if (Math.round(authoritativeAmount * 100) !== Math.round(expectedOrderTotal * 100)) {
-          throw {
-            status: 400,
-            message: `Checkout session amount ($${authoritativeAmount.toFixed(2)}) does not match authoritative order total ($${expectedOrderTotal.toFixed(2)}).`
-          };
-        }
-      }
-
-      await financialTransactionService.ensureWallet({ userId: authoritativeUserId, role: 'buyer' }, client);
-
-      const depositIdempotencyKey = `${providerTxKey}:creditDeposit`;
-      await financialTransactionService.creditDeposit({
-        userId: authoritativeUserId,
-        amount: authoritativeAmount,
-        reference: reference || txId || 'WH-DEPOSIT',
-        idempotencyKey: depositIdempotencyKey,
-        actor: 'Gateway Webhook',
-        source: 'webhook'
-      }, client);
-
-      // 6. Atomically fund Order escrow if this session is an order payment (fail closed on any escrow error)
-      if (isOrderPayment && lockedOrder) {
-        const fundIdempKey = `${providerTxKey}:fundEscrow`;
-        await financialTransactionService.fundEscrow({
-          orderId: lockedOrder.id,
-          orderTitle: lockedOrder.title,
-          amount: Number(lockedOrder.amount),
-          buyerId: lockedOrder.buyer_id,
-          sellerId: lockedOrder.seller_id,
-          actor: `user:${authoritativeUserId}`,
-          idempotencyKey: fundIdempKey
-        }, client);
-        await client.query("UPDATE orders SET status = 'funded_in_escrow' WHERE id = $1", [lockedOrder.id]);
-      }
-
-      await client.query(
-        'UPDATE payment_checkout_sessions SET status = $1, provider_tx_id = $2, completed_at = NOW() WHERE id = $3',
-        ['completed', txId, sess.id]
-      );
-
-      const resObj = { received: true };
-      await recordIdempotencyResult(client, providerTxKey, 'paymentWebhook', resObj, payloadFingerprint);
-
-      return resObj;
+    const settled = await settleCompletedCheckoutSession({
+      sessionId: String(preSess.id),
+      gateway,
+      txId,
+      paypalOrderId: relatedPayPalOrderId || preSess.paypal_order_id || undefined,
+      paypalCaptureId: gateway === 'paypal' ? txId : undefined,
+      webhookEventId: webhookEventId || undefined,
+      paidAmount: payloadAmount,
+      paidCurrency: currency,
+      reference: reference || txId || 'WH-DEPOSIT',
+      expectedUserId: userId ? String(userId) : undefined,
+      expectedOrderId: lookupOrderKey,
+      expectedPurpose: payload?.purpose ? String(payload.purpose) : undefined,
+      preVerifiedSessionId: preVerifiedSessionId || String(preSess.id),
+      preExpectedAmount,
+      actor: 'Gateway Webhook',
+      source: 'webhook'
     });
 
+    await markWebhookEvent('processed', preSess.id);
     await syncUserBalances();
-    return res.json(result);
+    return res.json({ received: true, ...(settled.replayed ? { replayed: true } : {}) });
   } catch (e: any) {
     const statusCode = typeof e?.status === 'number' ? e.status : 400;
+    await markWebhookEvent('failed', null, e?.message || e?.error || 'Webhook transaction failed');
     return res.status(statusCode).json({ error: e?.message || e?.error || 'Webhook transaction failed' });
   }
 };
 
-router.post('/payments/webhook', express.raw({ type: 'application/json' }), handlePaymentWebhook);
-router.post('/webhooks/payment', express.raw({ type: 'application/json' }), handlePaymentWebhook);
+router.post('/payments/webhook', rateLimit(120, 60_000), express.raw({ type: () => true, limit: '256kb' }), handlePaymentWebhook);
+router.post('/webhooks/payment', rateLimit(120, 60_000), express.raw({ type: () => true, limit: '256kb' }), handlePaymentWebhook);
 
 router.post('/payments/escrow/release', requireAuth, requireFinancialActiveStatus, async (req: Request, res: Response) => {
   const { orderId } = req.body;

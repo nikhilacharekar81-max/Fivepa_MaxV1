@@ -63,7 +63,10 @@ const WEAK_GATEWAY_KEY_PLACEHOLDERS = new Set([
   'production_gateway_key'
 ]);
 
-const EPHEMERAL_DEV_GATEWAY_KEY = crypto.randomBytes(32);
+const DETERMINISTIC_DEV_GATEWAY_KEY = crypto
+  .createHash('sha256')
+  .update(process.env.JWT_SECRET || process.env.DATABASE_URL || 'fivepa-local-dev-gateway-encryption-key-v1')
+  .digest();
 
 function hasLowEntropyKey(key: string): boolean {
   const trimmed = key.trim();
@@ -139,10 +142,46 @@ function getEncryptionKey(): Buffer {
   if (isProd) {
     assertProductionGatewayEncryptionKey();
   }
-  return EPHEMERAL_DEV_GATEWAY_KEY;
+  return DETERMINISTIC_DEV_GATEWAY_KEY;
 }
 
 const GATEWAY_FETCH_TIMEOUT_MS = 10_000;
+
+export function resolveValidatedAppUrl(): string {
+  const isProd = INIT_IS_PRODUCTION || process.env.NODE_ENV === 'production' || resolveIsProduction(import.meta.url);
+  const rawUrl = (process.env.APP_URL || '').trim();
+  const isPlaceholder = !rawUrl || rawUrl === 'MY_APP_URL' || rawUrl === 'YOUR_APP_URL';
+
+  if (isPlaceholder) {
+    if (isProd) {
+      throw new Error('FATAL: APP_URL environment variable must be configured with an https:// URL in production.');
+    }
+    return 'http://localhost:3000';
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`Invalid APP_URL configuration ("${rawUrl}"). Must be a valid absolute URL.`);
+  }
+
+  if (isProd && parsed.protocol !== 'https:') {
+    throw new Error(`Invalid APP_URL protocol ("${parsed.protocol}") in production. APP_URL must use https://.`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Unsupported APP_URL protocol ("${parsed.protocol}").`);
+  }
+
+  return rawUrl.replace(/\/$/, '');
+}
+
+export function resolvePayPalEnv(): 'production' | 'sandbox' {
+  const explicitMode = (process.env.PAYPAL_MODE || '').trim().toLowerCase();
+  if (explicitMode === 'live' || explicitMode === 'production') return 'production';
+  if (explicitMode === 'sandbox' || explicitMode === 'test') return 'sandbox';
+  return process.env.NODE_ENV === 'production' ? 'production' : 'sandbox';
+}
 
 export function encryptSecret(plaintext: string): string {
   if (!plaintext || plaintext.trim() === '') return '';
@@ -208,9 +247,17 @@ export class PaymentGatewayManager {
           try {
             conf.clientSecret = decryptSecret(conf.clientSecret);
           } catch (err) {
-            console.error('[PaymentGateway] Resetting unreadable gateway credential on load:', (err as Error).message);
+            console.error('[PaymentGateway] Resetting unreadable gateway clientSecret on load:', (err as Error).message);
             conf.clientSecret = '';
             conf.enabled = false;
+          }
+        }
+        if (conf.webhookId && conf.webhookId.startsWith('enc:gcm:')) {
+          try {
+            conf.webhookId = decryptSecret(conf.webhookId);
+          } catch (err) {
+            console.error('[PaymentGateway] Resetting unreadable gateway webhookId on load:', (err as Error).message);
+            conf.webhookId = '';
           }
         }
         return conf;
@@ -260,24 +307,73 @@ export class PaymentGatewayManager {
     return this.state;
   }
 
-  public getGateway(gatewayName: 'paypal' | 'stripe' | 'razorpay', env: 'production' | 'sandbox' = 'sandbox'): GatewayConfig {
+  public getGateway(gatewayName: 'paypal' | 'stripe' | 'razorpay', env?: 'production' | 'sandbox'): GatewayConfig {
     if (Date.now() - this.lastRefreshedAt > 5000) {
       void this.refreshFromDatabase(false);
     }
-    return this.state[env]?.[gatewayName];
+    const resolvedEnv = env || (gatewayName === 'paypal' ? resolvePayPalEnv() : (process.env.NODE_ENV === 'production' ? 'production' : 'sandbox'));
+    const stored = this.state[resolvedEnv]?.[gatewayName] || { ...DEFAULT_GATEWAY };
+
+    if (gatewayName === 'paypal') {
+      const envClientId = (process.env.PAYPAL_CLIENT_ID || '').trim();
+      const envClientSecret = (process.env.PAYPAL_CLIENT_SECRET || '').trim();
+      const envWebhookId = (process.env.PAYPAL_WEBHOOK_ID || '').trim();
+      const clientId = stored.clientId || envClientId;
+      const clientSecret = stored.clientSecret || envClientSecret;
+      const webhookId = stored.webhookId || envWebhookId;
+      const enabled = stored.enabled || Boolean(envClientId && envClientSecret);
+      return {
+        ...stored,
+        enabled,
+        clientId,
+        clientSecret,
+        webhookId
+      };
+    }
+
+    return stored;
+  }
+
+  public resolveActiveGatewayName(preferred?: string): 'paypal' | 'stripe' | 'razorpay' {
+    const env: 'production' | 'sandbox' = process.env.NODE_ENV === 'production' ? 'production' : 'sandbox';
+    const normPref = String(preferred || '').trim().toLowerCase();
+    if (normPref === 'paypal' || normPref === 'stripe' || normPref === 'razorpay') {
+      const prefGw = this.getGateway(normPref, normPref === 'paypal' ? resolvePayPalEnv() : env);
+      if (prefGw && prefGw.enabled && prefGw.clientSecret) {
+        return normPref;
+      }
+    }
+    const candidates: Array<'paypal' | 'stripe' | 'razorpay'> = ['paypal', 'stripe', 'razorpay'];
+    for (const name of candidates) {
+      const gw = this.getGateway(name, name === 'paypal' ? resolvePayPalEnv() : env);
+      if (gw && gw.enabled && gw.primary && gw.clientSecret) return name;
+    }
+    for (const name of candidates) {
+      const gw = this.getGateway(name, name === 'paypal' ? resolvePayPalEnv() : env);
+      if (gw && gw.enabled && gw.clientSecret) return name;
+    }
+    if (normPref === 'paypal' || normPref === 'stripe' || normPref === 'razorpay') {
+      return normPref;
+    }
+    return 'paypal';
   }
 
   public getEncryptedState(): PaymentGatewaysState {
+    const encryptGw = (gw: GatewayConfig): GatewayConfig => ({
+      ...gw,
+      clientSecret: encryptSecret(gw.clientSecret),
+      webhookId: encryptSecret(gw.webhookId)
+    });
     return {
       production: {
-        paypal: { ...this.state.production.paypal, clientSecret: encryptSecret(this.state.production.paypal.clientSecret) },
-        stripe: { ...this.state.production.stripe, clientSecret: encryptSecret(this.state.production.stripe.clientSecret) },
-        razorpay: { ...this.state.production.razorpay, clientSecret: encryptSecret(this.state.production.razorpay.clientSecret) }
+        paypal: encryptGw(this.state.production.paypal),
+        stripe: encryptGw(this.state.production.stripe),
+        razorpay: encryptGw(this.state.production.razorpay)
       },
       sandbox: {
-        paypal: { ...this.state.sandbox.paypal, clientSecret: encryptSecret(this.state.sandbox.paypal.clientSecret) },
-        stripe: { ...this.state.sandbox.stripe, clientSecret: encryptSecret(this.state.sandbox.stripe.clientSecret) },
-        razorpay: { ...this.state.sandbox.razorpay, clientSecret: encryptSecret(this.state.sandbox.razorpay.clientSecret) }
+        paypal: encryptGw(this.state.sandbox.paypal),
+        stripe: encryptGw(this.state.sandbox.stripe),
+        razorpay: encryptGw(this.state.sandbox.razorpay)
       }
     };
   }
@@ -303,11 +399,17 @@ export class PaymentGatewayManager {
       if (!secret || secret.trim() === '') return '';
       return '••••••••••••••••';
     };
+    const maskWebhook = (whId: string) => {
+      if (!whId || whId.trim() === '') return '';
+      const trimmed = whId.trim();
+      if (trimmed.length <= 4) return '••••••••';
+      return `••••••••${trimmed.slice(-4)}`;
+    };
 
     const maskEnv = (envGw: EnvironmentGateways): EnvironmentGateways => ({
-      paypal: { ...envGw.paypal, clientSecret: maskSecret(envGw.paypal.clientSecret) },
-      stripe: { ...envGw.stripe, clientSecret: maskSecret(envGw.stripe.clientSecret) },
-      razorpay: { ...envGw.razorpay, clientSecret: maskSecret(envGw.razorpay.clientSecret) }
+      paypal: { ...envGw.paypal, clientSecret: maskSecret(envGw.paypal.clientSecret), webhookId: maskWebhook(envGw.paypal.webhookId) },
+      stripe: { ...envGw.stripe, clientSecret: maskSecret(envGw.stripe.clientSecret), webhookId: maskWebhook(envGw.stripe.webhookId) },
+      razorpay: { ...envGw.razorpay, clientSecret: maskSecret(envGw.razorpay.clientSecret), webhookId: maskWebhook(envGw.razorpay.webhookId) }
     });
 
     return {
@@ -338,6 +440,20 @@ export class PaymentGatewayManager {
       }
     }
 
+    let webhookId = current.webhookId;
+    if (updates.webhookId !== undefined) {
+      const trimmedWh = String(updates.webhookId ?? '').trim();
+      if (trimmedWh === '') {
+        webhookId = '';
+      } else if (!trimmedWh.includes('••••')) {
+        if (trimmedWh.startsWith('enc:gcm:')) {
+          webhookId = decryptSecret(trimmedWh);
+        } else {
+          webhookId = trimmedWh;
+        }
+      }
+    }
+
     const nextPrimary = updates.primary !== undefined ? Boolean(updates.primary) : current.primary;
 
     if (nextPrimary) {
@@ -350,7 +466,7 @@ export class PaymentGatewayManager {
       enabled: updates.enabled !== undefined ? Boolean(updates.enabled) : current.enabled,
       clientId: updates.clientId !== undefined ? String(updates.clientId).trim() : current.clientId,
       clientSecret: secret,
-      webhookId: updates.webhookId !== undefined ? String(updates.webhookId).trim() : current.webhookId,
+      webhookId,
       primary: nextPrimary
     };
 
@@ -360,12 +476,12 @@ export class PaymentGatewayManager {
     }
 
     await this.saveToDatabase();
-    return this.state[env];
+    return this.getMaskedState()[env];
   }
 
   public async verifyWebhookSignature(params: { gateway?: string; headers: Record<string, any>; rawBody: Buffer | string }): Promise<boolean> {
     const gateway = (params.gateway || 'stripe').toLowerCase();
-    const env = process.env.NODE_ENV === 'production' ? 'production' : 'sandbox';
+    const env = gateway === 'paypal' ? resolvePayPalEnv() : (process.env.NODE_ENV === 'production' ? 'production' : 'sandbox');
     const gw = this.getGateway(gateway as any, env);
     const webhookSecret = gw?.webhookId;
 
@@ -430,71 +546,71 @@ export class PaymentGatewayManager {
     } else if (gateway === 'paypal') {
       // Genuine PayPal REST API Webhook Signature Verification
       if (gw && gw.enabled && gw.clientId && gw.clientSecret && gw.webhookId) {
-        try {
-          const authAlgo = params.headers['paypal-auth-algo'];
-          const certUrl = params.headers['paypal-cert-url'];
-          const transmissionId = params.headers['paypal-transmission-id'];
-          const transmissionSig = params.headers['paypal-transmission-sig'];
-          const transmissionTime = params.headers['paypal-transmission-time'];
+        const authAlgo = params.headers['paypal-auth-algo'];
+        const certUrl = params.headers['paypal-cert-url'];
+        const transmissionId = params.headers['paypal-transmission-id'];
+        const transmissionSig = params.headers['paypal-transmission-sig'];
+        const transmissionTime = params.headers['paypal-transmission-time'];
 
-          if (!transmissionId || !transmissionSig || !certUrl || !authAlgo || !transmissionTime) {
-            return false;
-          }
-
-          const parsedTransmissionMs = Date.parse(String(transmissionTime));
-          if (!Number.isFinite(parsedTransmissionMs) || Math.abs(Date.now() - parsedTransmissionMs) > 5 * 60 * 1000) {
-            return false;
-          }
-
-          let webhookEventObj: any;
+        if (transmissionId && transmissionSig && certUrl && authAlgo && transmissionTime) {
           try {
-            webhookEventObj = JSON.parse(bodyStr);
-          } catch {
+            const parsedTransmissionMs = Date.parse(String(transmissionTime));
+            if (!Number.isFinite(parsedTransmissionMs)) {
+              return false;
+            }
+
+            let webhookEventObj: any;
+            try {
+              webhookEventObj = JSON.parse(bodyStr);
+            } catch {
+              return false;
+            }
+
+            const paypalHost = env === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
+            const tokenRes = await fetch(`${paypalHost}/v1/oauth2/token`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`,
+                'Content-Type': 'application/x-www-form-urlencoded'
+              },
+              body: 'grant_type=client_credentials',
+              signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
+            });
+
+            if (!tokenRes.ok) return false;
+            const tokenData: any = await tokenRes.json();
+
+            const verifyRes = await fetch(`${paypalHost}/v1/notifications/verify-webhook-signature`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${tokenData.access_token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                auth_algo: String(authAlgo),
+                cert_url: String(certUrl),
+                transmission_id: String(transmissionId),
+                transmission_sig: String(transmissionSig),
+                transmission_time: String(transmissionTime),
+                webhook_id: gw.webhookId,
+                webhook_event: webhookEventObj
+              }),
+              signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
+            });
+
+            if (!verifyRes.ok) return false;
+            const verifyData: any = await verifyRes.json();
+            return verifyData.verification_status === 'SUCCESS';
+          } catch (err) {
+            console.error('[PaymentGateway] PayPal webhook signature verification API call failed:', (err as Error).message);
             return false;
           }
-
-          const paypalHost = env === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
-          const tokenRes = await fetch(`${paypalHost}/v1/oauth2/token`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`,
-              'Content-Type': 'application/x-www-form-urlencoded'
-            },
-            body: 'grant_type=client_credentials',
-            signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
-          });
-
-          if (!tokenRes.ok) return false;
-          const tokenData: any = await tokenRes.json();
-
-          const verifyRes = await fetch(`${paypalHost}/v1/notifications/verify-webhook-signature`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${tokenData.access_token}`,
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              auth_algo: authAlgo,
-              cert_url: certUrl,
-              transmission_id: transmissionId,
-              transmission_sig: transmissionSig,
-              transmission_time: transmissionTime,
-              webhook_id: gw.webhookId,
-              webhook_event: webhookEventObj
-            }),
-            signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
-          });
-
-          if (!verifyRes.ok) return false;
-          const verifyData: any = await verifyRes.json();
-          return verifyData.verification_status === 'SUCCESS';
-        } catch (err) {
-          console.error('[PaymentGateway] PayPal webhook signature verification API call failed:', err);
-          return false;
         }
       }
 
-      if (process.env.NODE_ENV === 'production') return false;
+      if (process.env.NODE_ENV === 'production' || INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url)) {
+        return false;
+      }
       const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
       if (!simAllowed || !webhookSecret) return false;
 
@@ -509,16 +625,236 @@ export class PaymentGatewayManager {
     return false;
   }
 
+  public async capturePayPalOrder(params: {
+    paypalOrderId: string;
+    expectedSessionId?: string;
+    expectedAmount: number;
+    expectedCurrency?: string;
+  }): Promise<{
+    verified: boolean;
+    paypalOrderId: string;
+    captureId: string;
+    status: string;
+    amountValue: string;
+    currencyCode: string;
+    customId: string;
+    invoiceId: string;
+    error?: string;
+  }> {
+    const isProd = process.env.NODE_ENV === 'production' || INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url);
+    const env = resolvePayPalEnv();
+    const gw = this.getGateway('paypal', env);
+    const hasCredentials = Boolean(gw && gw.enabled && gw.clientId && gw.clientSecret);
+    const expectedCurr = (params.expectedCurrency || 'USD').toUpperCase();
+
+    if (!hasCredentials || params.paypalOrderId.startsWith('sess_sim_')) {
+      if (isProd) {
+        return {
+          verified: false,
+          paypalOrderId: params.paypalOrderId,
+          captureId: '',
+          status: 'FAILED',
+          amountValue: '0.00',
+          currencyCode: expectedCurr,
+          customId: '',
+          invoiceId: '',
+          error: 'PayPal gateway credentials missing in production.'
+        };
+      }
+      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
+      if (simAllowed) {
+        const simCaptureId = `CAP_SIM_${params.paypalOrderId.replace(/[^a-zA-Z0-9]/g, '').slice(-16).toUpperCase()}`;
+        return {
+          verified: true,
+          paypalOrderId: params.paypalOrderId,
+          captureId: simCaptureId,
+          status: 'COMPLETED',
+          amountValue: params.expectedAmount.toFixed(2),
+          currencyCode: expectedCurr,
+          customId: params.expectedSessionId || '',
+          invoiceId: params.expectedSessionId || ''
+        };
+      }
+      return {
+        verified: false,
+        paypalOrderId: params.paypalOrderId,
+        captureId: '',
+        status: 'FAILED',
+        amountValue: '0.00',
+        currencyCode: expectedCurr,
+        customId: '',
+        invoiceId: '',
+        error: 'PayPal credentials are not configured and PAYMENT_SIMULATION_ENABLED is not enabled.'
+      };
+    }
+
+    try {
+      const paypalHost = env === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
+      const tokenRes = await fetch(`${paypalHost}/v1/oauth2/token`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: 'grant_type=client_credentials',
+        signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
+      });
+      if (!tokenRes.ok) {
+        return {
+          verified: false,
+          paypalOrderId: params.paypalOrderId,
+          captureId: '',
+          status: 'FAILED',
+          amountValue: '0.00',
+          currencyCode: expectedCurr,
+          customId: '',
+          invoiceId: '',
+          error: `PayPal OAuth token request failed (${tokenRes.status}).`
+        };
+      }
+      const tokenData: any = await tokenRes.json();
+      const accessToken = tokenData.access_token;
+
+      // Attempt capture directly; if already captured (422 ORDER_ALREADY_CAPTURED), fetch the order resource
+      let orderData: any = null;
+      const captureRes = await fetch(`${paypalHost}/v2/checkout/orders/${encodeURIComponent(params.paypalOrderId)}/capture`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation'
+        },
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
+      });
+
+      if (captureRes.ok) {
+        orderData = await captureRes.json();
+      } else {
+        const getRes = await fetch(`${paypalHost}/v2/checkout/orders/${encodeURIComponent(params.paypalOrderId)}`, {
+          headers: { 'Authorization': `Bearer ${accessToken}` },
+          signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
+        });
+        if (!getRes.ok) {
+          return {
+            verified: false,
+            paypalOrderId: params.paypalOrderId,
+            captureId: '',
+            status: 'FAILED',
+            amountValue: '0.00',
+            currencyCode: expectedCurr,
+            customId: '',
+            invoiceId: '',
+            error: `PayPal capture failed (${captureRes.status}) and order lookup returned ${getRes.status}.`
+          };
+        }
+        orderData = await getRes.json();
+      }
+
+      const unit = orderData?.purchase_units?.[0];
+      const capture = unit?.payments?.captures?.[0];
+      const orderStatus = String(orderData?.status || '').toUpperCase();
+      const captureStatus = String(capture?.status || '').toUpperCase();
+
+      if (orderStatus !== 'COMPLETED' || captureStatus !== 'COMPLETED' || !capture?.id) {
+        return {
+          verified: false,
+          paypalOrderId: String(orderData?.id || params.paypalOrderId),
+          captureId: String(capture?.id || ''),
+          status: captureStatus || orderStatus || 'PENDING',
+          amountValue: String(capture?.amount?.value || unit?.amount?.value || '0.00'),
+          currencyCode: String(capture?.amount?.currency_code || unit?.amount?.currency_code || '').toUpperCase(),
+          customId: String(capture?.custom_id || unit?.custom_id || unit?.reference_id || ''),
+          invoiceId: String(capture?.invoice_id || unit?.invoice_id || ''),
+          error: `PayPal order/capture is not COMPLETED (order: ${orderStatus}, capture: ${captureStatus || 'NONE'}).`
+        };
+      }
+
+      const amountValue = String(capture?.amount?.value ?? unit?.amount?.value ?? '');
+      const currencyCode = String(capture?.amount?.currency_code ?? unit?.amount?.currency_code ?? '').toUpperCase();
+      const customId = String(capture?.custom_id || unit?.custom_id || unit?.reference_id || '');
+      const invoiceId = String(capture?.invoice_id || unit?.invoice_id || '');
+
+      if (params.expectedSessionId && customId && customId !== params.expectedSessionId && invoiceId && invoiceId !== params.expectedSessionId) {
+        return {
+          verified: false,
+          paypalOrderId: String(orderData.id),
+          captureId: String(capture.id),
+          status: captureStatus,
+          amountValue,
+          currencyCode,
+          customId,
+          invoiceId,
+          error: `PayPal custom_id/reference_id (${customId}) does not match expected session (${params.expectedSessionId}).`
+        };
+      }
+
+      if (currencyCode !== expectedCurr) {
+        return {
+          verified: false,
+          paypalOrderId: String(orderData.id),
+          captureId: String(capture.id),
+          status: captureStatus,
+          amountValue,
+          currencyCode,
+          customId,
+          invoiceId,
+          error: `PayPal currency mismatch: expected ${expectedCurr}, got ${currencyCode || 'missing'}.`
+        };
+      }
+
+      const paidCents = Math.round(Number(amountValue) * 100);
+      const expectedCents = Math.round(Number(params.expectedAmount) * 100);
+      if (!Number.isFinite(paidCents) || paidCents !== expectedCents) {
+        return {
+          verified: false,
+          paypalOrderId: String(orderData.id),
+          captureId: String(capture.id),
+          status: captureStatus,
+          amountValue,
+          currencyCode,
+          customId,
+          invoiceId,
+          error: `PayPal amount mismatch: expected $${params.expectedAmount.toFixed(2)}, got $${amountValue}.`
+        };
+      }
+
+      return {
+        verified: true,
+        paypalOrderId: String(orderData.id),
+        captureId: String(capture.id),
+        status: captureStatus,
+        amountValue,
+        currencyCode,
+        customId,
+        invoiceId
+      };
+    } catch (err: any) {
+      return {
+        verified: false,
+        paypalOrderId: params.paypalOrderId,
+        captureId: '',
+        status: 'ERROR',
+        amountValue: '0.00',
+        currencyCode: expectedCurr,
+        customId: '',
+        invoiceId: '',
+        error: `PayPal capture exception: ${err.message}`
+      };
+    }
+  }
+
   public async verifyPaymentEvent(params: {
     gateway: 'stripe' | 'paypal' | 'razorpay' | string;
     sessionId?: string;
+    paypalOrderId?: string;
     transactionId?: string;
     expectedAmount: number;
     expectedCurrency: string;
-  }): Promise<{ verified: boolean; error?: string }> {
-    const isProd = process.env.NODE_ENV === 'production';
-    const env = isProd ? 'production' : 'sandbox';
+  }): Promise<{ verified: boolean; error?: string; captureId?: string; paypalOrderId?: string }> {
+    const isProd = process.env.NODE_ENV === 'production' || INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url);
     const gwName = (params.gateway || 'stripe').toLowerCase() as 'stripe' | 'paypal' | 'razorpay';
+    const env = gwName === 'paypal' ? resolvePayPalEnv() : (isProd ? 'production' : 'sandbox');
     const gw = this.getGateway(gwName, env);
     const hasCredentials = gw && gw.enabled && gw.clientSecret;
 
@@ -528,7 +864,7 @@ export class PaymentGatewayManager {
       }
       const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
       if (simAllowed) {
-        return { verified: true };
+        return { verified: true, captureId: params.transactionId, paypalOrderId: params.paypalOrderId };
       }
       return { verified: false, error: `Gateway credentials missing and simulation disabled.` };
     }
@@ -559,14 +895,11 @@ export class PaymentGatewayManager {
         if (liveCurrency !== params.expectedCurrency.toUpperCase()) {
           return { verified: false, error: `Currency mismatch: expected ${params.expectedCurrency}, got ${liveCurrency}` };
         }
-        if (Math.abs(liveAmount - params.expectedAmount) > 0.01) {
+        if (Math.round(liveAmount * 100) !== Math.round(params.expectedAmount * 100)) {
           return { verified: false, error: `Amount mismatch: expected ${params.expectedAmount}, got ${liveAmount}` };
         }
         return { verified: true };
       } else if (gwName === 'paypal') {
-        const idToLookup = params.sessionId || params.transactionId;
-        if (!idToLookup) return { verified: false, error: 'Missing order or transaction ID for PayPal verification.' };
-
         const paypalHost = env === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
         const tokenRes = await fetch(`${paypalHost}/v1/oauth2/token`, {
           method: 'POST',
@@ -579,71 +912,76 @@ export class PaymentGatewayManager {
         });
         if (!tokenRes.ok) return { verified: false, error: 'PayPal OAuth handshake failed.' };
         const tokenData: any = await tokenRes.json();
+        const accessToken = tokenData.access_token;
 
-        const orderRes = await fetch(`${paypalHost}/v2/checkout/orders/${encodeURIComponent(idToLookup)}`, {
-          headers: { 'Authorization': `Bearer ${tokenData.access_token}` },
+        // 1. If we have a capture ID (transactionId from PAYMENT.CAPTURE.COMPLETED), verify the capture resource directly
+        if (params.transactionId && !params.transactionId.startsWith('chk_')) {
+          const capRes = await fetch(`${paypalHost}/v2/payments/captures/${encodeURIComponent(params.transactionId)}`, {
+            headers: { 'Authorization': `Bearer ${accessToken}` },
+            signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
+          });
+          if (capRes.ok) {
+            const capData: any = await capRes.json();
+            if (String(capData.status || '').toUpperCase() !== 'COMPLETED') {
+              return { verified: false, error: `PayPal capture status is ${capData.status}. Payment must be COMPLETED.` };
+            }
+            const capCurr = String(capData.amount?.currency_code || '').toUpperCase();
+            const capVal = Number(capData.amount?.value);
+            if (capCurr !== params.expectedCurrency.toUpperCase()) {
+              return { verified: false, error: `PayPal capture currency mismatch: ${capCurr}` };
+            }
+            if (!Number.isFinite(capVal) || Math.round(capVal * 100) !== Math.round(params.expectedAmount * 100)) {
+              return { verified: false, error: `PayPal capture amount mismatch: ${capData.amount?.value}` };
+            }
+            const customId = capData.custom_id || capData.invoice_id;
+            if (params.sessionId && customId && customId !== params.sessionId) {
+              return { verified: false, error: `PayPal capture custom_id mismatch: expected ${params.sessionId}, got ${customId}` };
+            }
+            const relatedOrderId = capData.supplementary_data?.related_ids?.order_id || params.paypalOrderId;
+            return { verified: true, captureId: String(capData.id), paypalOrderId: relatedOrderId ? String(relatedOrderId) : undefined };
+          }
+        }
+
+        // 2. Otherwise verify by PayPal Order ID
+        const orderIdToLookup = params.paypalOrderId || (params.sessionId && !params.sessionId.startsWith('chk_') ? params.sessionId : undefined) || params.transactionId;
+        if (!orderIdToLookup) return { verified: false, error: 'Missing PayPal order or capture ID for verification.' };
+
+        const orderRes = await fetch(`${paypalHost}/v2/checkout/orders/${encodeURIComponent(orderIdToLookup)}`, {
+          headers: { 'Authorization': `Bearer ${accessToken}` },
           signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
         if (!orderRes.ok) return { verified: false, error: `PayPal order lookup failed (${orderRes.status})` };
-        let orderData: any = await orderRes.json();
-
-        if (orderData.status === 'APPROVED') {
-          const captureRes = await fetch(`${paypalHost}/v2/checkout/orders/${encodeURIComponent(idToLookup)}/capture`, {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${tokenData.access_token}`,
-              'Content-Type': 'application/json'
-            },
-            signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
-          });
-          if (!captureRes.ok) {
-            let isAlreadyCaptured = false;
-            try {
-              const errJson: any = await captureRes.json();
-              const errStr = JSON.stringify(errJson);
-              if (captureRes.status === 422 && (errStr.includes('ORDER_ALREADY_CAPTURED') || errStr.includes('ORDER_COMPLETED'))) {
-                isAlreadyCaptured = true;
-              }
-            } catch {
-              // ignore parse errors
-            }
-
-            // Re-fetch order status to verify if it was already captured concurrently or earlier
-            const recheckRes = await fetch(`${paypalHost}/v2/checkout/orders/${encodeURIComponent(idToLookup)}`, {
-              headers: { 'Authorization': `Bearer ${tokenData.access_token}` },
-              signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
-            });
-            if (recheckRes.ok) {
-              orderData = await recheckRes.json();
-            } else if (!isAlreadyCaptured) {
-              return { verified: false, error: `PayPal order capture failed (${captureRes.status})` };
-            }
-          } else {
-            orderData = await captureRes.json();
-          }
-        }
+        const orderData: any = await orderRes.json();
 
         if (orderData.status !== 'COMPLETED') {
           return { verified: false, error: `PayPal order status is ${orderData.status}. Payment must be COMPLETED.` };
         }
 
-        // Verify purchase_units[0].reference_id matches FivePA checkout session if sessionId provided
-        const refId = orderData.purchase_units?.[0]?.reference_id || orderData.purchase_units?.[0]?.custom_id;
-        if (params.sessionId && refId && refId !== params.sessionId) {
+        const unit = orderData.purchase_units?.[0];
+        const capture = unit?.payments?.captures?.[0];
+        if (capture && String(capture.status || '').toUpperCase() !== 'COMPLETED') {
+          return { verified: false, error: `PayPal capture status is ${capture.status}.` };
+        }
+
+        const refId = capture?.custom_id || unit?.custom_id || unit?.reference_id || unit?.invoice_id;
+        if (params.sessionId && params.sessionId.startsWith('chk_') && refId && refId !== params.sessionId) {
           return { verified: false, error: `PayPal reference mismatch: expected session ${params.sessionId}, got ${refId}` };
         }
 
-        const unit = orderData.purchase_units?.[0]?.amount ||
-          orderData.purchase_units?.[0]?.payments?.captures?.[0]?.amount;
-        if (!unit) return { verified: false, error: 'PayPal purchase unit amount missing.' };
+        const amtObj = capture?.amount || unit?.amount;
+        if (!amtObj) return { verified: false, error: 'PayPal purchase unit amount missing.' };
 
-        if ((unit.currency_code || '').toUpperCase() !== params.expectedCurrency.toUpperCase()) {
-          return { verified: false, error: `PayPal currency mismatch: ${unit.currency_code}` };
+        if (String(amtObj.currency_code || '').toUpperCase() !== params.expectedCurrency.toUpperCase()) {
+          return { verified: false, error: `PayPal currency mismatch: ${amtObj.currency_code}` };
         }
-        if (Math.abs(Number(unit.value) - params.expectedAmount) > 0.01) {
-          return { verified: false, error: `PayPal amount mismatch: ${unit.value}` };
+        if (Math.round(Number(amtObj.value) * 100) !== Math.round(params.expectedAmount * 100)) {
+          return { verified: false, error: `PayPal amount mismatch: ${amtObj.value}` };
         }
-        return { verified: true };
+        return {
+          verified: true,
+          captureId: capture?.id ? String(capture.id) : undefined,
+          paypalOrderId: orderData?.id ? String(orderData.id) : undefined
+        };
       } else if (gwName === 'razorpay') {
         const idToLookup = params.transactionId || params.sessionId;
         if (!idToLookup) return { verified: false, error: 'Missing transaction ID for Razorpay verification.' };
@@ -665,7 +1003,7 @@ export class PaymentGatewayManager {
         if (liveCurrency !== params.expectedCurrency.toUpperCase()) {
           return { verified: false, error: `Razorpay currency mismatch: ${liveCurrency}` };
         }
-        if (Math.abs(liveAmount - params.expectedAmount) > 0.01) {
+        if (Math.round(liveAmount * 100) !== Math.round(params.expectedAmount * 100)) {
           return { verified: false, error: `Razorpay amount mismatch: ${liveAmount}` };
         }
         return { verified: true };
@@ -687,7 +1025,7 @@ export class PaymentGatewayManager {
     else if (lowerMethod.includes('stripe')) gwName = 'stripe';
     else if (lowerMethod.includes('razorpay') || lowerMethod.includes('upi')) gwName = 'razorpay';
 
-    const gw = gwName ? this.getGateway(gwName, env) : null;
+    const gw = gwName ? this.getGateway(gwName, gwName === 'paypal' ? resolvePayPalEnv() : env) : null;
     const hasCredentials = gw && gw.enabled && gw.clientSecret;
 
     if (!hasCredentials) {
@@ -732,7 +1070,8 @@ export class PaymentGatewayManager {
         }
         return { verified: true, providerTxId: data.id, status: 'settled' };
       } else if (gwName === 'paypal' && gw && gw.clientId && gw.clientSecret) {
-        const paypalHost = env === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
+        const paypalEnv = resolvePayPalEnv();
+        const paypalHost = paypalEnv === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
         const tokenRes = await fetch(`${paypalHost}/v1/oauth2/token`, {
           method: 'POST',
           headers: {
@@ -797,10 +1136,11 @@ export class PaymentGatewayManager {
     userId: string;
     orderId?: string;
     purpose?: string;
+    description?: string;
     checkoutId: string;
   }): Promise<{ providerSessionId: string; checkoutUrl: string }> {
-    const isProd = process.env.NODE_ENV === 'production';
-    const env = isProd ? 'production' : 'sandbox';
+    const isProd = process.env.NODE_ENV === 'production' || INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url);
+    const env = params.gateway === 'paypal' ? resolvePayPalEnv() : (isProd ? 'production' : 'sandbox');
     
     if (params.currency !== 'USD') {
       throw new Error('Only USD currency is supported for payment checkout sessions.');
@@ -818,14 +1158,14 @@ export class PaymentGatewayManager {
       }
       const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
       if (!simAllowed) {
-        throw new Error(`Payment gateway "${params.gateway.toUpperCase()}" credentials missing. Set gateway credentials or configure PAYMENT_SIMULATION_ENABLED=true for explicit development simulation.`);
+        throw new Error(`Payment gateway "${params.gateway.toUpperCase()}" credentials missing. Set gateway credentials in Super Admin -> Payment Gateways (or PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET in .env) or set PAYMENT_SIMULATION_ENABLED=true.`);
       }
       const simProviderSessionId = `sess_sim_${params.gateway}_${crypto.randomBytes(12).toString('hex')}`;
-      const checkoutUrl = `/checkout/pay?session_id=${params.checkoutId}&gateway=${params.gateway}&amount=${params.amount}&simulated=true`;
+      const checkoutUrl = `/checkout/pay?session_id=${encodeURIComponent(params.checkoutId)}&gateway=${encodeURIComponent(params.gateway)}&amount=${params.amount.toFixed(2)}&token=${encodeURIComponent(simProviderSessionId)}&simulated=true`;
       return { providerSessionId: simProviderSessionId, checkoutUrl };
     }
 
-    const baseAppUrl = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+    const baseAppUrl = resolveValidatedAppUrl();
 
     try {
       if (params.gateway === 'stripe') {
@@ -837,12 +1177,12 @@ export class PaymentGatewayManager {
           },
           body: new URLSearchParams({
             'mode': 'payment',
-            'success_url': `${baseAppUrl}/checkout/success?session_id=${params.checkoutId}`,
-            'cancel_url': `${baseAppUrl}/checkout/cancel?session_id=${params.checkoutId}`,
+            'success_url': `${baseAppUrl}/checkout/success?session_id=${encodeURIComponent(params.checkoutId)}`,
+            'cancel_url': `${baseAppUrl}/checkout/cancel?session_id=${encodeURIComponent(params.checkoutId)}`,
             'client_reference_id': params.checkoutId,
             'line_items[0][price_data][currency]': 'usd',
             'line_items[0][price_data][unit_amount]': String(Math.round(params.amount * 100)),
-            'line_items[0][price_data][product_data][name]': `FivePA ${params.purpose || 'Deposit'}`,
+            'line_items[0][price_data][product_data][name]': params.description || `FivePA ${params.purpose || 'Deposit'}`,
             'line_items[0][quantity]': '1',
             'metadata[userId]': params.userId,
             'metadata[checkoutId]': params.checkoutId
@@ -856,7 +1196,7 @@ export class PaymentGatewayManager {
         const data: any = await response.json();
         return {
           providerSessionId: data.id,
-          checkoutUrl: data.url || `/checkout/pay?session_id=${params.checkoutId}`
+          checkoutUrl: data.url || `/checkout/pay?session_id=${encodeURIComponent(params.checkoutId)}`
         };
       } else if (params.gateway === 'paypal') {
         const paypalHost = env === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
@@ -869,33 +1209,52 @@ export class PaymentGatewayManager {
           body: 'grant_type=client_credentials',
           signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
-        if (!tokenRes.ok) throw new Error('PayPal auth handshake failed.');
+        if (!tokenRes.ok) {
+          throw new Error(`PayPal OAuth handshake failed (HTTP ${tokenRes.status}). Check PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET.`);
+        }
         const tokenData: any = await tokenRes.json();
+        const itemDescription = (params.description || `FivePA ${params.purpose === 'deposit' ? 'Wallet Deposit' : 'Marketplace Order Payment'}`).slice(0, 120);
         const orderRes = await fetch(`${paypalHost}/v2/checkout/orders`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${tokenData.access_token}`,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'PayPal-Request-Id': params.checkoutId
           },
           body: JSON.stringify({
             intent: 'CAPTURE',
             purchase_units: [{
               reference_id: params.checkoutId,
-              amount: { currency_code: 'USD', value: params.amount.toFixed(2) }
+              custom_id: params.checkoutId,
+              invoice_id: params.checkoutId,
+              description: itemDescription,
+              amount: {
+                currency_code: 'USD',
+                value: params.amount.toFixed(2)
+              }
             }],
             application_context: {
-              return_url: `${baseAppUrl}/checkout/success?session_id=${params.checkoutId}`,
-              cancel_url: `${baseAppUrl}/checkout/cancel?session_id=${params.checkoutId}`
+              brand_name: 'FivePA',
+              shipping_preference: 'NO_SHIPPING',
+              user_action: 'PAY_NOW',
+              return_url: `${baseAppUrl}/checkout/success?session_id=${encodeURIComponent(params.checkoutId)}`,
+              cancel_url: `${baseAppUrl}/checkout/cancel?session_id=${encodeURIComponent(params.checkoutId)}`
             }
           }),
           signal: AbortSignal.timeout(GATEWAY_FETCH_TIMEOUT_MS)
         });
-        if (!orderRes.ok) throw new Error('PayPal order creation failed.');
+        if (!orderRes.ok) {
+          const errBody = await orderRes.text().catch(() => '');
+          throw new Error(`PayPal order creation failed (HTTP ${orderRes.status}): ${errBody.slice(0, 200)}`);
+        }
         const orderData: any = await orderRes.json();
-        const approveLink = orderData.links?.find((l: any) => l.rel === 'approve')?.href;
+        const approveLink = orderData.links?.find((l: any) => l.rel === 'approve' || l.rel === 'payer-action')?.href;
+        if (!orderData.id || !approveLink) {
+          throw new Error('PayPal order response did not contain an order ID and approval URL.');
+        }
         return {
-          providerSessionId: orderData.id,
-          checkoutUrl: approveLink || `/checkout/pay?session_id=${params.checkoutId}`
+          providerSessionId: String(orderData.id),
+          checkoutUrl: String(approveLink)
         };
       } else if (params.gateway === 'razorpay') {
         const authHeader = `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`;
@@ -920,7 +1279,7 @@ export class PaymentGatewayManager {
         const data: any = await response.json();
         return {
           providerSessionId: data.id,
-          checkoutUrl: `/checkout/pay?session_id=${params.checkoutId}&razorpay_order_id=${data.id}`
+          checkoutUrl: `/checkout/pay?session_id=${encodeURIComponent(params.checkoutId)}&razorpay_order_id=${encodeURIComponent(data.id)}`
         };
       } else {
         throw new Error(`Unsupported payment provider "${params.gateway}".`);

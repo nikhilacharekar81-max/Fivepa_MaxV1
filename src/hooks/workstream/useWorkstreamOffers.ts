@@ -16,6 +16,10 @@ export interface CreateOfferInput {
 export interface OfferActionResult {
   ok: boolean;
   error?: string;
+  code?: string;
+  requiredAmount?: number;
+  availableBalance?: number;
+  shortfall?: number;
   order?: any;
   newOrder?: any;
 }
@@ -74,7 +78,16 @@ export function useWorkstreamOffers(orderId: string | undefined, refreshKey?: st
     try {
       const res = await fetch(url, { method: 'POST', headers: headers(), body: body ? JSON.stringify(body) : undefined });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) return { ok: false, error: data.error || 'Something went wrong.' };
+      if (!res.ok) {
+        return {
+          ok: false,
+          error: data.error || 'Something went wrong.',
+          code: data.code,
+          requiredAmount: data.requiredAmount,
+          availableBalance: data.availableBalance,
+          shortfall: data.shortfall
+        };
+      }
       if (data.offer) {
         setOffers(prev => {
           const exists = prev.some(o => o.id === data.offer.id);

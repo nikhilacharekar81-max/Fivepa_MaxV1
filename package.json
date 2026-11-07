@@ -9,7 +9,9 @@
     "start": "NODE_ENV=production tsx server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "paypal:smoke": "tsx scripts/paypal-sandbox-smoke.ts",
+    "test:paypal": "tsx tests/paypal-webhook.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.12",

@@ -1,5 +1,6 @@
 import { Order, UserAccount } from '../../types';
 import { fetchWithRetry } from '../../utils/fetchRetry';
+import { initiateGatewayCheckout } from '../../utils/gatewayCheckout';
 
 export interface UseWorkstreamActionsProps {
   currentUser?: UserAccount | null;
@@ -53,6 +54,30 @@ export function useWorkstreamActions({
         return;
       } else {
         const err = await res.json().catch(() => ({}));
+        if (
+          res.status === 400 &&
+          (err.code === 'INSUFFICIENT_FUNDS' || /insufficient funds/i.test(String(err.error || '')))
+        ) {
+          const topUpAmount = Number(err.shortfall || err.requiredAmount || data.amount);
+          await initiateGatewayCheckout({
+            amount: topUpAmount,
+            purpose: 'order_payment',
+            description: `WorkStream Order: ${data.title}`,
+            metadata: {
+              returnAction: 'create_gig_order',
+              returnPath: '/workstream',
+              title: data.title,
+              gigOrderPayload: {
+                title: data.title,
+                sellerId: data.partnerId,
+                amount: data.amount,
+                dueDate,
+                requirements: data.requirements
+              }
+            }
+          });
+          return;
+        }
         console.warn('Backend order creation returned status', res.status, err);
       }
     } catch (err) {
