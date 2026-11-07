@@ -36,6 +36,7 @@ import {
 } from '../services/authService.js';
 import { handlePayoutRequest } from '../services/payoutService.js';
 import { ensureWallet } from '../services/orderService.js';
+import { siteSettings } from '../domains/admin/siteSettings.js';
 
 export const authRouter = Router();
 
@@ -44,6 +45,11 @@ const isTestEnv = process.env.NODE_ENV === 'test';
 // 1. Signup Endpoint
 authRouter.post('/signup', rateLimit(20, 3_600_000), async (req: Request, res: Response) => {
   try {
+    const secSettings = siteSettings.getSettings().security;
+    if (secSettings && secSettings.allowNewRegistrations === false) {
+      return res.status(403).json({ error: 'New user registrations are currently disabled by platform administration.' });
+    }
+
     const { email, password, confirmPassword, mobile, name } = req.body || {};
     if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
       return apiError(res, 'Email and password are required.');

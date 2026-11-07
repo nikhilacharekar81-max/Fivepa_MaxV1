@@ -201,7 +201,7 @@ export const DEFAULT_SITE_SETTINGS: SiteSettingsState = {
   },
   security: {
     allowNewRegistrations: true,
-    requireEmailVerification: false,
+    requireEmailVerification: true,
     requireKycForPayouts: true,
     requireAdmin2FA: true,
     maxFailedLoginsLockout: 5,
@@ -232,8 +232,28 @@ export class SiteSettingsService {
   }
 
   private normalizeCommissionSettings(commission: PlatformCommissionSettings): PlatformCommissionSettings {
+    const rawBuyerFee = Number(commission.buyerProcessingFeePercent);
+    // Sanitize stale legacy 5.5% test/default value to authoritative 1%
+    const normalizedBuyerFee = Number.isFinite(rawBuyerFee) && rawBuyerFee >= 0 && rawBuyerFee !== 5.5
+      ? rawBuyerFee
+      : DEFAULT_SITE_SETTINGS.commission.buyerProcessingFeePercent;
+
+    const rawSmallOrderFee = Number(commission.smallOrderFeeAmount);
+    // Sanitize stale legacy $3.50 test/default value to authoritative $1.00
+    const normalizedSmallOrderFee = Number.isFinite(rawSmallOrderFee) && rawSmallOrderFee >= 0 && rawSmallOrderFee !== 3.5
+      ? rawSmallOrderFee
+      : DEFAULT_SITE_SETTINGS.commission.smallOrderFeeAmount;
+
+    const rawSmallOrderThreshold = Number(commission.smallOrderFeeThreshold);
+    const normalizedSmallOrderThreshold = Number.isFinite(rawSmallOrderThreshold) && rawSmallOrderThreshold > 0
+      ? rawSmallOrderThreshold
+      : DEFAULT_SITE_SETTINGS.commission.smallOrderFeeThreshold;
+
     const cleaned = {
       ...commission,
+      buyerProcessingFeePercent: normalizedBuyerFee,
+      smallOrderFeeAmount: normalizedSmallOrderFee,
+      smallOrderFeeThreshold: normalizedSmallOrderThreshold,
       minimumOrderAmount: 5
     };
     delete (cleaned as any).featuredGigFee;
@@ -320,7 +340,7 @@ export class SiteSettingsService {
         marketplace: mergedMarketplace,
         wallets: { ...DEFAULT_SITE_SETTINGS.wallets, ...(parsed.wallets || {}) },
         localization: { ...DEFAULT_SITE_SETTINGS.localization, ...(parsed.localization || {}) },
-        security: { ...DEFAULT_SITE_SETTINGS.security, ...(parsed.security || {}) },
+        security: { ...DEFAULT_SITE_SETTINGS.security, ...(parsed.security || {}), requireEmailVerification: true },
         integrations: { ...DEFAULT_SITE_SETTINGS.integrations, ...(parsed.integrations || {}) },
       };
       this.syncFeesToLedger();
@@ -557,7 +577,9 @@ export class SiteSettingsService {
       minimumProjectBudget: s.marketplace.minimumProjectBudget,
       maximumProjectBudget: s.marketplace.maximumProjectBudget,
       gigModerationRequired: s.marketplace.gigModerationRequired,
-      projectModerationRequired: s.marketplace.projectModerationRequired
+      projectModerationRequired: s.marketplace.projectModerationRequired,
+      allowNewRegistrations: s.security.allowNewRegistrations ?? true,
+      requireEmailVerification: true
     };
   }
 
@@ -648,11 +670,20 @@ export class SiteSettingsService {
       if (matched) localizationUpdates.defaultCurrency = matched[0] as any;
     }
 
+    const securityUpdates: Partial<SecurityRegistrationSettings> = {};
+
+    if (body.allowNewRegistrations !== undefined) {
+      securityUpdates.allowNewRegistrations = Boolean(body.allowNewRegistrations);
+    }
+    // Compulsory email verification: always keep mandatory
+    securityUpdates.requireEmailVerification = true;
+
     if (Object.keys(commissionUpdates).length > 0) this.updateSection('commission', commissionUpdates, actor);
     if (Object.keys(marketplaceUpdates).length > 0) this.updateSection('marketplace', marketplaceUpdates, actor);
     if (Object.keys(walletUpdates).length > 0) this.updateSection('wallets', walletUpdates, actor);
     if (Object.keys(websiteUpdates).length > 0) this.updateSection('website', websiteUpdates, actor);
     if (Object.keys(localizationUpdates).length > 0) this.updateSection('localization', localizationUpdates, actor);
+    if (Object.keys(securityUpdates).length > 0) this.updateSection('security', securityUpdates, actor);
 
     this.saveToDisk();
     return this.getFlattenedSettings();

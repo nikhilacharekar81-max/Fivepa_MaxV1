@@ -60,6 +60,7 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
   const [supportEmail, setSupportEmail] = useState('support@workperhour.com');
   const [currency, setCurrency] = useState('USD ($) - United States Dollar');
   const [maintenanceMode, setMaintenanceMode] = useState<boolean>(false);
+  const [allowNewRegistrations, setAllowNewRegistrations] = useState<boolean>(true);
 
   // Live Simulator State
   const [simOrderAmount, setSimOrderAmount] = useState<number>(500);
@@ -99,6 +100,7 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
           if (data.brandName) setBrandName(data.brandName);
           if (data.supportEmail) setSupportEmail(data.supportEmail);
           if (data.maintenanceMode !== undefined) setMaintenanceMode(Boolean(data.maintenanceMode));
+          if (data.allowNewRegistrations !== undefined) setAllowNewRegistrations(Boolean(data.allowNewRegistrations));
         }
       })
       .catch(err => console.error('Failed to fetch admin settings:', err))
@@ -147,7 +149,8 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
           brandName,
           supportEmail,
           currency,
-          maintenanceMode
+          maintenanceMode,
+          allowNewRegistrations
         })
       });
 
@@ -202,6 +205,7 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
     setBrandName('WorkPerHour');
     setSupportEmail('support@workperhour.com');
     setMaintenanceMode(false);
+    setAllowNewRegistrations(true);
     alert('Settings reset to default values.');
   };
 
@@ -671,6 +675,49 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
                   >
                     {maintenanceMode ? 'Turn Off' : 'Enable'}
                   </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">User Registration Gateway</label>
+                <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                  <div>
+                    <div className="text-xs font-bold text-slate-800">
+                      {allowNewRegistrations ? 'Open (New user registrations enabled)' : 'Disabled (New signups blocked with HTTP 403)'}
+                    </div>
+                    <div className="text-[10px] text-slate-500">
+                      Controls whether new users can register. When disabled, existing users can still log in normally.
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setAllowNewRegistrations(!allowNewRegistrations)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                      allowNewRegistrations ? 'bg-emerald-600 text-white' : 'bg-amber-600 text-white'
+                    }`}
+                  >
+                    {allowNewRegistrations ? 'Active (Open)' : 'Disabled (Closed)'}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Email Verification Policy</label>
+                <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0" />
+                    <div>
+                      <div className="text-xs font-bold text-slate-800">
+                        Compulsory Email Verification: Mandatory & Active
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        All new registrations must verify via a 6-digit email OTP. Cannot be disabled to guarantee marketplace integrity.
+                      </div>
+                    </div>
+                  </div>
+                  <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-md text-[10px] font-bold tracking-wider uppercase">
+                    Compulsory
+                  </span>
                 </div>
               </div>
             </div>
