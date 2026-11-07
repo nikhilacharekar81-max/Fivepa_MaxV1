@@ -331,8 +331,7 @@ export async function handleLogin(req: Request, res: Response) {
     return res.status(403).json({
       error: 'Email address has not been verified. Please verify your email before logging in.',
       requiresVerification: true,
-      email: user.email,
-      mockEmailCode: !IS_PRODUCTION ? newCode : undefined
+      email: user.email
     });
   }
 
@@ -401,8 +400,7 @@ export async function handleLogin(req: Request, res: Response) {
         message: isAdminRole
           ? 'Admin login requires an email verification code. Code sent to your registered admin email.'
           : 'New device detected. Please provide the email verification code sent to your email.',
-        deviceId,
-        mockEmailCode: !IS_PRODUCTION ? newCode : undefined
+        deviceId
       });
     }
 
