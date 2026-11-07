@@ -10,18 +10,24 @@ import { broadcastNotificationToUser, clients } from '../websocket.js';
 import { WebSocket } from 'ws';
 import { IS_PRODUCTION } from '../middleware/auth.js';
 
-const EMAIL_API_KEY = process.env.RESEND_API_KEY;
-const EMAIL_FROM = process.env.EMAIL_FROM || 'WorkPerHour <onboarding@resend.dev>';
-export const EMAIL_DELIVERY_ENABLED = Boolean(EMAIL_API_KEY);
+export const EMAIL_DELIVERY_ENABLED = Boolean(process.env.RESEND_API_KEY);
 const APP_URL = (process.env.APP_URL || '').replace(/\/$/, '');
 
+export function getEmailSender(): string {
+  const envFrom = (process.env.EMAIL_FROM || '').trim();
+  if (envFrom) return envFrom;
+  return 'WorkPerHour <onboarding@resend.dev>';
+}
+
 export function deliverSecurityCode(target: string, type: string, code: string) {
-  if (EMAIL_DELIVERY_ENABLED && target.includes('@')) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (apiKey && target.includes('@')) {
+    const fromAddress = getEmailSender();
     fetch('https://api.resend.com/emails', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${EMAIL_API_KEY}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        from: EMAIL_FROM,
+        from: fromAddress,
         to: [target],
         subject: 'Your WorkPerHour verification code',
         text: `Your verification code is ${code}. It expires in 30 minutes. If you did not request it, ignore this email.`
@@ -41,11 +47,13 @@ export function deliverAdminCode(email: string, code: string) {
 }
 
 export function sendEmail(to: string, subject: string, text: string) {
-  if (!EMAIL_DELIVERY_ENABLED || !to || !to.includes('@')) return;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey || !to || !to.includes('@')) return;
+  const fromAddress = getEmailSender();
   fetch('https://api.resend.com/emails', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${EMAIL_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: EMAIL_FROM, to: [to], subject, text })
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: fromAddress, to: [to], subject, text })
   })
     .then(r => { if (!r.ok) console.error('[email] provider rejected message, status', r.status); })
     .catch(err => console.error('[email] send failed:', err?.message || err));

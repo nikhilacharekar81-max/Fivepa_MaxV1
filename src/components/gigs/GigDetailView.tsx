@@ -54,7 +54,14 @@ export const GigDetailView: React.FC<GigDetailViewProps> = ({
   const [isPuppetVideoPlaying, setIsPuppetVideoPlaying] = useState<boolean>(false);
 
   // Fee quote from the server: the same math the ledger applies when the order is funded.
-  const [quote, setQuote] = useState<{ gigPrice: number; serviceFee: number; smallOrderFee: number; clientTotal: number; config?: { buyerFeePercent: number; smallOrderThreshold: number } } | null>(null);
+  const [quote, setQuote] = useState<{
+    gigPrice: number;
+    serviceFee: number;
+    smallOrderFee: number;
+    clientTotal: number;
+    buyerFeePercent?: number;
+    config?: { buyerFeePercent: number; smallOrderThreshold: number };
+  } | null>(null);
   useEffect(() => {
     let cancelled = false;
     const qs = new URLSearchParams({ gigId: currentGig.id });
@@ -344,7 +351,7 @@ export const GigDetailView: React.FC<GigDetailViewProps> = ({
                         {q && (
                           <div className="pt-4 border-t border-slate-100 space-y-1.5 text-xs text-fiverr-muted">
                             <div className="flex justify-between"><span>Order{selectedExtras.length > 0 ? ' + extras' : ''}</span><span>{money(q.gigPrice)}</span></div>
-                            <div className="flex justify-between"><span>Service fee ({q.config?.buyerFeePercent ?? 5.5}%)</span><span>{money(q.serviceFee)}</span></div>
+                            <div className="flex justify-between"><span>Service fee ({q.buyerFeePercent ?? q.config?.buyerFeePercent ?? 1}%)</span><span>{money(q.serviceFee)}</span></div>
                             {q.smallOrderFee > 0 && (
                               <div className="flex justify-between"><span>Small order fee (under ${q.config?.smallOrderThreshold ?? 200})</span><span>{money(q.smallOrderFee)}</span></div>
                             )}

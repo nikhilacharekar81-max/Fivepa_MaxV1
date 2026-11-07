@@ -201,73 +201,26 @@ export function checkRecoveryCode(query: string, code: unknown, markVerified = f
   return 'ok';
 }
 
-const loginAttempts = new Map<string, { count: number; resetAt: number }>();
-
 export async function handleLogin(req: Request, res: Response) {
   const clientIp = (req.ip || req.socket.remoteAddress || 'unknown-client').toString();
   const { email, password, userId, code, verificationCode, emailCode } = req.body || {};
   const lookupEmail = typeof email === 'string' && email.trim() ? email.trim().toLowerCase() : null;
   const lookupId = typeof userId === 'string' && userId.trim() ? userId.trim() : null;
 
-  const now = Date.now();
-  const cooldownMs = process.env.NODE_ENV === 'test' ? 2000 : 60000;
-  const attemptKeys = [clientIp, ...(lookupEmail || lookupId ? ['acct:' + (lookupEmail || lookupId)] : [])];
-
-  if (isPostgresEnabled()) {
-    try {
-      const pool = postgresStore.getPool();
-      for (const key of attemptKeys) {
-        const attemptsRes = await pool.query(
-          `SELECT attempts FROM auth_verification_codes WHERE email = $1 AND type = 'login_attempts' AND expires_at > NOW()`,
-          [`login:${key}`]
-        );
-        if (attemptsRes.rows.length > 0 && Number(attemptsRes.rows[0].attempts || 0) >= 5) {
-          return res.status(429).json({ error: 'Too many failed login attempts. Please try again later.' });
-        }
-      }
-    } catch (err) {
-      console.error('[Auth] Database error checking login rate limit:', err);
-      if (IS_PRODUCTION) {
-        return res.status(500).json({ error: 'Security verification database query failed.' });
-      }
-    }
-  } else {
-    for (const key of attemptKeys) {
-      const attemptRecord = loginAttempts.get(key);
-      if (!attemptRecord) continue;
-      if (now < attemptRecord.resetAt && attemptRecord.count >= 5) {
-        return res.status(429).json({ error: 'Too many failed login attempts. Please try again later.' });
-      }
-      if (now >= attemptRecord.resetAt) {
-        loginAttempts.delete(key);
-      }
-    }
-  }
-
   async function recordFailedLogin() {
     if (isPostgresEnabled()) {
       try {
         const pool = postgresStore.getPool();
-        const expiresAt = new Date(Date.now() + cooldownMs);
-        for (const key of attemptKeys) {
-          await pool.query(
-            `INSERT INTO auth_verification_codes (email, code, type, attempts, last_resend_at, expires_at, created_at)
-             VALUES ($1, '0', 'login_attempts', 1, $2, $3, NOW())
-             ON CONFLICT (email, type) DO UPDATE SET attempts = auth_verification_codes.attempts + 1, expires_at = $3`,
-            [`login:${key}`, Date.now(), expiresAt]
-          );
-        }
+        const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        const auditTarget = lookupEmail || lookupId || clientIp;
+        await pool.query(
+          `INSERT INTO auth_verification_codes (email, code, type, attempts, last_resend_at, expires_at, created_at)
+           VALUES ($1, '0', 'login_attempts', 1, $2, $3, NOW())
+           ON CONFLICT (email, type) DO UPDATE SET attempts = auth_verification_codes.attempts + 1, expires_at = $3`,
+          [`login:${auditTarget}`, Date.now(), expiresAt]
+        );
       } catch (err) {
-        console.error('[Auth] Failed to persist failed login attempt:', err);
-        if (IS_PRODUCTION) {
-          throw new Error('Security verification rate-limiting write failed in production.');
-        }
-      }
-    } else {
-      for (const key of attemptKeys) {
-        const record = loginAttempts.get(key) || { count: 0, resetAt: Date.now() + cooldownMs };
-        record.count++;
-        loginAttempts.set(key, record);
+        console.warn('[Auth] Failed to record failed login audit event:', err);
       }
     }
   }
@@ -468,13 +421,12 @@ export async function handleLogin(req: Request, res: Response) {
     }
   }
 
-  for (const key of attemptKeys) loginAttempts.delete(key);
-  if (isPostgresEnabled() && attemptKeys.length > 0) {
+  if (isPostgresEnabled()) {
     try {
-      const dbAttemptKeys = attemptKeys.map(k => k.startsWith('login:') ? k : `login:${k}`);
+      const auditTarget = user.email || user.id;
       await postgresStore.getPool().query(
-        `DELETE FROM auth_verification_codes WHERE email = ANY($1::text[]) AND type = 'login_attempts'`,
-        [dbAttemptKeys]
+        `DELETE FROM auth_verification_codes WHERE email = $1 AND type = 'login_attempts'`,
+        [`login:${auditTarget}`]
       );
     } catch {}
   }

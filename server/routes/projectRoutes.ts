@@ -276,6 +276,7 @@ projectRouter.post('/projects', requireAuth, requireActiveStatus, async (req: Re
     const createdAt = new Date().toISOString().split('T')[0];
 
     const maxHires = Math.max(1, Math.min(50, Number(req.body.maxHires ?? req.body.freelancersNeeded ?? 1) || 1));
+    const isModerationRequired = Boolean(activeSettings.marketplace?.projectModerationRequired);
     const newProj: Project = {
       id: newProjId,
       buyerId: caller.id,
@@ -290,9 +291,10 @@ projectRouter.post('/projects', requireAuth, requireActiveStatus, async (req: Re
       deadlineDays,
       proposalsCount: 0,
       createdAt,
-      status: 'open',
+      status: isModerationRequired ? 'pending' : 'open',
       featured: false,
       maxHires,
+      moderationStatus: isModerationRequired ? 'pending' : 'approved',
       ...( { freelancersNeeded: maxHires } as any )
     };
 

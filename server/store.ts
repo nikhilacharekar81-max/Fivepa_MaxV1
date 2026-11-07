@@ -1030,7 +1030,7 @@ export class PostgresAsyncStore implements StoreInterface {
       if (hasOrders) {
         // Preserve historical orders and foreign-key integrity by archiving/suspending the project
         const archRes = await client.query(
-          "UPDATE projects SET status = 'suspended', moderation_status = 'rejected', featured = FALSE, is_featured = FALSE WHERE id = $1",
+          "UPDATE projects SET status = 'suspended', moderation_status = 'rejected', featured = FALSE WHERE id = $1",
           [id]
         );
         await client.query('COMMIT');
@@ -1048,7 +1048,7 @@ export class PostgresAsyncStore implements StoreInterface {
       } catch (_fkErr) {
         await client.query('ROLLBACK TO SAVEPOINT sp_delete_project');
         const archRes = await client.query(
-          "UPDATE projects SET status = 'suspended', moderation_status = 'rejected', featured = FALSE, is_featured = FALSE WHERE id = $1",
+          "UPDATE projects SET status = 'suspended', moderation_status = 'rejected', featured = FALSE WHERE id = $1",
           [id]
         );
         await client.query('COMMIT');

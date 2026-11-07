@@ -447,6 +447,12 @@ export function requireActiveStatus(req: Request, res: Response, next: NextFunct
   if (u.status === 'restricted') {
     return res.status(403).json({ error: 'Action forbidden: Your account privileges are restricted. Please contact support.' });
   }
+
+  // Enforce Maintenance Mode: non-staff mutating operations are paused while maintenance mode is active
+  if (siteSettings.getSettings().website?.maintenanceMode && !isStaffUser(u)) {
+    return res.status(503).json({ error: 'Service temporarily in read-only maintenance mode. Please try again shortly.' });
+  }
+
   next();
 }
 

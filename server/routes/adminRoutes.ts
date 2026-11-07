@@ -967,7 +967,7 @@ export async function handleDeleteUserAccount(req: Request, res: Response) {
           [target.id]
         );
         await client.query(
-          "UPDATE projects SET status = 'suspended', moderation_status = 'rejected', featured = FALSE, is_featured = FALSE WHERE buyer_id = $1",
+          "UPDATE projects SET status = 'suspended', moderation_status = 'rejected', featured = FALSE WHERE buyer_id = $1",
           [target.id]
         );
         await client.query(
