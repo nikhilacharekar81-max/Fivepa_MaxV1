@@ -376,7 +376,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({
               { id: 'categories', label: '6. Categories & Slugs', icon: Sliders },
               { id: 'proposals', label: '7. Proposals & Bids', icon: FileText },
               { id: 'contracts', label: '8. Contracts & Milestones', icon: CheckCircle2 },
-              { id: 'payments', label: '9. Payment Gateways', icon: DollarSign },
+              { id: 'paymentGateways', label: '9. Payment Gateways (PayPal)', icon: CreditCard },
               { id: 'wallet', label: '10. Wallet & Double Ledger', icon: Wallet },
               { id: 'escrow', label: '11. Escrow Vault (14-Day)', icon: ShieldCheck },
               { id: 'disputes', label: '12. Dispute Resolution', icon: Scale },
@@ -389,7 +389,6 @@ export const AdminPage: React.FC<AdminPageProps> = ({
               { id: 'cms', label: '19. CMS & Legal Policies', icon: FileCode },
               { id: 'settings', label: '20. Site & Fee Settings', icon: Settings },
               { id: 'memberships', label: '21. Memberships & Quotas', icon: Award },
-              { id: 'paymentGateways', label: 'Payment Gateways', icon: CreditCard },
               { id: 'activity', label: '22. Activity & Audit Trail', icon: Activity }
             ].map(item => {
               const IconComp = item.icon;
@@ -877,8 +876,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
           <AdminMembershipsQuotasModule />
         )}
 
-        {/* MODULE 22: PAYMENT GATEWAYS */}
-        {adminTab === 'paymentGateways' && (
+        {/* MODULE 9: PAYMENT GATEWAYS */}
+        {(adminTab === 'paymentGateways' || adminTab === 'payments') && (
           <AdminPaymentGatewaysModule />
         )}
 

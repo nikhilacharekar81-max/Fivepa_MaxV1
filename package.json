@@ -12,7 +12,8 @@
     "lint": "tsc --noEmit",
     "paypal:smoke": "tsx scripts/paypal-sandbox-smoke.ts",
     "test:paypal": "tsx tests/paypal-webhook.test.ts",
-    "test:paypal:env": "tsx tests/paypal-environment-switch.test.ts"
+    "test:paypal:env": "tsx tests/paypal-environment-switch.test.ts",
+    "test:paypal:conc": "tsx tests/paypal-concurrency.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.12",

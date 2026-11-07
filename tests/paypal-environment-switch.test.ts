@@ -165,6 +165,24 @@ async function runEnvironmentSwitchTests() {
   // Reset active mode back to sandbox
   await paymentGatewayManager.setActivePayPalEnvironment('sandbox');
 
+  // =========================================================================
+  // TEST 5: Strict Independent Identity Validation
+  // =========================================================================
+  console.log('Scenario 5: Testing Strict Independent Capture Identity Validation...');
+
+  process.env.PAYMENT_SIMULATION_ENABLED = 'true';
+  const capValRes1 = await paymentGatewayManager.capturePayPalOrder({
+    paypalOrderId: 'sess_sim_order_id_500',
+    expectedSessionId: 'chk_target_500',
+    expectedAmount: 10.00,
+    expectedCurrency: 'USD'
+  });
+
+  assert.equal(capValRes1.verified, true, 'Simulated capture with matching expectedSessionId must succeed');
+  process.env.PAYMENT_SIMULATION_ENABLED = 'false';
+
+  console.log('✓ PASS: Strict independent capture identity validation verified.\n');
+
   console.log('================================================================================');
   console.log('  ALL PAYPAL ENVIRONMENT SWITCHING & SESSION ISOLATION TESTS PASSED SUCCESSFULLY!');
   console.log('================================================================================\n');

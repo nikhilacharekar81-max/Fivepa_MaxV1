@@ -496,7 +496,20 @@ router.post('/api/admin/payment-gateways/paypal/environment', requireAdmin, asyn
       const prodGw = paymentGatewayManager.getGateway('paypal', 'production');
       if (!prodGw || !prodGw.clientId || !prodGw.clientSecret) {
         return res.status(400).json({
-          error: 'Cannot switch to PayPal Live mode: PayPal Live credentials (Client ID and Client Secret) are not saved.'
+          error: 'Cannot switch to PayPal Live mode: PayPal Live credentials (Client ID and Client Secret) are not configured.'
+        });
+      }
+      if (!prodGw.enabled) {
+        return res.status(400).json({
+          error: 'Cannot switch to PayPal Live mode: PayPal Production gateway is currently disabled in settings.'
+        });
+      }
+
+      // Execute live connection test against PayPal Live API endpoints before activating
+      const testRes = await paymentGatewayManager.testConnection('production', 'paypal');
+      if (!testRes.success) {
+        return res.status(400).json({
+          error: `Cannot switch to PayPal Live mode: Connection test failed for Production credentials. Details: ${testRes.message}`
         });
       }
     }

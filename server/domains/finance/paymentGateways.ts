@@ -328,13 +328,21 @@ export class PaymentGatewayManager {
     const stored = this.state[resolvedEnv]?.[gatewayName] || { ...DEFAULT_GATEWAY };
 
     if (gatewayName === 'paypal') {
-      const envClientId = (process.env.PAYPAL_CLIENT_ID || '').trim();
-      const envClientSecret = (process.env.PAYPAL_CLIENT_SECRET || '').trim();
-      const envWebhookId = (process.env.PAYPAL_WEBHOOK_ID || '').trim();
+      const modeEnv = (process.env.PAYPAL_MODE || '').trim().toLowerCase();
+      const isExplicitProdEnv = modeEnv === 'live' || modeEnv === 'production';
+      const isExplicitSandboxEnv = modeEnv === 'sandbox' || modeEnv === 'test';
+
+      // Fallback to legacy environment variables ONLY if environment matches or is sandbox
+      const allowEnvFallback = resolvedEnv === 'sandbox' ? !isExplicitProdEnv : isExplicitProdEnv;
+
+      const envClientId = allowEnvFallback ? (process.env.PAYPAL_CLIENT_ID || '').trim() : '';
+      const envClientSecret = allowEnvFallback ? (process.env.PAYPAL_CLIENT_SECRET || '').trim() : '';
+      const envWebhookId = allowEnvFallback ? (process.env.PAYPAL_WEBHOOK_ID || '').trim() : '';
+
       const clientId = stored.clientId || envClientId;
       const clientSecret = stored.clientSecret || envClientSecret;
       const webhookId = stored.webhookId || envWebhookId;
-      const enabled = stored.enabled || Boolean(envClientId && envClientSecret);
+      const enabled = stored.enabled || Boolean(clientId && clientSecret);
       return {
         ...stored,
         enabled,
@@ -805,18 +813,72 @@ export class PaymentGatewayManager {
       const customId = String(capture?.custom_id || unit?.custom_id || unit?.reference_id || '');
       const invoiceId = String(capture?.invoice_id || unit?.invoice_id || '');
 
-      if (params.expectedSessionId && customId && customId !== params.expectedSessionId && invoiceId && invoiceId !== params.expectedSessionId) {
-        return {
-          verified: false,
-          paypalOrderId: String(orderData.id),
-          captureId: String(capture.id),
-          status: captureStatus,
-          amountValue,
-          currencyCode,
-          customId,
-          invoiceId,
-          error: `PayPal custom_id/reference_id (${customId}) does not match expected session (${params.expectedSessionId}).`
-        };
+      if (params.expectedSessionId) {
+        const expSess = params.expectedSessionId;
+        const capCustom = String(capture?.custom_id || unit?.custom_id || '').trim();
+        const capInvoice = String(capture?.invoice_id || unit?.invoice_id || '').trim();
+        const unitRef = String(unit?.reference_id || '').trim();
+
+        if (capCustom && capCustom !== expSess) {
+          return {
+            verified: false,
+            paypalOrderId: String(orderData.id),
+            captureId: String(capture.id),
+            status: captureStatus,
+            amountValue,
+            currencyCode,
+            customId,
+            invoiceId,
+            error: `PayPal custom_id (${capCustom}) conflicts with expected session (${expSess}).`
+          };
+        }
+
+        if (capInvoice && capInvoice !== expSess) {
+          return {
+            verified: false,
+            paypalOrderId: String(orderData.id),
+            captureId: String(capture.id),
+            status: captureStatus,
+            amountValue,
+            currencyCode,
+            customId,
+            invoiceId,
+            error: `PayPal invoice_id (${capInvoice}) conflicts with expected session (${expSess}).`
+          };
+        }
+
+        if (unitRef && unitRef !== expSess && !unitRef.startsWith('default') && !unitRef.startsWith('PU_') && !unitRef.startsWith('item_')) {
+          return {
+            verified: false,
+            paypalOrderId: String(orderData.id),
+            captureId: String(capture.id),
+            status: captureStatus,
+            amountValue,
+            currencyCode,
+            customId,
+            invoiceId,
+            error: `PayPal reference_id (${unitRef}) conflicts with expected session (${expSess}).`
+          };
+        }
+
+        const matchesCustom = capCustom === expSess;
+        const matchesInvoice = capInvoice === expSess;
+        const matchesRef = unitRef === expSess;
+        const matchesOrder = String(orderData.id) === expSess || String(params.paypalOrderId) === expSess;
+
+        if (!matchesCustom && !matchesInvoice && !matchesRef && !matchesOrder) {
+          return {
+            verified: false,
+            paypalOrderId: String(orderData.id),
+            captureId: String(capture.id),
+            status: captureStatus,
+            amountValue,
+            currencyCode,
+            customId,
+            invoiceId,
+            error: `PayPal response contains no matching identity association for expected session (${expSess}).`
+          };
+        }
       }
 
       if (currencyCode !== expectedCurr) {

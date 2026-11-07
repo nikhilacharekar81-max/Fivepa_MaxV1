@@ -930,15 +930,63 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
     const checkoutId = 'chk_' + randomUUID();
     const safeMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
 
-    const activeEnv: 'production' | 'sandbox' = (req.body.environment === 'production' || req.body.environment === 'sandbox')
-      ? req.body.environment
-      : (normalizedGateway === 'paypal' ? paymentGatewayManager.getActivePayPalEnvironment() : (IS_PRODUCTION ? 'production' : 'sandbox'));
+    // PayPal environment is EXCLUSIVELY selected by trusted server configuration.
+    // Client-supplied req.body.environment is IGNORED for security to prevent environment tampering.
+    const activeEnv: 'production' | 'sandbox' = normalizedGateway === 'paypal'
+      ? paymentGatewayManager.getActivePayPalEnvironment()
+      : (IS_PRODUCTION ? 'production' : 'sandbox');
 
     if (normalizedGateway === 'paypal' && activeEnv === 'production') {
       const prodGw = paymentGatewayManager.getGateway('paypal', 'production');
       if (!prodGw || !prodGw.enabled || !prodGw.clientId || !prodGw.clientSecret) {
         return res.status(400).json({
           error: 'PayPal Live mode is active, but PayPal Live credentials (Client ID and Client Secret) are not configured in Super Admin Panel.'
+        });
+      }
+    }
+
+    // Atomic pending session check: reuse existing active pending checkout session for order payments to prevent duplicate PayPal orders
+    if (normalizedOrderId && ['order_payment', 'order', 'order_escrow'].includes(resolvedPurpose)) {
+      const activeSessRes = await pool.query(
+        `SELECT * FROM payment_checkout_sessions
+          WHERE order_id = $1::text
+            AND user_id = $2::text
+            AND gateway = $3::text
+            AND environment = $4::text
+            AND status IN ('pending', 'approved')
+            AND created_at > NOW() - INTERVAL '15 minutes'
+          ORDER BY created_at DESC LIMIT 1`,
+        [normalizedOrderId, authUserId, normalizedGateway, activeEnv]
+      );
+
+      if (activeSessRes.rows.length > 0) {
+        const activeSess = activeSessRes.rows[0];
+        const activeMeta = typeof activeSess.metadata === 'string'
+          ? (() => { try { return JSON.parse(activeSess.metadata); } catch { return {}; } })()
+          : (activeSess.metadata || {});
+
+        const activePayPalOrderId = activeSess.paypal_order_id || activeSess.provider_tx_id;
+        const activeCheckoutUrl = activeSess.gateway === 'paypal' && activePayPalOrderId
+          ? `https://www.${activeSess.environment === 'sandbox' ? 'sandbox.' : ''}paypal.com/checkoutnow?token=${activePayPalOrderId}`
+          : `/checkout/pay?session_id=${encodeURIComponent(activeSess.id)}`;
+
+        return res.json({
+          success: true,
+          replayed: true,
+          reusedPendingSession: true,
+          checkoutId: String(activeSess.id),
+          sessionId: String(activeSess.id),
+          gateway: activeSess.gateway,
+          paypalOrderId: activePayPalOrderId || undefined,
+          providerOrderId: activeSess.provider_tx_id,
+          orderId: activeSess.order_id,
+          purpose: activeSess.purpose,
+          amount: Number(activeSess.expected_amount),
+          currency: activeSess.currency || 'USD',
+          environment: activeSess.environment,
+          redirectUrl: activeCheckoutUrl,
+          checkoutUrl: activeCheckoutUrl,
+          metadata: activeMeta
         });
       }
     }
@@ -1387,7 +1435,7 @@ const handlePayPalCaptureRoute = async (req: Request, res: Response) => {
         source: 'gateway'
       });
 
-      await syncUserBalances();
+      await syncUserBalances([authUserId]);
       const bal = await financialRepository.getWalletBalance(authUserId);
 
       return res.json({
@@ -1789,7 +1837,7 @@ export const handlePaymentWebhook = async (req: Request, res: Response) => {
             idempotencyKey: `WH-REFUND-${sessRow.id}-${refundOrCapId || relatedCapId}`
           }, client);
         });
-        await syncUserBalances();
+        await syncUserBalances([String(sessRow.user_id)]);
       }
 
       await markWebhookEvent('processed', sessRow?.id || null);
@@ -2019,7 +2067,7 @@ export const handlePaymentWebhook = async (req: Request, res: Response) => {
     });
 
     await markWebhookEvent('processed', preSess.id);
-    await syncUserBalances();
+    await syncUserBalances([String(preSess.user_id)]);
     return res.json({ received: true, ...(settled.replayed ? { replayed: true } : {}) });
   } catch (e: any) {
     const statusCode = typeof e?.status === 'number' ? e.status : 400;
