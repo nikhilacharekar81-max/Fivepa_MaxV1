@@ -123,7 +123,7 @@ export const useAppData = (initialData?: any) => {
       const skipProjectsOnMount = isInitialMountPass && !isAdminOrSupport && initialHydratedFlagsRef.current.hasProjects;
       const skipCategoriesOnMount = isInitialMountPass && !isAdminOrSupport && initialHydratedFlagsRef.current.hasCategories;
 
-      let [uRes, gRes, pRes, prRes, offRes, oRes, cRes, revRes] = await Promise.all([
+      let [uRes, gRes, pRes, prRes, offRes, oRes, cRes, revRes, feeConfigRes] = await Promise.all([
         skipUsersOnMount ? Promise.resolve(null) : fetch('/api/users', reqOpt),
         skipGigsOnMount ? Promise.resolve(null) : fetch('/api/gigs', reqOpt),
         skipProjectsOnMount ? Promise.resolve(null) : fetch('/api/projects', reqOpt),
@@ -131,7 +131,8 @@ export const useAppData = (initialData?: any) => {
         token ? fetch('/api/offers', reqOpt) : Promise.resolve(null),
         token ? fetch('/api/orders', reqOpt) : Promise.resolve(null),
         skipCategoriesOnMount ? Promise.resolve(null) : fetch('/api/categories', reqOpt),
-        fetch('/api/reviews', reqOpt)
+        fetch('/api/reviews', reqOpt),
+        fetch('/api/fees/config', reqOpt)
       ]);
 
       if (oRes && oRes.status === 401 && cachedUserId && !isAdminOrSupport) {
@@ -156,6 +157,7 @@ export const useAppData = (initialData?: any) => {
       const ords = await safeJson(oRes, null);
       const categoriesData = await safeJson(cRes, null);
       const reviewsData = await safeJson(revRes, null);
+      const feeConfigData = await safeJson(feeConfigRes, null);
 
       if (Array.isArray(usersData)) setUsers(usersData);
       if (Array.isArray(gigsData)) setGigs(gigsData);
@@ -165,6 +167,15 @@ export const useAppData = (initialData?: any) => {
       if (Array.isArray(ords)) setOrders(ords);
       if (Array.isArray(categoriesData)) setCategories(categoriesData);
       if (Array.isArray(reviewsData)) setReviews(reviewsData);
+
+      if (feeConfigData) {
+        if (feeConfigData.commissionPercent !== undefined) setPlatformFee(feeConfigData.commissionPercent);
+        if (feeConfigData.clientServiceFee !== undefined) setClientServiceFee(feeConfigData.clientServiceFee);
+        else if (feeConfigData.buyerFeePercent !== undefined) setClientServiceFee(feeConfigData.buyerFeePercent);
+        if (feeConfigData.smallOrderFeeThreshold !== undefined) setSmallOrderFeeThreshold(feeConfigData.smallOrderFeeThreshold);
+        if (feeConfigData.smallOrderFeeAmount !== undefined) setSmallOrderFeeAmount(feeConfigData.smallOrderFeeAmount);
+        else if (feeConfigData.smallOrderFee !== undefined) setSmallOrderFeeAmount(feeConfigData.smallOrderFee);
+      }
 
       if (token && isAdminOrSupport) {
         const [dRes, rRes, payRes, sRes, aRes, setRes] = await Promise.all([

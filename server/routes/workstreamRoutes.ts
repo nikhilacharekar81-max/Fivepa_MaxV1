@@ -1669,7 +1669,14 @@ async function executeWorkspaceInquiryOfferAccept(
   }
 
   const offerAmount = Math.round(Number(offer.amount) * 100) / 100;
-  const minOrderAmount = 5;
+  const wsMeta = (workspace as any).metadata || {};
+  const originType = workspace.originType || wsMeta.originType || 'gig';
+  const isGigOrigin = originType === 'gig';
+  const activeSettings = siteSettings.getSettings();
+  const minOrderAmount = isGigOrigin
+    ? Number(activeSettings.marketplace?.minimumGigPrice ?? activeSettings.commission?.minimumOrderAmount ?? 5)
+    : Number(activeSettings.marketplace?.minimumProjectBudget ?? activeSettings.commission?.minimumOrderAmount ?? 5);
+
   if (!Number.isFinite(offerAmount) || offerAmount < minOrderAmount) {
     return { status: 400, body: { error: `Minimum order amount is $${minOrderAmount.toFixed(2)}.` } };
   }
@@ -1680,13 +1687,10 @@ async function executeWorkspaceInquiryOfferAccept(
   const newOrderId = 'ord_' + randomUUID().slice(0, 12);
   const now = new Date().toISOString();
   const today = now.split('T')[0];
-  const protectionDays = siteSettings.getSettings().commission.escrowProtectionDays || 14;
+  const protectionDays = activeSettings.commission?.escrowProtectionDays || 14;
   const protectionEnd = new Date(Date.now() + protectionDays * 86400000).toISOString().split('T')[0];
 
-  const wsMeta = (workspace as any).metadata || {};
-  const originType = workspace.originType || wsMeta.originType || 'gig';
   const originId = workspace.originId || wsMeta.originId;
-  const isGigOrigin = originType === 'gig';
   const orderType: 'gig' | 'project' = isGigOrigin ? 'gig' : 'project';
   const gigOrderId = orderType === 'gig' ? newOrderId : undefined;
   const projectOrderId = orderType === 'project' ? newOrderId : undefined;

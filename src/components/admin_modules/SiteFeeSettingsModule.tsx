@@ -114,6 +114,25 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
     setSaveError(null);
 
     try {
+      if (!Number.isFinite(takeRate) || takeRate < 0 || takeRate > 100) {
+        throw new Error('Freelancer commission percentage must be between 0 and 100.');
+      }
+      if (!Number.isFinite(clientServiceFee) || clientServiceFee < 0 || clientServiceFee > 100) {
+        throw new Error('Buyer fee percentage must be between 0 and 100.');
+      }
+      if (!Number.isFinite(smallOrderFeeAmount) || smallOrderFeeAmount < 0) {
+        throw new Error('Small-order fee amount must be a non-negative number.');
+      }
+      if (!Number.isFinite(smallOrderFeeThreshold) || smallOrderFeeThreshold < 0) {
+        throw new Error('Small-order threshold must be a non-negative number.');
+      }
+      if (!Number.isFinite(minGigPrice) || minGigPrice < 0) {
+        throw new Error('Minimum Gig order amount must be a non-negative number.');
+      }
+      if (!Number.isFinite(minProjectBudget) || minProjectBudget < 0) {
+        throw new Error('Minimum Project budget must be a non-negative number.');
+      }
+
       const token = getAuthToken();
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -125,18 +144,18 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
         headers,
         body: JSON.stringify({
           freelancerCommissionRate: takeRate,
-          clientServiceFee: 1,
-          buyerProcessingFeeRate: 1,
-          smallOrderFeeThreshold: 200,
-          smallOrderFeeAmount: 1,
-          smallOrderFee: 1,
+          clientServiceFee,
+          buyerProcessingFeeRate: clientServiceFee,
+          smallOrderFeeThreshold,
+          smallOrderFeeAmount,
+          smallOrderFee: smallOrderFeeAmount,
           escrowHoldDays,
           autoCompleteDays,
           autoCompleteDeliveredDays: autoCompleteDays,
           autoCompleteDeliveredEnabled: autoCompleteEnabled,
           autoCompleteEnabled,
-          minOrderAmount: 5,
-          minimumOrderAmount: 5,
+          minOrderAmount: minOrder,
+          minimumOrderAmount: minOrder,
           minPayoutThreshold: minPayout,
           minimumWithdrawal: minPayout,
           featuredGigFee,
@@ -167,7 +186,15 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
 
       if (onSettingsSaved) {
         try {
-          await Promise.resolve(onSettingsSaved({ takeRate, clientServiceFee: 1, escrowHoldDays }));
+          await Promise.resolve(onSettingsSaved({
+            takeRate,
+            clientServiceFee,
+            smallOrderFeeThreshold,
+            smallOrderFeeAmount,
+            escrowHoldDays,
+            minGigPrice,
+            minProjectBudget
+          }));
         } catch (cbErr) {
           console.warn('Settings saved successfully but background data refresh encountered an issue:', cbErr);
         }
@@ -187,6 +214,11 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
 
   const handleResetDefaults = () => {
     setTakeRate(20);
+    setClientServiceFee(1);
+    setSmallOrderFeeAmount(1);
+    setSmallOrderFeeThreshold(200);
+    setMinOrder(5);
+    setMinPayout(3);
     setEscrowHoldDays(14);
     setAutoCompleteDays(3);
     setAutoCompleteEnabled(true);
@@ -203,19 +235,18 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
     setSupportEmail('support@workperhour.com');
     setMaintenanceMode(false);
     setAllowNewRegistrations(true);
-    alert('Settings reset to default values.');
   };
 
-  // Simulator calculations (strictly enforced platform fee rules)
+  // Simulator calculations using live configurable state
   const orderGrossValue = simOrderAmount;
-  const buyerServiceSurcharge = Number((orderGrossValue * 0.01).toFixed(2));
-  const smallOrderFeeApplies = orderGrossValue > 0 && orderGrossValue < 200;
-  const smallOrderFeeToApply = smallOrderFeeApplies ? 1.00 : 0;
+  const buyerServiceSurcharge = Number((orderGrossValue * (clientServiceFee / 100)).toFixed(2));
+  const smallOrderFeeApplies = orderGrossValue > 0 && orderGrossValue < smallOrderFeeThreshold && smallOrderFeeAmount > 0;
+  const smallOrderFeeToApply = smallOrderFeeApplies ? Number(smallOrderFeeAmount.toFixed(2)) : 0;
   const buyerPaysAtCheckout = orderGrossValue + buyerServiceSurcharge + smallOrderFeeToApply;
   const platformTakeRateDeduction = Number((orderGrossValue * (takeRate / 100)).toFixed(2));
   const freelancerNetPayout = orderGrossValue - platformTakeRateDeduction;
   const totalPlatformMargin = buyerServiceSurcharge + platformTakeRateDeduction + smallOrderFeeToApply;
-  const netMarginPercent = ((totalPlatformMargin / buyerPaysAtCheckout) * 100).toFixed(1);
+  const netMarginPercent = buyerPaysAtCheckout > 0 ? ((totalPlatformMargin / buyerPaysAtCheckout) * 100).toFixed(1) : '0.0';
 
   return (
     <div className="space-y-6 font-sans">
@@ -255,18 +286,18 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
         </div>
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-1">
           <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">Buyer Fee</span>
-          <div className="text-xl font-bold text-blue-600 font-mono">1.0%</div>
-          <span className="text-[10px] text-blue-600 font-semibold block">Platform-Fixed</span>
+          <div className="text-xl font-bold text-blue-600 font-mono">{clientServiceFee}%</div>
+          <span className="text-[10px] text-blue-600 font-semibold block">Client Service Fee</span>
         </div>
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-1">
           <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">Small Order</span>
-          <div className="text-xl font-bold text-purple-600 font-mono">$1.00</div>
-          <span className="text-[10px] text-purple-600 font-semibold block">Fixed (&lt;$200)</span>
+          <div className="text-xl font-bold text-purple-600 font-mono">${smallOrderFeeAmount.toFixed(2)}</div>
+          <span className="text-[10px] text-purple-600 font-semibold block">Under ${smallOrderFeeThreshold}</span>
         </div>
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-1">
-          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">Order Floor</span>
-          <div className="text-xl font-bold text-slate-900 font-mono">$5.00</div>
-          <span className="text-[10px] text-emerald-600 font-semibold block">Platform-Fixed</span>
+          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">Gig / Proj Min</span>
+          <div className="text-xl font-bold text-slate-900 font-mono">${minGigPrice} / ${minProjectBudget}</div>
+          <span className="text-[10px] text-emerald-600 font-semibold block">Order Floors</span>
         </div>
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-1">
           <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">Escrow Hold</span>
@@ -301,17 +332,18 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="block text-slate-700 font-bold">Min Gig Price ($)</label>
-                    <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">Floor $5</span>
+                    <label className="block text-slate-700 font-bold">Minimum Gig Order ($)</label>
+                    <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">Default $5</span>
                   </div>
                   <input 
                     type="number" 
+                    step="0.5"
+                    min="0"
                     value={minGigPrice} 
-                    onChange={(e) => setMinGigPrice(Math.max(5, parseFloat(e.target.value) || 5))}
-                    min="5"
+                    onChange={(e) => setMinGigPrice(Math.max(0, parseFloat(e.target.value) || 0))}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-slate-800"
                   />
-                  <span className="text-[10px] text-slate-400 mt-1 block">Minimum package price sellers can list ($5.00 floor).</span>
+                  <span className="text-[10px] text-slate-400 mt-1 block">Minimum package & order price allowed for Gigs.</span>
                 </div>
 
                 <div>
@@ -384,17 +416,18 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="block text-slate-700 font-bold">Min Project Budget ($)</label>
-                    <span className="text-[9px] font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">Floor $5</span>
+                    <label className="block text-slate-700 font-bold">Minimum Project Budget ($)</label>
+                    <span className="text-[9px] font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">Default $5</span>
                   </div>
                   <input 
                     type="number" 
+                    step="0.5"
+                    min="0"
                     value={minProjectBudget} 
-                    onChange={(e) => setMinProjectBudget(Math.max(5, parseFloat(e.target.value) || 5))}
-                    min="5"
+                    onChange={(e) => setMinProjectBudget(Math.max(0, parseFloat(e.target.value) || 0))}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-slate-800"
                   />
-                  <span className="text-[10px] text-slate-400 mt-1 block">Minimum budget allowed when client posts a job ($5.00 floor).</span>
+                  <span className="text-[10px] text-slate-400 mt-1 block">Minimum budget & order amount allowed for Projects.</span>
                 </div>
 
                 <div>
@@ -463,14 +496,21 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
               </span>
             </div>
 
+            <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-2xl text-[11px] text-blue-900 flex items-start gap-2.5">
+              <ShieldCheck className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold">Live Fee Policy Synchronization:</span> Saved changes apply immediately to newly created Gig and Project orders, fee quotes, and checkout calculations. Existing orders preserve their historical fee breakdown snapshots.
+              </div>
+            </div>
+
             <div className="space-y-6 text-xs">
               {/* Freelancer Take Rate Slider */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between font-bold">
-                  <span className="text-slate-800">Freelancer Platform Take Rate (%)</span>
+                  <span className="text-slate-800">Freelancer Platform Commission (%)</span>
                   <span className="text-emerald-600 font-mono text-sm">{takeRate}%</span>
                 </div>
-                <p className="text-slate-500 text-[11px]">Deducted from freelancer escrow gross earnings upon order completion.</p>
+                <p className="text-slate-500 text-[11px]">Deducted from freelancer escrow gross earnings upon order completion (default: 20%).</p>
                 <div className="flex items-center gap-3">
                   <input 
                     type="range"
@@ -480,6 +520,15 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
                     value={takeRate}
                     onChange={(e) => setTakeRate(parseFloat(e.target.value))}
                     className="flex-1 accent-emerald-600 cursor-pointer"
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.5"
+                    value={takeRate}
+                    onChange={(e) => setTakeRate(Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)))}
+                    className="w-20 px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg font-mono font-bold text-slate-800 text-center"
                   />
                   <div className="flex gap-1.5">
                     {[5, 10, 15, 20].map(val => (
@@ -496,73 +545,111 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
                 </div>
               </div>
 
-              {/* Client Service Fee - Platform-Fixed Policy */}
+              {/* Buyer Service Fee Percentage */}
               <div className="space-y-2 pt-4 border-t border-slate-100">
                 <div className="flex items-center justify-between font-bold">
                   <div className="flex items-center gap-1.5">
-                    <span className="text-slate-800">Buyer Service Fee</span>
-                    <span className="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[9px] uppercase font-bold tracking-wider flex items-center gap-1">
-                      <Lock className="w-2.5 h-2.5" />
-                      Platform-Fixed
+                    <span className="text-slate-800">Buyer Service Fee (%)</span>
+                    <span className="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-[9px] uppercase font-bold tracking-wider">
+                      Default 1%
                     </span>
                   </div>
-                  <span className="text-blue-600 font-mono text-sm">1.0%</span>
+                  <span className="text-blue-600 font-mono text-sm">{clientServiceFee}%</span>
                 </div>
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
-                  <div>
-                    <div className="text-xs font-bold text-slate-800">1.0% Checkout Processing Fee</div>
-                    <div className="text-[10px] text-slate-500">Enforced platform policy: 1% service fee added to all buyer checkouts.</div>
+                <p className="text-slate-500 text-[11px]">Service fee percentage added to the order subtotal at buyer checkout.</p>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min="0"
+                    max="15"
+                    step="0.25"
+                    value={clientServiceFee}
+                    onChange={(e) => setClientServiceFee(parseFloat(e.target.value))}
+                    className="flex-1 accent-blue-600 cursor-pointer"
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={clientServiceFee}
+                    onChange={(e) => setClientServiceFee(Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)))}
+                    className="w-20 px-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg font-mono font-bold text-slate-800 text-center"
+                  />
+                  <div className="flex gap-1.5">
+                    {[0, 1, 2.5, 5].map(val => (
+                      <button
+                        key={val}
+                        type="button"
+                        onClick={() => setClientServiceFee(val)}
+                        className={`px-2.5 py-1 rounded-lg font-bold text-[10px] border cursor-pointer ${clientServiceFee === val ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'}`}
+                      >
+                        {val}%
+                      </button>
+                    ))}
                   </div>
-                  <span className="font-mono font-bold text-slate-800 text-xs px-2.5 py-1 bg-white border border-slate-200 rounded-lg">1.0%</span>
                 </div>
               </div>
 
-              {/* Small Order Fee Section - Platform-Fixed Policy */}
+              {/* Small Order Fee Section */}
               <div className="space-y-3 pt-4 border-t border-slate-100">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
-                    <span className="font-bold text-slate-800">Small-Order Fee Policy</span>
-                    <span className="px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded text-[9px] uppercase font-bold tracking-wider flex items-center gap-1">
-                      <Lock className="w-2.5 h-2.5" />
-                      Platform-Fixed
+                    <span className="font-bold text-slate-800">Small-Order Fee & Threshold</span>
+                    <span className="px-2 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded text-[9px] uppercase font-bold tracking-wider">
+                      Default $1 under $200
                     </span>
                   </div>
-                  <span className="text-purple-600 font-mono text-xs font-bold">$1.00 under $200</span>
+                  <span className="text-purple-600 font-mono text-xs font-bold">${smallOrderFeeAmount.toFixed(2)} under ${smallOrderFeeThreshold}</span>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                    <label className="text-[10px] text-slate-500 font-bold uppercase block">Threshold Amount</label>
-                    <div className="font-mono font-bold text-slate-900 text-sm">$200.00</div>
-                    <span className="text-[10px] text-slate-400 block">Orders strictly below threshold receive fee</span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] text-slate-600 font-bold uppercase block mb-1">Small-Order Threshold ($)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={smallOrderFeeThreshold}
+                      onChange={(e) => setSmallOrderFeeThreshold(Math.max(0, parseFloat(e.target.value) || 0))}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-slate-800"
+                    />
+                    <span className="text-[10px] text-slate-400 mt-1 block">Orders strictly below this amount receive the small-order fee.</span>
                   </div>
-                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                    <label className="text-[10px] text-slate-500 font-bold uppercase block">Fee Amount</label>
-                    <div className="font-mono font-bold text-slate-900 text-sm">$1.00</div>
-                    <span className="text-[10px] text-slate-400 block">Fixed flat small-order fee</span>
+                  <div>
+                    <label className="text-[10px] text-slate-600 font-bold uppercase block mb-1">Small-Order Additional Fee ($)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.25"
+                      value={smallOrderFeeAmount}
+                      onChange={(e) => setSmallOrderFeeAmount(Math.max(0, parseFloat(e.target.value) || 0))}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-slate-800"
+                    />
+                    <span className="text-[10px] text-slate-400 mt-1 block">Flat fee added when order subtotal is below threshold.</span>
                   </div>
                 </div>
-                <p className="text-slate-500 text-[11px]">Enforced platform policy: $1.00 fee is applied to all checkout orders strictly below $200.00.</p>
               </div>
 
-              {/* Min Order Floor - Platform-Fixed Policy */}
+              {/* Minimum Order Floor */}
               <div className="pt-4 border-t border-slate-100 space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
-                    <label className="block text-slate-700 font-bold">Minimum Order Amount Floor</label>
-                    <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded text-[9px] uppercase font-bold tracking-wider flex items-center gap-1">
-                      <Lock className="w-2.5 h-2.5" />
-                      Platform-Fixed
+                    <label className="block text-slate-700 font-bold">Global Minimum Order Floor ($)</label>
+                    <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded text-[9px] uppercase font-bold tracking-wider">
+                      Default $5.00
                     </span>
                   </div>
-                  <span className="text-emerald-700 font-mono text-xs font-bold">$5.00</span>
+                  <span className="text-emerald-700 font-mono text-xs font-bold">${minOrder.toFixed(2)}</span>
                 </div>
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
-                  <div>
-                    <div className="text-xs font-bold text-slate-800">$5.00 Minimum Order Floor</div>
-                    <div className="text-[10px] text-slate-500">Enforced platform floor across both Gigs catalog and Projects job board.</div>
-                  </div>
-                  <span className="font-mono font-bold text-slate-800 text-xs px-2.5 py-1 bg-white border border-slate-200 rounded-lg">$5.00 USD</span>
-                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  value={minOrder}
+                  onChange={(e) => setMinOrder(Math.max(0, parseFloat(e.target.value) || 0))}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-mono font-bold text-slate-800"
+                />
+                <span className="text-[10px] text-slate-400 block">Fallback minimum order amount when creating Gig or Project orders.</span>
               </div>
             </div>
           </div>
@@ -786,13 +873,13 @@ export const SiteFeeSettingsModule: React.FC<SiteFeeSettingsModuleProps> = ({
                   <span className="font-bold text-slate-900">${orderGrossValue.toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between text-blue-600">
-                  <span>Buyer Service Fee (+1.0%):</span>
+                  <span>Buyer Service Fee (+{clientServiceFee}%):</span>
                   <span className="font-bold">+${buyerServiceSurcharge.toFixed(2)}</span>
                 </div>
                 {smallOrderFeeApplies && (
                   <div className="flex justify-between text-purple-600">
-                    <span>Small Order Fee (&lt;$200):</span>
-                    <span className="font-bold">+$1.00</span>
+                    <span>Small Order Fee (&lt;${smallOrderFeeThreshold}):</span>
+                    <span className="font-bold">+${smallOrderFeeToApply.toFixed(2)}</span>
                   </div>
                 )}
                 <div className="flex justify-between text-slate-900 font-bold pt-1 border-t border-slate-100">

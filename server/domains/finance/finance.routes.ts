@@ -104,15 +104,45 @@ router.get('/fees/quote', async (req: Request, res: Response) => {
     
     // Authoritative fee calculation using live admin settings
     const q = await quoteOrderWithLiveSettings(gigPrice);
+    const activeSettings = siteSettings.getSettings();
     res.json({
       ...q,
       config: {
+        commissionPercent: q.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent,
         buyerFeePercent: q.buyerFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
-        smallOrderThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold
+        smallOrderFee: q.smallOrderFee,
+        smallOrderThreshold: activeSettings.commission?.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold,
+        minimumOrderAmount: activeSettings.commission?.minimumOrderAmount ?? (DEFAULT_FEE_CONFIG.minimumOrderAmount ?? 5.00)
       }
     });
   } catch (err: any) {
     res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+router.get('/fees/config', async (_req: Request, res: Response) => {
+  try {
+    await siteSettings.refreshFromDatabase();
+    const settings = siteSettings.getSettings();
+    const comm = settings.commission;
+    const market = settings.marketplace;
+    res.json({
+      success: true,
+      commissionPercent: comm?.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent,
+      buyerFeePercent: comm?.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+      clientServiceFee: comm?.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+      smallOrderFee: comm?.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
+      smallOrderFeeAmount: comm?.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
+      smallOrderFeeThreshold: comm?.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold,
+      smallOrderThreshold: comm?.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold,
+      minimumOrderAmount: comm?.minimumOrderAmount ?? (DEFAULT_FEE_CONFIG.minimumOrderAmount ?? 5.00),
+      minimumGigPrice: market?.minimumGigPrice ?? 5.00,
+      maximumGigPrice: market?.maximumGigPrice ?? 10000.00,
+      minimumProjectBudget: market?.minimumProjectBudget ?? 5.00,
+      maximumProjectBudget: market?.maximumProjectBudget ?? 50000.00
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 

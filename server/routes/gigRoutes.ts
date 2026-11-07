@@ -126,7 +126,7 @@ gigRouter.post('/gigs', requireAuth, requireActiveStatus, async (req: Request, r
     return res.status(400).json({ error: 'Gig price can have at most 2 decimal places.' });
   }
   const rawMinGig = Number(activeSettings.marketplace.minimumGigPrice ?? 5);
-  const minGigPrice = Number.isFinite(rawMinGig) ? Math.min(10000, Math.max(5, rawMinGig)) : 5;
+  const minGigPrice = Number.isFinite(rawMinGig) ? Math.min(10000, Math.max(0, rawMinGig)) : 5;
   const rawMaxGig = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
   const maxGigPrice =
     Number.isFinite(rawMaxGig) && rawMaxGig > 0
@@ -249,7 +249,7 @@ const handleGigUpdate = async (req: Request, res: Response) => {
     const updates: Record<string, any> = {};
     const activeSettings = siteSettings.getSettings();
     const rawMinGig = Number(activeSettings.marketplace.minimumGigPrice ?? 5);
-    const minGigPrice = Number.isFinite(rawMinGig) ? Math.min(10000, Math.max(5, rawMinGig)) : 5;
+    const minGigPrice = Number.isFinite(rawMinGig) ? Math.min(10000, Math.max(0, rawMinGig)) : 5;
     const rawMaxGig = Number(activeSettings.marketplace.maximumGigPrice ?? 10000);
     const maxGigPrice =
       Number.isFinite(rawMaxGig) && rawMaxGig > 0

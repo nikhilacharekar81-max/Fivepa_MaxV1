@@ -238,10 +238,10 @@ export async function quoteOrderWithLiveSettings(amount: number, client?: any): 
   }
   const policy: FeeConfig = {
     commissionPercent: comm.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent,
-    buyerFeePercent: DEFAULT_FEE_CONFIG.buyerFeePercent,
-    smallOrderFee: DEFAULT_FEE_CONFIG.smallOrderFee,
-    smallOrderThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold,
-    minimumOrderAmount: 5.00
+    buyerFeePercent: comm.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+    smallOrderFee: comm.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
+    smallOrderThreshold: comm.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold,
+    minimumOrderAmount: comm.minimumOrderAmount ?? (DEFAULT_FEE_CONFIG.minimumOrderAmount ?? 5.00)
   };
   return calculateOrderFees(amount, policy);
 }

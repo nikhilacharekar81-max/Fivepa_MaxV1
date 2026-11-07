@@ -252,19 +252,17 @@ projectRouter.post('/projects', requireAuth, requireActiveStatus, async (req: Re
 
     const budgetMin = Number(req.body.budgetMin !== undefined ? req.body.budgetMin : req.body.minBudget);
     const budgetMax = Number(req.body.budgetMax !== undefined ? req.body.budgetMax : (req.body.maxBudget !== undefined ? req.body.maxBudget : budgetMin));
-    if (!Number.isFinite(budgetMin) || budgetMin < 5) {
-      return res.status(400).json({ error: 'Minimum project budget must be at least $5.00.' });
-    }
-    if (!Number.isFinite(budgetMax) || budgetMax < budgetMin) {
-      return res.status(400).json({ error: 'Maximum budget must be greater than or equal to minimum budget.' });
-    }
-
     const activeSettings = siteSettings.getSettings();
-    const platformMinBudget = Math.max(5, Number(activeSettings.marketplace.minimumProjectBudget) || 5);
-    if (platformMinBudget > 0 && budgetMin < platformMinBudget) {
+    const platformMinBudget = Number.isFinite(Number(activeSettings.marketplace?.minimumProjectBudget))
+      ? Number(activeSettings.marketplace.minimumProjectBudget)
+      : 5;
+    if (!Number.isFinite(budgetMin) || budgetMin < platformMinBudget) {
       return res.status(400).json({
         error: `Project budget ($${budgetMin}) is below the platform minimum requirement of $${platformMinBudget}.`
       });
+    }
+    if (!Number.isFinite(budgetMax) || budgetMax < budgetMin) {
+      return res.status(400).json({ error: 'Maximum budget must be greater than or equal to minimum budget.' });
     }
 
     const newProjId = 'proj_' + Date.now() + '_' + randomUUID().slice(0, 8);
@@ -317,18 +315,17 @@ projectRouter.put('/projects/:id', requireAuth, requireActiveStatus, async (req:
 
     const budgetMin = Number(req.body.budgetMin !== undefined ? req.body.budgetMin : (req.body.minBudget !== undefined ? req.body.minBudget : project.budgetMin));
     const budgetMax = Number(req.body.budgetMax !== undefined ? req.body.budgetMax : (req.body.maxBudget !== undefined ? req.body.maxBudget : project.budgetMax));
-    if (!Number.isFinite(budgetMin) || budgetMin < 5) {
-      return res.status(400).json({ error: 'Minimum project budget must be at least $5.00.' });
-    }
-    if (!Number.isFinite(budgetMax) || budgetMax < budgetMin) {
-      return res.status(400).json({ error: 'Maximum budget must be greater than or equal to minimum budget.' });
-    }
     const activeSettings = siteSettings.getSettings();
-    const platformMinBudget = Math.max(5, Number(activeSettings.marketplace.minimumProjectBudget) || 5);
-    if (platformMinBudget > 0 && budgetMin < platformMinBudget) {
+    const platformMinBudget = Number.isFinite(Number(activeSettings.marketplace?.minimumProjectBudget))
+      ? Number(activeSettings.marketplace.minimumProjectBudget)
+      : 5;
+    if (!Number.isFinite(budgetMin) || budgetMin < platformMinBudget) {
       return res.status(400).json({
         error: `Project budget ($${budgetMin}) is below the platform minimum requirement of $${platformMinBudget}.`
       });
+    }
+    if (!Number.isFinite(budgetMax) || budgetMax < budgetMin) {
+      return res.status(400).json({ error: 'Maximum budget must be greater than or equal to minimum budget.' });
     }
 
     if (req.body.title !== undefined) project.title = escapeHtml(String(req.body.title));

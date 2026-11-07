@@ -550,7 +550,10 @@ router.post('/orders', requireAuth, requireActiveStatus, rateLimit(30, 60_000), 
     }
 
     if (!isInquiry) {
-      const minOrderAmount = 5;
+      const activeSettings = siteSettings.getSettings();
+      const minOrderAmount = req.body?.gigId
+        ? Number(activeSettings.marketplace?.minimumGigPrice ?? activeSettings.commission?.minimumOrderAmount ?? 5)
+        : Number(activeSettings.marketplace?.minimumProjectBudget ?? activeSettings.commission?.minimumOrderAmount ?? 5);
       if (!Number.isFinite(rawAmount) || rawAmount < minOrderAmount) {
         return res.status(400).json({ error: `Minimum order amount is $${minOrderAmount.toFixed(2)}.` });
       }

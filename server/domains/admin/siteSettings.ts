@@ -237,14 +237,33 @@ export class SiteSettingsService {
       ? rawComm
       : DEFAULT_SITE_SETTINGS.commission.commissionPercent;
 
+    const rawBuyerFee = Number(commission.buyerProcessingFeePercent);
+    const normalizedBuyerProcessingFeePercent = Number.isFinite(rawBuyerFee) && rawBuyerFee >= 0 && rawBuyerFee <= 100
+      ? rawBuyerFee
+      : DEFAULT_FEE_CONFIG.buyerFeePercent;
+
+    const rawSmallOrderFee = Number(commission.smallOrderFeeAmount);
+    const normalizedSmallOrderFeeAmount = Number.isFinite(rawSmallOrderFee) && rawSmallOrderFee >= 0
+      ? rawSmallOrderFee
+      : DEFAULT_FEE_CONFIG.smallOrderFee;
+
+    const rawSmallOrderThreshold = Number(commission.smallOrderFeeThreshold);
+    const normalizedSmallOrderFeeThreshold = Number.isFinite(rawSmallOrderThreshold) && rawSmallOrderThreshold >= 0
+      ? rawSmallOrderThreshold
+      : DEFAULT_FEE_CONFIG.smallOrderThreshold;
+
+    const rawMinOrder = Number(commission.minimumOrderAmount);
+    const normalizedMinimumOrderAmount = Number.isFinite(rawMinOrder) && rawMinOrder >= 0
+      ? rawMinOrder
+      : (DEFAULT_FEE_CONFIG.minimumOrderAmount ?? 5.00);
+
     const cleaned: PlatformCommissionSettings = {
       ...commission,
       commissionPercent: normalizedCommissionPercent,
-      // Platform-fixed fee policy: 1% buyer fee, $1.00 small-order fee under $200, $5.00 minimum order
-      buyerProcessingFeePercent: DEFAULT_FEE_CONFIG.buyerFeePercent,
-      smallOrderFeeAmount: DEFAULT_FEE_CONFIG.smallOrderFee,
-      smallOrderFeeThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold,
-      minimumOrderAmount: 5.00
+      buyerProcessingFeePercent: normalizedBuyerProcessingFeePercent,
+      smallOrderFeeAmount: normalizedSmallOrderFeeAmount,
+      smallOrderFeeThreshold: normalizedSmallOrderFeeThreshold,
+      minimumOrderAmount: normalizedMinimumOrderAmount
     };
     delete (cleaned as any).featuredGigFee;
     delete (cleaned as any).featureGigFee;
@@ -252,13 +271,19 @@ export class SiteSettingsService {
   }
 
   private normalizeMarketplaceGigLimits(marketplace: GigsProjectsOrdersSettings): GigsProjectsOrdersSettings {
-    const normalizedMin = 5;
+    const rawMin = Number(marketplace.minimumGigPrice);
+    const normalizedMin = Number.isFinite(rawMin) && rawMin >= 0
+      ? rawMin
+      : DEFAULT_SITE_SETTINGS.marketplace.minimumGigPrice;
     const rawMax = Number(marketplace.maximumGigPrice);
     const normalizedMax =
       Number.isFinite(rawMax) && rawMax > 0
         ? Math.min(10000, Math.max(normalizedMin, rawMax))
         : 10000;
-    const normalizedMinProjectBudget = 5;
+    const rawMinProjectBudget = Number(marketplace.minimumProjectBudget);
+    const normalizedMinProjectBudget = Number.isFinite(rawMinProjectBudget) && rawMinProjectBudget >= 0
+      ? rawMinProjectBudget
+      : DEFAULT_SITE_SETTINGS.marketplace.minimumProjectBudget;
     const rawMaxProjectBudget = Number(marketplace.maximumProjectBudget);
     const normalizedMaxProjectBudget =
       Number.isFinite(rawMaxProjectBudget) && rawMaxProjectBudget > 0
@@ -394,22 +419,23 @@ export class SiteSettingsService {
     const c = this.settings.commission;
     return {
       commissionPercent: customCommissionPercent !== undefined ? customCommissionPercent : c.commissionPercent,
-      buyerFeePercent: DEFAULT_FEE_CONFIG.buyerFeePercent,
-      smallOrderFee: DEFAULT_FEE_CONFIG.smallOrderFee,
-      smallOrderThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold,
-      minimumOrderAmount: 5.00
+      buyerFeePercent: c.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+      smallOrderFee: c.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
+      smallOrderThreshold: c.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold,
+      minimumOrderAmount: c.minimumOrderAmount ?? (DEFAULT_FEE_CONFIG.minimumOrderAmount ?? 5.00)
     };
   }
 
   public calculateFeeSplit(orderAmount: number, customCommissionPercent?: number) {
-    const f = calculateOrderFees(Math.max(0, orderAmount), this.getFeeConfig(customCommissionPercent));
+    const cfg = this.getFeeConfig(customCommissionPercent);
+    const f = calculateOrderFees(Math.max(0, orderAmount), cfg);
     return {
       orderAmount: f.gigPrice,
-      commissionPercent: this.getFeeConfig(customCommissionPercent).commissionPercent,
+      commissionPercent: cfg.commissionPercent,
       platformFee: f.platformCommission,
       freelancerPercent: f.freelancerPercent,
       freelancerAmount: f.freelancerNet,
-      buyerProcessingFeePercent: DEFAULT_FEE_CONFIG.buyerFeePercent,
+      buyerProcessingFeePercent: cfg.buyerFeePercent,
       buyerFee: f.serviceFee,
       smallOrderFee: f.smallOrderFee,
       totalBuyerCharged: f.clientTotal
@@ -422,11 +448,11 @@ export class SiteSettingsService {
     import('../finance/financeService.js').then(({ financeService }) => {
       financeService.configure({
         commissionPercent: c.commissionPercent,
-        buyerFeePercent: DEFAULT_FEE_CONFIG.buyerFeePercent,
-        smallOrderFee: DEFAULT_FEE_CONFIG.smallOrderFee,
-        smallOrderThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold,
+        buyerFeePercent: c.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+        smallOrderFee: c.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
+        smallOrderThreshold: c.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold,
         refundClientFeesOnFullRefund: c.refundClientFeesOnFullRefund,
-        minimumOrderAmount: 5.00
+        minimumOrderAmount: c.minimumOrderAmount ?? 5.00
       });
     }).catch(() => {});
   }
@@ -541,14 +567,14 @@ export class SiteSettingsService {
       currency: s.localization.defaultCurrency,
       currencySymbol: '$',
       freelancerCommissionRate: s.commission.commissionPercent,
-      buyerProcessingFeeRate: DEFAULT_FEE_CONFIG.buyerFeePercent,
-      clientServiceFee: DEFAULT_FEE_CONFIG.buyerFeePercent,
-      smallOrderFee: DEFAULT_FEE_CONFIG.smallOrderFee,
-      smallOrderFeeAmount: DEFAULT_FEE_CONFIG.smallOrderFee,
-      smallOrderFeeThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold,
-      minOrderAmount: 5.00,
-      minimumOrder: 5.00,
-      minimumOrderAmount: 5.00,
+      buyerProcessingFeeRate: s.commission.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+      clientServiceFee: s.commission.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+      smallOrderFee: s.commission.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
+      smallOrderFeeAmount: s.commission.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
+      smallOrderFeeThreshold: s.commission.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold,
+      minOrderAmount: s.commission.minimumOrderAmount ?? 5.00,
+      minimumOrder: s.commission.minimumOrderAmount ?? 5.00,
+      minimumOrderAmount: s.commission.minimumOrderAmount ?? 5.00,
       featuredGigFee: s.marketplace.featuredGigFee ?? DEFAULT_SITE_SETTINGS.marketplace.featuredGigFee,
       urgentProjectFee: (s.marketplace as any).urgentProjectFee ?? 25,
       escrowHoldDays: s.commission.escrowProtectionDays,
@@ -590,11 +616,18 @@ export class SiteSettingsService {
     if (body.escrowHoldDays !== undefined) {
       commissionUpdates.escrowProtectionDays = Number(body.escrowHoldDays);
     }
-    // Fixed platform fees are immutable across admin updates
-    commissionUpdates.buyerProcessingFeePercent = DEFAULT_FEE_CONFIG.buyerFeePercent;
-    commissionUpdates.smallOrderFeeAmount = DEFAULT_FEE_CONFIG.smallOrderFee;
-    commissionUpdates.smallOrderFeeThreshold = DEFAULT_FEE_CONFIG.smallOrderThreshold;
-    commissionUpdates.minimumOrderAmount = 5.00;
+    if (body.buyerProcessingFeeRate !== undefined || body.clientServiceFee !== undefined || body.buyerFee !== undefined) {
+      commissionUpdates.buyerProcessingFeePercent = Number(body.buyerProcessingFeeRate ?? body.clientServiceFee ?? body.buyerFee);
+    }
+    if (body.smallOrderFeeAmount !== undefined || body.smallOrderFee !== undefined) {
+      commissionUpdates.smallOrderFeeAmount = Number(body.smallOrderFeeAmount ?? body.smallOrderFee);
+    }
+    if (body.smallOrderFeeThreshold !== undefined || body.smallOrderThreshold !== undefined) {
+      commissionUpdates.smallOrderFeeThreshold = Number(body.smallOrderFeeThreshold ?? body.smallOrderThreshold);
+    }
+    if (body.minOrderAmount !== undefined || body.minimumOrderAmount !== undefined || body.minimumOrder !== undefined) {
+      commissionUpdates.minimumOrderAmount = Number(body.minOrderAmount ?? body.minimumOrderAmount ?? body.minimumOrder);
+    }
 
     if (body.autoCompleteDays !== undefined || body.autoCompleteDeliveredDays !== undefined || body.reviewWindowDays !== undefined) {
       marketplaceUpdates.autoCompleteDeliveredDays = Number(body.autoCompleteDays ?? body.autoCompleteDeliveredDays ?? body.reviewWindowDays);

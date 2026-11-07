@@ -231,11 +231,18 @@ export class FinanceLedgerEngine {
   // ----- configuration -----------------------------------------------------
   public configure(cfg: { commissionPercent?: number; buyerFeePercent?: number; smallOrderFee?: number; smallOrderThreshold?: number; refundClientFeesOnFullRefund?: boolean; minimumOrderAmount?: number; minimumWithdrawalAmount?: number; maximumWithdrawalAmount?: number }) {
     if (cfg.commissionPercent !== undefined) this.setPlatformCommissionRate(cfg.commissionPercent);
-    // Fixed platform fees are authoritative and immutable: 1% buyer fee, $1.00 small-order fee under $200, $5.00 min order
-    this.buyerFeePercent = DEFAULT_FEE_CONFIG.buyerFeePercent;
-    this.smallOrderFee = DEFAULT_FEE_CONFIG.smallOrderFee;
-    this.smallOrderThreshold = DEFAULT_FEE_CONFIG.smallOrderThreshold;
-    this.minimumOrderAmount = 5.00;
+    if (typeof cfg.buyerFeePercent === 'number' && Number.isFinite(cfg.buyerFeePercent) && cfg.buyerFeePercent >= 0 && cfg.buyerFeePercent <= 100) {
+      this.buyerFeePercent = cfg.buyerFeePercent;
+    }
+    if (typeof cfg.smallOrderFee === 'number' && Number.isFinite(cfg.smallOrderFee) && cfg.smallOrderFee >= 0) {
+      this.smallOrderFee = cfg.smallOrderFee;
+    }
+    if (typeof cfg.smallOrderThreshold === 'number' && Number.isFinite(cfg.smallOrderThreshold) && cfg.smallOrderThreshold >= 0) {
+      this.smallOrderThreshold = cfg.smallOrderThreshold;
+    }
+    if (typeof cfg.minimumOrderAmount === 'number' && Number.isFinite(cfg.minimumOrderAmount) && cfg.minimumOrderAmount >= 0) {
+      this.minimumOrderAmount = cfg.minimumOrderAmount;
+    }
     if (typeof cfg.refundClientFeesOnFullRefund === 'boolean') this.refundClientFeesOnFullRefund = cfg.refundClientFeesOnFullRefund;
     if (typeof cfg.minimumWithdrawalAmount === 'number' && cfg.minimumWithdrawalAmount >= 0) this.minimumWithdrawalAmount = cfg.minimumWithdrawalAmount;
     if (typeof cfg.maximumWithdrawalAmount === 'number' && cfg.maximumWithdrawalAmount > 0) this.maximumWithdrawalAmount = cfg.maximumWithdrawalAmount;
@@ -246,10 +253,10 @@ export class FinanceLedgerEngine {
   public getFeeConfig(): FeeConfig {
     return {
       commissionPercent: this.platformCommissionRate,
-      buyerFeePercent: DEFAULT_FEE_CONFIG.buyerFeePercent,
-      smallOrderFee: DEFAULT_FEE_CONFIG.smallOrderFee,
-      smallOrderThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold,
-      minimumOrderAmount: 5.00
+      buyerFeePercent: this.buyerFeePercent,
+      smallOrderFee: this.smallOrderFee,
+      smallOrderThreshold: this.smallOrderThreshold,
+      minimumOrderAmount: this.minimumOrderAmount
     };
   }
 
@@ -1407,10 +1414,18 @@ export class FinanceLedgerEngine {
     // Only fee calculation parameters may be updated; financial records are never hydrated from snapshots.
     if (data.config) {
       this.platformCommissionRate = data.config.platformCommissionRate ?? this.platformCommissionRate;
-      this.buyerFeePercent = DEFAULT_FEE_CONFIG.buyerFeePercent;
-      this.smallOrderFee = DEFAULT_FEE_CONFIG.smallOrderFee;
-      this.smallOrderThreshold = DEFAULT_FEE_CONFIG.smallOrderThreshold;
-      this.minimumOrderAmount = 5.00;
+      if (data.config.buyerFeePercent !== undefined && Number.isFinite(Number(data.config.buyerFeePercent))) {
+        this.buyerFeePercent = Number(data.config.buyerFeePercent);
+      }
+      if (data.config.smallOrderFee !== undefined && Number.isFinite(Number(data.config.smallOrderFee))) {
+        this.smallOrderFee = Number(data.config.smallOrderFee);
+      }
+      if (data.config.smallOrderThreshold !== undefined && Number.isFinite(Number(data.config.smallOrderThreshold))) {
+        this.smallOrderThreshold = Number(data.config.smallOrderThreshold);
+      }
+      if (data.config.minimumOrderAmount !== undefined && Number.isFinite(Number(data.config.minimumOrderAmount))) {
+        this.minimumOrderAmount = Number(data.config.minimumOrderAmount);
+      }
       this.refundClientFeesOnFullRefund = data.config.refundClientFeesOnFullRefund ?? this.refundClientFeesOnFullRefund;
       this.minimumWithdrawalAmount = data.config.minimumWithdrawalAmount ?? this.minimumWithdrawalAmount;
       this.maximumWithdrawalAmount = data.config.maximumWithdrawalAmount ?? this.maximumWithdrawalAmount;

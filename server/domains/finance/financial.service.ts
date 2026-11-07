@@ -968,18 +968,19 @@ export class FinancialTransactionService {
       } else {
         const { siteSettings } = await import('../admin/siteSettings.js');
         const comm = siteSettings.getSettings().commission;
-        const calculated = calculateOrderFees(gigPrice, {
+        const livePolicy = {
           commissionPercent: comm.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent,
-          buyerFeePercent: DEFAULT_FEE_CONFIG.buyerFeePercent,
-          smallOrderFee: DEFAULT_FEE_CONFIG.smallOrderFee,
-          smallOrderThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold,
-          minimumOrderAmount: 5.00
-        });
+          buyerFeePercent: comm.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+          smallOrderFee: comm.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
+          smallOrderThreshold: comm.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold,
+          minimumOrderAmount: comm.minimumOrderAmount ?? (DEFAULT_FEE_CONFIG.minimumOrderAmount ?? 5.00)
+        };
+        const calculated = calculateOrderFees(gigPrice, livePolicy);
         serviceFee = calculated.serviceFee;
         smallOrderFee = calculated.smallOrderFee;
-        commissionPercent = comm.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent;
-        buyerFeePercent = DEFAULT_FEE_CONFIG.buyerFeePercent;
-        smallOrderThreshold = DEFAULT_FEE_CONFIG.smallOrderThreshold;
+        commissionPercent = livePolicy.commissionPercent;
+        buyerFeePercent = livePolicy.buyerFeePercent;
+        smallOrderThreshold = livePolicy.smallOrderThreshold;
         clientTotal = calculated.clientTotal;
         platformCommission = calculated.platformCommission;
         freelancerNet = calculated.freelancerNet;
