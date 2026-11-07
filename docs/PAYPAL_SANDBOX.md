@@ -114,3 +114,38 @@ Before running manual browser tests, verify your credentials and webhook state m
 | **8** | **Duplicate Webhook Replay from PayPal Dashboard** | In PayPal Developer Dashboard → **Webhook Events**, click **Resend** on a delivered `PAYMENT.CAPTURE.COMPLETED` event 3 times. | Server responds `200 OK` (`duplicate: true`) on each replay. `payment_webhook_events` records the event ID once; wallet balance does not change. |
 | **9** | **Amount or Currency Tampering Rejection** | Send a webhook where `resource.amount.currency_code` is `EUR` or `value` is `5.00` for a `$25.00 USD` session. | Server logs the mismatch, returns HTTP `400`, leaves checkout session uncredited, and writes zero ledger entries. |
 | **10** | **Declined / Refunded Capture Handling** | Trigger `PAYMENT.CAPTURE.DENIED` (via PayPal Negative Testing) or refund a completed capture (`PAYMENT.CAPTURE.REFUNDED`). | `DENIED` marks session `failed` with zero credit. `REFUNDED` marks session `refunded` and reverses the unspent wallet deposit (`2010 -> 1020`) or logs a `GATEWAY_CHARGEBACK_OR_REFUND` alert if already locked in escrow. |
+
+---
+
+## 6. PayPal Sandbox vs Live Environment Switching System
+
+The Super Admin Panel provides complete control over switching between **PayPal Sandbox** (development & testing) and **PayPal Live** (production launches) without needing to edit source code or environment variables.
+
+### Environment Management in Admin Panel
+1. Navigate to **Super Admin Panel → Payments & Finance → Payment Gateways**.
+2. **Active Mode Status Banner**: Displays the platform's active PayPal environment:
+   - `ACTIVE MODE: PAYPAL SANDBOX (TESTING)` — Active by default for developer sandbox testing.
+   - `ACTIVE MODE: PAYPAL LIVE (PRODUCTION)` — Activated when launching live payments.
+3. **Switching to PayPal Live**:
+   - Click **Switch to PayPal Live**.
+   - Review the confirmation modal: *"WARNING: Switching to PayPal Live will process REAL MONEY customer payments."*
+   - Requires explicit admin confirmation (`confirmed: true`).
+   - Ensures PayPal Live credentials (Client ID and Client Secret) are configured and saved before Live mode can be activated.
+4. **Session Environment Isolation**:
+   - Every checkout session generated permanently stores its `environment` (`sandbox` vs `production`).
+   - Captures, webhooks, and balance settlements for a session execute against that session's specific environment.
+   - Switching the global active environment after session creation does NOT affect ongoing testing of previously generated sessions.
+
+### Webhook URL Endpoint for Sandbox & Live
+In your PayPal Developer Dashboard (for both Sandbox and Live apps), register the webhook URL:
+```text
+https://<your-domain>/api/payments/webhook?gateway=paypal
+```
+Ensure you subscribe to `CHECKOUT.ORDER.APPROVED` and `PAYMENT.CAPTURE.COMPLETED` events.
+
+### Environment Test Suite
+Run the full environment switching & session isolation automated test suite at any time:
+```bash
+npm run test:paypal:env
+```
+

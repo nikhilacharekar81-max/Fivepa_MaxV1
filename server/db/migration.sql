@@ -627,12 +627,14 @@ CREATE TABLE IF NOT EXISTS payment_checkout_sessions (
   paypal_order_id VARCHAR(128),
   paypal_capture_id VARCHAR(128),
   last_webhook_event_id VARCHAR(128),
+  environment VARCHAR(32) NOT NULL DEFAULT 'sandbox',
   metadata JSONB DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_at TIMESTAMPTZ
 );
 
+ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS environment VARCHAR(32) NOT NULL DEFAULT 'sandbox';
 ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS paypal_order_id VARCHAR(128);
 ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS paypal_capture_id VARCHAR(128);
 ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS last_webhook_event_id VARCHAR(128);

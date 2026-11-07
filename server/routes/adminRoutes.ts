@@ -465,9 +465,60 @@ router.patch('/admin/site-settings', requireAdmin, handlePostSiteSettings);
 
 router.get('/admin/payment-gateways', requireAdmin, (req: Request, res: Response) => {
   try {
-    res.json({ success: true, gateways: paymentGatewayManager.getMaskedState() });
+    const maskedState = paymentGatewayManager.getMaskedState();
+    res.json({
+      success: true,
+      activePayPalEnvironment: paymentGatewayManager.getActivePayPalEnvironment(),
+      gateways: maskedState,
+      connectionTestStatus: paymentGatewayManager.getState().connectionTestStatus || {}
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/api/admin/payment-gateways/paypal/environment', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { environment, confirmed } = req.body || {};
+    const actor = (req as any).authenticatedUser?.name || 'Super Admin';
+
+    if (environment !== 'sandbox' && environment !== 'production') {
+      return res.status(400).json({ error: 'Invalid environment. Must be "sandbox" or "production".' });
+    }
+
+    if (environment === 'production') {
+      if (confirmed !== true) {
+        return res.status(400).json({
+          error: 'Explicit admin confirmation (confirmed: true) is required to activate PayPal Live mode.'
+        });
+      }
+      const prodGw = paymentGatewayManager.getGateway('paypal', 'production');
+      if (!prodGw || !prodGw.clientId || !prodGw.clientSecret) {
+        return res.status(400).json({
+          error: 'Cannot switch to PayPal Live mode: PayPal Live credentials (Client ID and Client Secret) are not saved.'
+        });
+      }
+    }
+
+    await paymentGatewayManager.setActivePayPalEnvironment(environment);
+
+    await registerAuditLog({
+      id: 'log_' + Date.now() + '_' + randomUUID().slice(0, 8),
+      actor,
+      role: 'super_admin',
+      action: 'PAYMENT_GATEWAY_ENVIRONMENT_CHANGED',
+      target: 'PayPal Environment',
+      details: `Switched active PayPal environment to ${environment.toUpperCase()}`,
+      timestamp: new Date().toLocaleString()
+    });
+
+    res.json({
+      success: true,
+      activePayPalEnvironment: environment,
+      message: `Active PayPal environment switched to ${environment.toUpperCase()}.`
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
   }
 });
 

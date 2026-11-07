@@ -17,9 +17,18 @@ export interface EnvironmentGateways {
   razorpay: GatewayConfig;
 }
 
+export interface ConnectionTestStatus {
+  status: 'untested' | 'verified' | 'failed';
+  lastTestedAt?: string;
+  lastSuccessAt?: string;
+  message?: string;
+}
+
 export interface PaymentGatewaysState {
   production: EnvironmentGateways;
   sandbox: EnvironmentGateways;
+  activePayPalEnvironment?: 'sandbox' | 'production';
+  connectionTestStatus?: Record<string, ConnectionTestStatus>;
 }
 
 const DEFAULT_GATEWAY: GatewayConfig = {
@@ -38,7 +47,9 @@ const DEFAULT_ENV_GATEWAYS: EnvironmentGateways = {
 
 const DEFAULT_STATE: PaymentGatewaysState = {
   production: JSON.parse(JSON.stringify(DEFAULT_ENV_GATEWAYS)),
-  sandbox: JSON.parse(JSON.stringify(DEFAULT_ENV_GATEWAYS))
+  sandbox: JSON.parse(JSON.stringify(DEFAULT_ENV_GATEWAYS)),
+  activePayPalEnvironment: 'sandbox',
+  connectionTestStatus: {}
 };
 
 const WEAK_GATEWAY_KEY_PLACEHOLDERS = new Set([
@@ -180,7 +191,7 @@ export function resolvePayPalEnv(): 'production' | 'sandbox' {
   const explicitMode = (process.env.PAYPAL_MODE || '').trim().toLowerCase();
   if (explicitMode === 'live' || explicitMode === 'production') return 'production';
   if (explicitMode === 'sandbox' || explicitMode === 'test') return 'sandbox';
-  return process.env.NODE_ENV === 'production' ? 'production' : 'sandbox';
+  return paymentGatewayManager.getActivePayPalEnvironment();
 }
 
 export function encryptSecret(plaintext: string): string {
@@ -272,7 +283,9 @@ export class PaymentGatewayManager {
           paypal: decryptGw(parsed.sandbox?.paypal, true),
           stripe: decryptGw(parsed.sandbox?.stripe, false),
           razorpay: decryptGw(parsed.sandbox?.razorpay, false)
-        }
+        },
+        activePayPalEnvironment: parsed.activePayPalEnvironment === 'production' ? 'production' : 'sandbox',
+        connectionTestStatus: (parsed.connectionTestStatus && typeof parsed.connectionTestStatus === 'object') ? parsed.connectionTestStatus : {}
       };
     }
   }
@@ -358,6 +371,18 @@ export class PaymentGatewayManager {
     return 'paypal';
   }
 
+  public getActivePayPalEnvironment(): 'sandbox' | 'production' {
+    return this.state.activePayPalEnvironment === 'production' ? 'production' : 'sandbox';
+  }
+
+  public async setActivePayPalEnvironment(env: 'sandbox' | 'production'): Promise<void> {
+    if (env !== 'sandbox' && env !== 'production') {
+      throw new Error('Invalid PayPal environment. Must be sandbox or production.');
+    }
+    this.state.activePayPalEnvironment = env;
+    await this.saveToDatabase();
+  }
+
   public getEncryptedState(): PaymentGatewaysState {
     const encryptGw = (gw: GatewayConfig): GatewayConfig => ({
       ...gw,
@@ -374,7 +399,9 @@ export class PaymentGatewayManager {
         paypal: encryptGw(this.state.sandbox.paypal),
         stripe: encryptGw(this.state.sandbox.stripe),
         razorpay: encryptGw(this.state.sandbox.razorpay)
-      }
+      },
+      activePayPalEnvironment: this.getActivePayPalEnvironment(),
+      connectionTestStatus: this.state.connectionTestStatus || {}
     };
   }
 
@@ -414,7 +441,9 @@ export class PaymentGatewayManager {
 
     return {
       production: maskEnv(this.state.production),
-      sandbox: maskEnv(this.state.sandbox)
+      sandbox: maskEnv(this.state.sandbox),
+      activePayPalEnvironment: this.getActivePayPalEnvironment(),
+      connectionTestStatus: this.state.connectionTestStatus || {}
     };
   }
 
@@ -479,9 +508,9 @@ export class PaymentGatewayManager {
     return this.getMaskedState()[env];
   }
 
-  public async verifyWebhookSignature(params: { gateway?: string; headers: Record<string, any>; rawBody: Buffer | string }): Promise<boolean> {
+  public async verifyWebhookSignature(params: { gateway?: string; headers: Record<string, any>; rawBody: Buffer | string; env?: 'production' | 'sandbox' }): Promise<boolean> {
     const gateway = (params.gateway || 'stripe').toLowerCase();
-    const env = gateway === 'paypal' ? resolvePayPalEnv() : (process.env.NODE_ENV === 'production' ? 'production' : 'sandbox');
+    const env = params.env || (gateway === 'paypal' ? resolvePayPalEnv() : (process.env.NODE_ENV === 'production' ? 'production' : 'sandbox'));
     const gw = this.getGateway(gateway as any, env);
     const webhookSecret = gw?.webhookId;
 
@@ -630,6 +659,7 @@ export class PaymentGatewayManager {
     expectedSessionId?: string;
     expectedAmount: number;
     expectedCurrency?: string;
+    env?: 'production' | 'sandbox';
   }): Promise<{
     verified: boolean;
     paypalOrderId: string;
@@ -642,7 +672,7 @@ export class PaymentGatewayManager {
     error?: string;
   }> {
     const isProd = process.env.NODE_ENV === 'production' || INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url);
-    const env = resolvePayPalEnv();
+    const env = params.env || resolvePayPalEnv();
     const gw = this.getGateway('paypal', env);
     const hasCredentials = Boolean(gw && gw.enabled && gw.clientId && gw.clientSecret);
     const expectedCurr = (params.expectedCurrency || 'USD').toUpperCase();
@@ -851,10 +881,11 @@ export class PaymentGatewayManager {
     transactionId?: string;
     expectedAmount: number;
     expectedCurrency: string;
+    env?: 'production' | 'sandbox';
   }): Promise<{ verified: boolean; error?: string; captureId?: string; paypalOrderId?: string }> {
     const isProd = process.env.NODE_ENV === 'production' || INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url);
     const gwName = (params.gateway || 'stripe').toLowerCase() as 'stripe' | 'paypal' | 'razorpay';
-    const env = gwName === 'paypal' ? resolvePayPalEnv() : (isProd ? 'production' : 'sandbox');
+    const env = params.env || (gwName === 'paypal' ? resolvePayPalEnv() : (isProd ? 'production' : 'sandbox'));
     const gw = this.getGateway(gwName, env);
     const hasCredentials = gw && gw.enabled && gw.clientSecret;
 
@@ -1138,9 +1169,10 @@ export class PaymentGatewayManager {
     purpose?: string;
     description?: string;
     checkoutId: string;
+    env?: 'production' | 'sandbox';
   }): Promise<{ providerSessionId: string; checkoutUrl: string }> {
     const isProd = process.env.NODE_ENV === 'production' || INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url);
-    const env = params.gateway === 'paypal' ? resolvePayPalEnv() : (isProd ? 'production' : 'sandbox');
+    const env = params.env || (params.gateway === 'paypal' ? resolvePayPalEnv() : (isProd ? 'production' : 'sandbox'));
     
     if (params.currency !== 'USD') {
       throw new Error('Only USD currency is supported for payment checkout sessions.');
@@ -1296,15 +1328,32 @@ export class PaymentGatewayManager {
   public async testConnection(env: 'production' | 'sandbox', gatewayName: 'paypal' | 'stripe' | 'razorpay'): Promise<{ success: boolean; message: string }> {
     const envState = this.state[env];
     const gw = envState[gatewayName];
+    const testKey = `${env}_${gatewayName}`;
+    if (!this.state.connectionTestStatus) {
+      this.state.connectionTestStatus = {};
+    }
+
+    const recordResult = async (success: boolean, message: string) => {
+      const nowIso = new Date().toISOString();
+      const existing = this.state.connectionTestStatus?.[testKey];
+      this.state.connectionTestStatus![testKey] = {
+        status: success ? 'verified' : 'failed',
+        lastTestedAt: nowIso,
+        lastSuccessAt: success ? nowIso : existing?.lastSuccessAt,
+        message
+      };
+      await this.saveToDatabase();
+      return { success, message };
+    };
 
     if (!gw.enabled) {
-      return { success: false, message: `${gatewayName.toUpperCase()} (${env}) is currently disabled. Enable the gateway before testing connection.` };
+      return recordResult(false, `${gatewayName.toUpperCase()} (${env}) is currently disabled. Enable the gateway before testing connection.`);
     }
     if (!gw.clientId && gatewayName !== 'stripe') {
-      return { success: false, message: `Missing Client ID for ${gatewayName.toUpperCase()} (${env}).` };
+      return recordResult(false, `Missing Client ID for ${gatewayName.toUpperCase()} (${env}).`);
     }
     if (!gw.clientSecret) {
-      return { success: false, message: `Missing Client Secret for ${gatewayName.toUpperCase()} (${env}).` };
+      return recordResult(false, `Missing Client Secret for ${gatewayName.toUpperCase()} (${env}).`);
     }
 
     try {
@@ -1315,9 +1364,9 @@ export class PaymentGatewayManager {
         });
         if (!res.ok) {
           const errText = await res.text();
-          return { success: false, message: `Stripe API handshake failed (${res.status}): ${errText}` };
+          return recordResult(false, `Stripe API handshake failed (${res.status}): ${errText}`);
         }
-        return { success: true, message: `Stripe (${env}) connection verified successfully via live balance handshake.` };
+        return recordResult(true, `Stripe (${env}) connection verified successfully via live balance handshake.`);
       } else if (gatewayName === 'paypal') {
         const paypalHost = env === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com';
         const tokenRes = await fetch(`${paypalHost}/v1/oauth2/token`, {
@@ -1331,9 +1380,9 @@ export class PaymentGatewayManager {
         });
         if (!tokenRes.ok) {
           const errText = await tokenRes.text();
-          return { success: false, message: `PayPal API handshake failed (${tokenRes.status}): ${errText}` };
+          return recordResult(false, `PayPal API handshake failed (${tokenRes.status}): ${errText}`);
         }
-        return { success: true, message: `PayPal (${env}) connection verified successfully via live OAuth handshake.` };
+        return recordResult(true, `PayPal (${env}) connection verified successfully via live OAuth handshake.`);
       } else if (gatewayName === 'razorpay') {
         const authHeader = `Basic ${Buffer.from(`${gw.clientId}:${gw.clientSecret}`).toString('base64')}`;
         const res = await fetch('https://api.razorpay.com/v1/payments?count=1', {
@@ -1342,13 +1391,13 @@ export class PaymentGatewayManager {
         });
         if (!res.ok) {
           const errText = await res.text();
-          return { success: false, message: `Razorpay API handshake failed (${res.status}): ${errText}` };
+          return recordResult(false, `Razorpay API handshake failed (${res.status}): ${errText}`);
         }
-        return { success: true, message: `Razorpay (${env}) connection verified successfully via live API handshake.` };
+        return recordResult(true, `Razorpay (${env}) connection verified successfully via live API handshake.`);
       }
-      return { success: false, message: `Unsupported gateway: ${gatewayName}` };
+      return recordResult(false, `Unsupported gateway: ${gatewayName}`);
     } catch (err: any) {
-      return { success: false, message: `Live API handshake error for ${gatewayName.toUpperCase()}: ${err.message}` };
+      return recordResult(false, `Live API handshake error for ${gatewayName.toUpperCase()}: ${err.message}`);
     }
   }
 }

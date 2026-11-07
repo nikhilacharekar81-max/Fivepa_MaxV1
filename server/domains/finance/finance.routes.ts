@@ -73,6 +73,7 @@ export async function ensurePaymentCheckoutSchema(pool: any): Promise<void> {
   if (checkoutSchemaInitialized) return;
   try {
     await pool.query(`
+      ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS environment VARCHAR(32) NOT NULL DEFAULT 'sandbox';
       ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS paypal_order_id VARCHAR(128);
       ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS paypal_capture_id VARCHAR(128);
       ALTER TABLE payment_checkout_sessions ADD COLUMN IF NOT EXISTS last_webhook_event_id VARCHAR(128);
@@ -929,6 +930,19 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
     const checkoutId = 'chk_' + randomUUID();
     const safeMetadata = metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {};
 
+    const activeEnv: 'production' | 'sandbox' = (req.body.environment === 'production' || req.body.environment === 'sandbox')
+      ? req.body.environment
+      : (normalizedGateway === 'paypal' ? paymentGatewayManager.getActivePayPalEnvironment() : (IS_PRODUCTION ? 'production' : 'sandbox'));
+
+    if (normalizedGateway === 'paypal' && activeEnv === 'production') {
+      const prodGw = paymentGatewayManager.getGateway('paypal', 'production');
+      if (!prodGw || !prodGw.enabled || !prodGw.clientId || !prodGw.clientSecret) {
+        return res.status(400).json({
+          error: 'PayPal Live mode is active, but PayPal Live credentials (Client ID and Client Secret) are not configured in Super Admin Panel.'
+        });
+      }
+    }
+
     const providerSession = await paymentGatewayManager.createCheckoutSession({
       gateway: normalizedGateway as any,
       amount: authoritativeAmount,
@@ -937,7 +951,8 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
       orderId: normalizedOrderId || undefined,
       purpose: resolvedPurpose,
       description: resolvedDescription,
-      checkoutId
+      checkoutId,
+      env: activeEnv
     });
 
     const paypalOrderId = normalizedGateway === 'paypal' ? providerSession.providerSessionId : null;
@@ -945,8 +960,8 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
     try {
       await pool.query(
         `INSERT INTO payment_checkout_sessions
-           (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, paypal_order_id, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, $9, NOW(), NOW())`,
+           (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, paypal_order_id, environment, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, $9, $10, NOW(), NOW())`,
         [
           checkoutId,
           authUserId,
@@ -956,15 +971,16 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
           resolvedPurpose,
           providerSession.providerSessionId,
           paypalOrderId,
+          activeEnv,
           JSON.stringify(safeMetadata)
         ]
       );
     } catch {
       // Fallback for legacy schema without new columns
       await pool.query(
-        `INSERT INTO payment_checkout_sessions (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, NOW())`,
-        [checkoutId, authUserId, normalizedOrderId, normalizedGateway, authoritativeAmount, resolvedPurpose, providerSession.providerSessionId]
+        `INSERT INTO payment_checkout_sessions (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, environment, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, NOW())`,
+        [checkoutId, authUserId, normalizedOrderId, normalizedGateway, authoritativeAmount, resolvedPurpose, providerSession.providerSessionId, activeEnv]
       );
     }
 
@@ -1344,7 +1360,8 @@ const handlePayPalCaptureRoute = async (req: Request, res: Response) => {
         paypalOrderId: targetPayPalOrderId,
         expectedSessionId: String(sess.id),
         expectedAmount,
-        expectedCurrency: 'USD'
+        expectedCurrency: 'USD',
+        env: sess.environment || 'sandbox'
       });
 
       if (!captureResult.verified) {
@@ -1972,7 +1989,8 @@ export const handlePaymentWebhook = async (req: Request, res: Response) => {
         paypalOrderId: relatedPayPalOrderId || preSess.paypal_order_id || preSess.provider_tx_id,
         transactionId: txId,
         expectedAmount: preExpectedAmount,
-        expectedCurrency: 'USD'
+        expectedCurrency: 'USD',
+        env: preSess.environment || undefined
       });
       if (!preVerify.verified) {
         await markWebhookEvent('failed', preSess.id, preVerify.error || 'Provider verification failed');
