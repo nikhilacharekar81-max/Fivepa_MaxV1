@@ -104,7 +104,13 @@ router.get('/fees/quote', async (req: Request, res: Response) => {
     
     // Authoritative fee calculation using live admin settings
     const q = await quoteOrderWithLiveSettings(gigPrice);
-    res.json({ ...q });
+    res.json({
+      ...q,
+      config: {
+        buyerFeePercent: q.buyerFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
+        smallOrderThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold
+      }
+    });
   } catch (err: any) {
     res.status(err.status || 400).json({ error: err.message });
   }

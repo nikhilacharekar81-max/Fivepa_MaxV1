@@ -970,15 +970,16 @@ export class FinancialTransactionService {
         const comm = siteSettings.getSettings().commission;
         const calculated = calculateOrderFees(gigPrice, {
           commissionPercent: comm.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent,
-          buyerFeePercent: comm.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent,
-          smallOrderFee: comm.smallOrderFeeAmount ?? DEFAULT_FEE_CONFIG.smallOrderFee,
-          smallOrderThreshold: comm.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold
+          buyerFeePercent: DEFAULT_FEE_CONFIG.buyerFeePercent,
+          smallOrderFee: DEFAULT_FEE_CONFIG.smallOrderFee,
+          smallOrderThreshold: DEFAULT_FEE_CONFIG.smallOrderThreshold,
+          minimumOrderAmount: 5.00
         });
         serviceFee = calculated.serviceFee;
         smallOrderFee = calculated.smallOrderFee;
         commissionPercent = comm.commissionPercent ?? DEFAULT_FEE_CONFIG.commissionPercent;
-        buyerFeePercent = comm.buyerProcessingFeePercent ?? DEFAULT_FEE_CONFIG.buyerFeePercent;
-        smallOrderThreshold = comm.smallOrderFeeThreshold ?? DEFAULT_FEE_CONFIG.smallOrderThreshold;
+        buyerFeePercent = DEFAULT_FEE_CONFIG.buyerFeePercent;
+        smallOrderThreshold = DEFAULT_FEE_CONFIG.smallOrderThreshold;
         clientTotal = calculated.clientTotal;
         platformCommission = calculated.platformCommission;
         freelancerNet = calculated.freelancerNet;
