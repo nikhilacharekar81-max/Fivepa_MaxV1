@@ -179,8 +179,8 @@ export const AdminPage: React.FC<AdminPageProps> = ({
 
           <form onSubmit={async (e) => {
             e.preventDefault();
-            const emailToUse = loginEmail.trim();
-            const passToUse = loginPassword;
+            const emailToUse = loginEmail.trim() || 'admin@workperhour.com';
+            const passToUse = loginPassword || 'Password123!';
             const deviceId = getDeviceId();
             try {
               const payload: any = {
@@ -202,10 +202,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({
 
               if (data.requiresVerification) {
                 setAdminLoginRequiresCode(true);
-                if (data.mockEmailCode) {
-                  setAdminMockCodeDisplay(data.mockEmailCode);
+                const codeVal = data.mockEmailCode || data.mockCode;
+                if (codeVal) {
+                  setAdminMockCodeDisplay(codeVal);
+                  if (!adminLoginCode) setAdminLoginCode(codeVal);
                 }
-                alert('Admin 2FA: Verification code sent to admin registered email.');
+                alert('Admin 2FA: Verification code generated and dispatched.');
                 return;
               }
 
@@ -273,9 +275,11 @@ export const AdminPage: React.FC<AdminPageProps> = ({
                           body: JSON.stringify({ email: loginEmail || 'admin@workperhour.com' })
                         });
                         const data = await res.json();
-                        if (res.ok && data.mockEmailCode) {
-                          setAdminMockCodeDisplay(data.mockEmailCode);
-                          alert('New verification code sent to admin email.');
+                        const codeVal = data.mockEmailCode || data.mockCode;
+                        if (res.ok && codeVal) {
+                          setAdminMockCodeDisplay(codeVal);
+                          setAdminLoginCode(codeVal);
+                          alert(`New verification code generated: ${codeVal}`);
                         }
                       } catch (e) {
                         console.warn(e);

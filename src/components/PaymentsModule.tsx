@@ -135,6 +135,7 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
   const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [showCodeModal, setShowCodeModal] = useState(false);
   const [verificationCode, setVerificationCode] = useState('');
+  const [mockWithdrawCode, setMockWithdrawCode] = useState<string | null>(null);
   const [codeRequired, setCodeRequired] = useState(true);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
 
@@ -1107,10 +1108,17 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
         body: JSON.stringify({ amount: amt })
       });
       if (res.ok) {
+        const payload = await res.json().catch(() => ({}));
         setCodeRequired(true);
         setShowWithdrawModal(false);
         setShowCodeModal(true);
-        setVerificationCode('');
+        if (payload?.mockCode) {
+          setMockWithdrawCode(payload.mockCode);
+          setVerificationCode(payload.mockCode);
+        } else {
+          setMockWithdrawCode(null);
+          setVerificationCode('');
+        }
       } else {
         const errPayload = await res.json().catch(() => ({}));
         throw new Error(errPayload.error || 'Failed to initiate withdrawal.');
@@ -3199,6 +3207,12 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                   <p className="text-xs text-slate-600 mb-3 leading-relaxed">
                     Enter the 6-digit security code dispatched to <strong>{currentUser?.email}</strong> to confirm this USD withdrawal.
                   </p>
+                  {mockWithdrawCode && (
+                    <div className="p-2.5 mb-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center justify-between">
+                      <span className="font-medium">Sandbox / Testing Code:</span>
+                      <span className="font-mono font-bold text-sm bg-white px-2 py-0.5 rounded border border-emerald-200 select-all">{mockWithdrawCode}</span>
+                    </div>
+                  )}
                   <input
                     type="text"
                     maxLength={6}

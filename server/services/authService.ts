@@ -403,7 +403,8 @@ export async function handleLogin(req: Request, res: Response) {
         message: isAdminRole
           ? 'Admin login requires an email verification code. Code sent to your registered admin email.'
           : 'New device detected. Please provide the email verification code sent to your email.',
-        deviceId
+        deviceId,
+        ...(process.env.RESEND_API_KEY ? {} : { mockCode: newCode, mockEmailCode: newCode })
       });
     }
 

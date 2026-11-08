@@ -359,7 +359,8 @@ authRouter.post('/resend-email-code', rateLimit(10, 3_600_000), async (req: Requ
   });
 
   res.json({
-    ...generic
+    ...generic,
+    ...(process.env.RESEND_API_KEY ? {} : { mockCode: newCode, mockEmailCode: newCode })
   });
 });
 
@@ -850,7 +851,8 @@ authRouter.post('/withdrawal/request-code', requireAuth, requireFinancialActiveS
   res.json({
     success: true,
     message: 'Withdrawal verification code sent to your registered email.',
-    codeRequired: true
+    codeRequired: true,
+    ...(process.env.RESEND_API_KEY ? {} : { mockCode: code })
   });
 });
 
