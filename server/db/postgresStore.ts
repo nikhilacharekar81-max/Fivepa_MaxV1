@@ -1014,7 +1014,29 @@ export class PostgresStore {
   // --- TEST CLEANUP ---
   async cleanAllData(): Promise<void> {
     if (!isPostgresEnabled()) return;
+    if (process.env.NODE_ENV !== 'test') {
+      throw new Error(`[PostgresStore] FATAL: cleanAllData() is strictly prohibited when NODE_ENV is not 'test' (current: ${process.env.NODE_ENV}).`);
+    }
+    const dbName = getDatabaseName();
+    const connStr = process.env.DATABASE_URL || '';
+    const isTestDbName = dbName.includes('test') || dbName.includes('cloud_sql_test_database');
+    const isTestConnStr = connStr === '' || connStr.includes('test') || connStr.includes('cloud_sql_test_database');
+    if (!isTestDbName && !isTestConnStr) {
+      throw new Error(`[PostgresStore] FATAL: Refusing cleanAllData(): Database '${dbName}' or connection string is not explicitly identified as a dedicated test database.`);
+    }
+
     const pool = this.getPool();
+    try {
+      const res = await pool.query('SELECT current_database()');
+      const activeDb = res.rows[0]?.current_database || '';
+      if (!activeDb.includes('test') && activeDb !== 'cloud_sql_test_database') {
+        throw new Error(`[PostgresStore] FATAL: Refusing cleanAllData(): Connected database '${activeDb}' is not explicitly identified as a dedicated test database.`);
+      }
+    } catch (err: any) {
+      if (err.message && err.message.includes('FATAL')) throw err;
+      // If query fails, verify we are in test environment and dbName/connStr checked out.
+    }
+
     const tables = [
       'ledger_entries',
       'ledger_journals',

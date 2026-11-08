@@ -127,6 +127,15 @@ if (IS_PROD) {
 }
 
 let isShuttingDown = false;
+let isStoreHydrated = process.env.NODE_ENV === 'test';
+
+// Hydration guard middleware: prevent requests against partially hydrated store
+app.use((req, res, next) => {
+  if (!isStoreHydrated && process.env.NODE_ENV !== 'test') {
+    return res.status(503).json({ error: 'Server starting up and hydrating database. Please retry shortly.' });
+  }
+  next();
+});
 
 // Global Security Middleware
 app.use((req, res, next) => {
@@ -397,32 +406,37 @@ process.on('unhandledRejection', (reason) => {
 });
 
 if (process.env.NODE_ENV !== 'test' && !server.listening) {
-  server.on('error', (err: any) => {
-    if (err.code === 'EADDRINUSE') {
-      console.warn(`Port ${PORT} in use, selecting dynamic fallback port`);
-      server.listen(0, '0.0.0.0');
+  (async () => {
+    try {
+      console.log('[Server] Hydrating store from PostgreSQL before opening server port...');
+      await hydrateStoreFromPostgres();
+      isStoreHydrated = true;
+      console.log('[Server] PostgreSQL hydration completed successfully.');
+      runBackgroundJobs();
+    } catch (err) {
+      if (IS_PROD) {
+        console.error('[FATAL] Postgres hydration failed; refusing to start:', err);
+        process.exit(1);
+      } else {
+        console.warn('[DEV] Postgres hydration notice (continuing in dev mode):', err);
+        isStoreHydrated = true;
+      }
     }
-  });
-  server.listen(Number(PORT), '0.0.0.0', () => {
-    const actualPort = (server.address() as any)?.port || PORT;
-    console.log(`WorkPerHour server running on http://0.0.0.0:${actualPort}`);
-  });
-}
 
-// Application Startup & Hydration
-(async () => {
-  try {
-    await hydrateStoreFromPostgres();
-    runBackgroundJobs();
-  } catch (err) {
-    if (IS_PROD) {
-      console.error('[FATAL] Postgres hydration failed; refusing to start:', err);
-      process.exit(1);
-    } else {
-      console.warn('[DEV] Postgres hydration notice (continuing in dev mode):', err);
-    }
-  }
-})();
+    server.on('error', (err: any) => {
+      if (err.code === 'EADDRINUSE') {
+        console.warn(`Port ${PORT} in use, selecting dynamic fallback port`);
+        server.listen(0, '0.0.0.0');
+      }
+    });
+    server.listen(Number(PORT), '0.0.0.0', () => {
+      const actualPort = (server.address() as any)?.port || PORT;
+      console.log(`WorkPerHour server running on http://0.0.0.0:${actualPort}`);
+    });
+  })();
+} else {
+  isStoreHydrated = true;
+}
 
 // Graceful shutdown
 import { stopOutboxProcessor } from './server/services/outboxService.js';

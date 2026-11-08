@@ -336,7 +336,8 @@ export async function handleLogin(req: Request, res: Response) {
     return res.status(403).json({
       error: 'Email address has not been verified. Please verify your email before logging in.',
       requiresVerification: true,
-      email: user.email
+      email: user.email,
+      ...(shouldExposeMockCodes() ? { mockCode: newCode, mockEmailCode: newCode } : {})
     });
   }
 
