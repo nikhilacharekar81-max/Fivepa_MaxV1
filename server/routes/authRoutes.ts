@@ -24,6 +24,7 @@ import {
   recordUserEmail,
   EMAIL_DELIVERY_ENABLED
 } from '../services/notificationService.js';
+import { shouldExposeMockCodes } from '../services/mockCodeHelper.js';
 import {
   emailVerificationCodes,
   smsVerificationCodes,
@@ -185,7 +186,8 @@ authRouter.post('/signup', rateLimit(20, 3_600_000), async (req: Request, res: R
       requiresVerification: true,
       message: 'Account created! Please enter the 6-digit verification code sent to your email to complete registration.',
       email: normalizedEmail,
-      user: safeUser(newUser)
+      user: safeUser(newUser),
+      ...(shouldExposeMockCodes() ? { mockCode: emailCode, mockEmailCode: emailCode } : {})
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Signup failed' });
@@ -360,7 +362,7 @@ authRouter.post('/resend-email-code', rateLimit(10, 3_600_000), async (req: Requ
 
   res.json({
     ...generic,
-    ...(process.env.RESEND_API_KEY ? {} : { mockCode: newCode, mockEmailCode: newCode })
+    ...(shouldExposeMockCodes() ? { mockCode: newCode, mockEmailCode: newCode } : {})
   });
 });
 
@@ -585,7 +587,10 @@ authRouter.post('/forgot-password/request', rateLimit(10, 3_600_000), async (req
     deliverSecurityCode(user.mobile, 'PASSWORD_RESET', code);
   }
 
-  res.json({ ...genericResponse });
+  res.json({
+    ...genericResponse,
+    ...(shouldExposeMockCodes() ? { mockCode: code, mockEmailCode: code } : {})
+  });
 });
 
 authRouter.post('/forgot-password/verify', async (req: Request, res: Response) => {
@@ -852,7 +857,7 @@ authRouter.post('/withdrawal/request-code', requireAuth, requireFinancialActiveS
     success: true,
     message: 'Withdrawal verification code sent to your registered email.',
     codeRequired: true,
-    ...(process.env.RESEND_API_KEY ? {} : { mockCode: code })
+    ...(shouldExposeMockCodes() ? { mockCode: code } : {})
   });
 });
 

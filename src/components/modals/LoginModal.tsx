@@ -91,30 +91,18 @@ export const LoginModal: React.FC<LoginModalProps> = ({
             </div>
 
             {mockEmailCodeDisplay && (
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-800 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold flex items-center gap-1 text-[11px] uppercase tracking-wider text-emerald-900">
-                    <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Demo 2FA OTP</span>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setLoginCode(mockEmailCodeDisplay)}
-                    className="text-[11px] font-bold text-emerald-700 hover:underline cursor-pointer"
-                  >
-                    Auto-fill
-                  </button>
-                </div>
-                <div className="flex items-center justify-between bg-white px-3 py-1.5 rounded-xl border border-emerald-200">
-                  <span className="font-mono font-bold text-base tracking-widest text-emerald-700">{mockEmailCodeDisplay}</span>
-                  <button
-                    type="button"
-                    onClick={() => setLoginCode(mockEmailCodeDisplay)}
-                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg text-[10px] transition cursor-pointer"
-                  >
-                    Use Code
-                  </button>
-                </div>
+              <div className="p-3 bg-amber-50 border border-amber-300 rounded-2xl text-xs text-amber-900 flex items-center justify-between">
+                <span className="font-bold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span>TEST MODE - code: {mockEmailCodeDisplay}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setLoginCode(mockEmailCodeDisplay)}
+                  className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold text-[10px] rounded-lg transition cursor-pointer shrink-0"
+                >
+                  Fill code
+                </button>
               </div>
             )}
 

@@ -35,8 +35,10 @@ export function generate6DigitCode(): string {
   return randomInt(100000, 1000000).toString();
 }
 
-export function mockCode(_key: string, _code: string): Record<string, string> {
-  return {};
+import { shouldExposeMockCodes } from './mockCodeHelper.js';
+
+export function mockCode(key: string, code: string): Record<string, string> {
+  return shouldExposeMockCodes() ? { [key]: code } : {};
 }
 
 const USER_DEVICE_VERIFICATION = process.env.USER_DEVICE_VERIFICATION
@@ -404,7 +406,7 @@ export async function handleLogin(req: Request, res: Response) {
           ? 'Admin login requires an email verification code. Code sent to your registered admin email.'
           : 'New device detected. Please provide the email verification code sent to your email.',
         deviceId,
-        ...(process.env.RESEND_API_KEY ? {} : { mockCode: newCode, mockEmailCode: newCode })
+        ...(shouldExposeMockCodes() ? { mockCode: newCode, mockEmailCode: newCode } : {})
       });
     }
 

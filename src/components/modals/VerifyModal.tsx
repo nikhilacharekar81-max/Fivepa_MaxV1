@@ -111,51 +111,37 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
           </button>
         </div>
 
-        {/* Prominent Demo / Sandbox OTP Notice */}
-        <div className="mb-5 p-3.5 bg-emerald-50/80 border border-emerald-200/90 rounded-2xl space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-bold text-emerald-900 uppercase tracking-wider flex items-center gap-1">
-              <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Sandbox / Demo Verification Code</span>
-            </span>
-            {currentMockCode && (
-              <button
-                type="button"
-                onClick={handleCopyCode}
-                className="text-[11px] font-medium text-emerald-700 hover:text-emerald-900 flex items-center gap-1 cursor-pointer transition"
-              >
-                {copied ? <CheckCircle2 className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                <span>{copied ? 'Copied' : 'Copy'}</span>
-              </button>
-            )}
-          </div>
-
-          {currentMockCode ? (
-            <div className="flex items-center justify-between gap-3 bg-white p-2.5 rounded-xl border border-emerald-200 shadow-xs">
-              <span className="text-xl font-mono font-black tracking-widest text-emerald-700 select-all">
-                {currentMockCode}
-              </span>
-              <button
-                type="button"
-                onClick={handleAutoFill}
-                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg shadow-xs transition cursor-pointer"
-              >
-                Auto-fill Code
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center justify-between text-xs text-emerald-800">
-              <span>Code generated on server. Click resend if needed:</span>
-              <button
-                type="button"
-                onClick={verificationMode === 'email' ? handleResendEmailCode : handleResendSmsCode}
-                className="font-bold underline cursor-pointer text-emerald-900 flex items-center gap-1"
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>Generate Code</span>
-              </button>
+        {/* Prominent TEST MODE Verification Code Notice */}
+        <>
+          {currentMockCode && (
+            <div className="mb-5 p-3.5 bg-amber-50 border border-amber-300 rounded-2xl space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-amber-900 uppercase tracking-wider flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span>TEST MODE - code: {currentMockCode}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleAutoFill}
+                  className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-bold rounded-lg transition cursor-pointer shrink-0"
+                >
+                  Fill code
+                </button>
+              </div>
             </div>
           )}
+
+          <div className="flex items-center justify-between text-xs text-emerald-800 mb-4">
+            <span>Code generated on server. Click resend if needed:</span>
+            <button
+              type="button"
+              onClick={verificationMode === 'email' ? handleResendEmailCode : handleResendSmsCode}
+              className="font-bold underline cursor-pointer text-emerald-900 flex items-center gap-1"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Generate Code</span>
+            </button>
+          </div>
 
           <div className="flex items-start gap-1.5 text-[11px] text-emerald-800/90 leading-relaxed pt-0.5">
             <Info className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
@@ -172,7 +158,7 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
               )}
             </span>
           </div>
-        </div>
+        </>
 
         {/* Verification Form */}
         {verificationMode === 'email' ? (
@@ -199,18 +185,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
             >
               Verify Email & Activate Account
             </button>
-
-            <div className="flex items-center justify-between text-xs pt-1 text-slate-500">
-              <span>Didn't get the code?</span>
-              <button 
-                type="button" 
-                onClick={handleResendEmailCode} 
-                className="font-bold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer flex items-center gap-1"
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>Resend Code</span>
-              </button>
-            </div>
           </form>
         ) : (
           <form onSubmit={handleVerifySmsSubmit} className="space-y-4">
@@ -236,18 +210,6 @@ export const VerifyModal: React.FC<VerifyModalProps> = ({
             >
               Verify SMS & Activate Account
             </button>
-
-            <div className="flex items-center justify-between text-xs pt-1 text-slate-500">
-              <span>Didn't get the SMS?</span>
-              <button 
-                type="button" 
-                onClick={handleResendSmsCode} 
-                className="font-bold text-emerald-600 hover:text-emerald-700 hover:underline cursor-pointer flex items-center gap-1"
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>Resend SMS</span>
-              </button>
-            </div>
           </form>
         )}
       </div>

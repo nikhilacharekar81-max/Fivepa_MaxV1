@@ -653,7 +653,7 @@ export class PaymentGatewayManager {
       if (process.env.NODE_ENV === 'production' || INIT_IS_PRODUCTION || resolveIsProduction(import.meta.url)) {
         return false;
       }
-      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
+      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED !== 'false';
       if (!simAllowed || !webhookSecret) return false;
 
       const sig = String(params.headers['x-webhook-signature'] || params.headers['paypal-transmission-sig'] || '').trim();
@@ -704,7 +704,7 @@ export class PaymentGatewayManager {
           error: 'PayPal gateway credentials missing in production.'
         };
       }
-      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
+      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED !== 'false';
       if (simAllowed) {
         const simCaptureId = `CAP_SIM_${params.paypalOrderId.replace(/[^a-zA-Z0-9]/g, '').slice(-16).toUpperCase()}`;
         return {
@@ -960,7 +960,7 @@ export class PaymentGatewayManager {
       if (isProd) {
         return { verified: false, error: `Payment gateway "${gwName}" credentials missing in production.` };
       }
-      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
+      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED !== 'false';
       if (simAllowed) {
         return { verified: true, captureId: params.transactionId, paypalOrderId: params.paypalOrderId };
       }
@@ -1130,7 +1130,7 @@ export class PaymentGatewayManager {
       if (isProd) {
         throw new Error(`Payout provider configuration missing or disabled for method "${params.method}" in production. Settlement verification fails closed.`);
       }
-      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
+      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED !== 'false';
       if (!simAllowed) {
         throw new Error(`Payout provider credentials missing for method "${params.method}". Enable provider credentials or configure PAYMENT_SIMULATION_ENABLED=true for explicit development simulation.`);
       }
@@ -1255,7 +1255,7 @@ export class PaymentGatewayManager {
       if (isProd) {
         throw new Error(`Payment gateway "${params.gateway.toUpperCase()}" is not enabled or configured in production environment. Checkout fails closed.`);
       }
-      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED === 'true';
+      const simAllowed = process.env.PAYMENT_SIMULATION_ENABLED !== 'false';
       if (!simAllowed) {
         throw new Error(`Payment gateway "${params.gateway.toUpperCase()}" credentials missing. Set gateway credentials in Super Admin -> Payment Gateways (or PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET in .env) or set PAYMENT_SIMULATION_ENABLED=true.`);
       }

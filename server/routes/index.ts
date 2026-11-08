@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { wrapRouter } from '../middleware/asyncHandler.js';
 import { verifyAuthTokenMiddleware } from '../middleware/auth.js';
 import { authRouter } from './authRoutes.js';
 import { userRouter } from './userRoutes.js';
@@ -13,18 +14,19 @@ import notificationRouter from './notificationRoutes.js';
 import adminRouter from './adminRoutes.js';
 
 export const apiRouter = Router();
+wrapRouter(apiRouter);
 apiRouter.use(verifyAuthTokenMiddleware);
 
-apiRouter.use('/auth', authRouter);
-apiRouter.use(userRouter);
-apiRouter.use(gigRouter);
-apiRouter.use(projectRouter);
-apiRouter.use(proposalRouter);
-apiRouter.use(orderRouter);
-apiRouter.use(workstreamRouter);
-apiRouter.use(financialRouter);
-apiRouter.use(reviewRouter);
-apiRouter.use(notificationRouter);
-apiRouter.use(adminRouter);
+apiRouter.use('/auth', wrapRouter(authRouter));
+apiRouter.use(wrapRouter(userRouter));
+apiRouter.use(wrapRouter(gigRouter));
+apiRouter.use(wrapRouter(projectRouter));
+apiRouter.use(wrapRouter(proposalRouter));
+apiRouter.use(wrapRouter(orderRouter));
+apiRouter.use(wrapRouter(workstreamRouter));
+apiRouter.use(wrapRouter(financialRouter));
+apiRouter.use(wrapRouter(reviewRouter));
+apiRouter.use(wrapRouter(notificationRouter));
+apiRouter.use(wrapRouter(adminRouter));
 
 export default apiRouter;

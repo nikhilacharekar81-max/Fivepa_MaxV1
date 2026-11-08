@@ -17,6 +17,7 @@ import { rootRouter } from './server/routes/rootRoutes.js';
 import { siteSettings, DEFAULT_SITE_SETTINGS } from './src/server/siteSettings.js';
 import { isGigPublic, sanitizePublicGig } from './server/publicData.js';
 import { safeUser, assertProductionJwtSecret } from './server/middleware/auth.js';
+import { shouldExposeMockCodes } from './server/services/mockCodeHelper.js';
 import { assertProductionGatewayEncryptionKey } from './server/domains/finance/paymentGateways.js';
 import {
   saveOrdersToDisk,
@@ -108,6 +109,21 @@ if (IS_PROD) {
   assertProductionJwtSecret();
   assertProductionGatewayEncryptionKey();
   assertProductionPostgresConfigured();
+
+  if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) {
+    console.error('[FATAL] Production startup error: RESEND_API_KEY and EMAIL_FROM must be configured in production.');
+    if (process.env.NODE_ENV !== 'test') process.exit(1);
+  }
+  if (process.env.ALLOW_MOCK_CODES === 'true') {
+    console.error('[FATAL] Production startup error: ALLOW_MOCK_CODES=true is not permitted in production mode.');
+    if (process.env.NODE_ENV !== 'test') process.exit(1);
+  }
+} else {
+  if (shouldExposeMockCodes()) {
+    console.log('[AUTH] MOCK CODES ENABLED (test mode)');
+  } else if (!process.env.RESEND_API_KEY) {
+    console.warn('[AUTH WARNING] Email provider (RESEND_API_KEY) is not configured and ALLOW_MOCK_CODES is off. Verification codes will not be sent or exposed. Set ALLOW_MOCK_CODES=true in .env for local testing.');
+  }
 }
 
 let isShuttingDown = false;
@@ -172,15 +188,35 @@ app.use(async (_req, _res, next) => {
 // Mount Central API Router
 app.use('/api', apiRouter);
 
+// Catch-all for unknown /api/* paths
+app.use('/api/*', (_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
 // Register root routes (robots.txt, sitemap.xml)
 app.use('/', rootRouter);
 
 // Global Error Handler
-app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  const status = Number(err?.status || err?.statusCode || 500);
-  const isUriError = err instanceof URIError || err?.name === 'URIError' || (err?.message && String(err.message).includes('URI'));
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) {
+    return next(err);
+  }
 
-  if (isUriError && !req.path?.startsWith('/api') && !req.originalUrl?.startsWith('/api')) {
+  const status = Number(err?.status || err?.statusCode || 500);
+  const isApi = req.path?.startsWith('/api') || req.originalUrl?.startsWith('/api');
+
+  console.error(`[Error] ${req.method} ${req.path}:`, err);
+
+  if (isApi) {
+    if ((process.env.NODE_ENV === 'production' || IS_PROD) && status >= 500) {
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+    const safeMsg = (status < 500 && err?.message) ? err.message : ((process.env.NODE_ENV === 'production' || IS_PROD) ? 'Internal server error' : (err?.message || 'Internal server error'));
+    return res.status(status).json({ error: safeMsg });
+  }
+
+  const isUriError = err instanceof URIError || err?.name === 'URIError' || (err?.message && String(err.message).includes('URI'));
+  if (isUriError) {
     const clientDistHtml = path.resolve(__dirname, 'dist/client/index.html');
     const devHtml = path.resolve(__dirname, 'index.html');
     const htmlPath = fs.existsSync(clientDistHtml) ? clientDistHtml : devHtml;
@@ -189,11 +225,16 @@ app.use((err: any, req: express.Request, res: express.Response, _next: express.N
     }
   }
 
-  console.error(`[Error] ${req.method} ${req.path}:`, err);
-  if (process.env.NODE_ENV === 'production' && status >= 500) {
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-  return res.status(status).json({ error: err?.message || 'Internal server error' });
+  return res.status(status).setHeader('Content-Type', 'text/html').send(`
+    &lt;!DOCTYPE html&gt;
+    &lt;html&gt;
+      &lt;head&gt;&lt;title&gt;Error&lt;/title&gt;&lt;/head&gt;
+      &lt;body style="font-family: sans-serif; padding: 2rem; text-align: center;"&gt;
+        &lt;h1&gt;Server Error&lt;/h1&gt;
+        &lt;p&gt;${(process.env.NODE_ENV === 'production' || IS_PROD) ? 'An unexpected error occurred.' : (err?.message || 'An unexpected error occurred.')}&lt;/p&gt;
+      &lt;/body&gt;
+    &lt;/html&gt;
+  `);
 });
 
 

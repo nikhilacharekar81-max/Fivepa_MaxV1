@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import express from 'express';
+import { wrapRouter } from '../../middleware/asyncHandler.js';
 import { randomUUID, createHmac, timingSafeEqual } from 'crypto';
 import {
   store,
@@ -3441,4 +3442,4 @@ router.get('/admin/finance/export/:type', requireAdmin, async (req: Request, res
   }
 });
 
-export default router;
+export default wrapRouter(router);

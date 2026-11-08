@@ -478,7 +478,7 @@ router.get('/admin/payment-gateways', requireAdmin, async (req: Request, res: Re
   }
 });
 
-router.post('/api/admin/payment-gateways/paypal/environment', requireAdmin, async (req: Request, res: Response) => {
+router.post('/admin/payment-gateways/paypal/environment', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { environment, confirmed } = req.body || {};
     const actor = (req as any).authenticatedUser?.name || 'Super Admin';

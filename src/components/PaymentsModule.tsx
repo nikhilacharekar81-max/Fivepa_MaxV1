@@ -3208,9 +3208,18 @@ export const PaymentsModule: React.FC<PaymentsModuleProps> = ({
                     Enter the 6-digit security code dispatched to <strong>{currentUser?.email}</strong> to confirm this USD withdrawal.
                   </p>
                   {mockWithdrawCode && (
-                    <div className="p-2.5 mb-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 flex items-center justify-between">
-                      <span className="font-medium">Sandbox / Testing Code:</span>
-                      <span className="font-mono font-bold text-sm bg-white px-2 py-0.5 rounded border border-emerald-200 select-all">{mockWithdrawCode}</span>
+                    <div className="p-3 mb-3 bg-amber-50 border border-amber-300 rounded-2xl text-xs text-amber-900 flex items-center justify-between">
+                      <span className="font-bold uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                        <span>TEST MODE - code: {mockWithdrawCode}</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setVerificationCode(mockWithdrawCode)}
+                        className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold text-[10px] rounded-lg transition cursor-pointer shrink-0"
+                      >
+                        Fill code
+                      </button>
                     </div>
                   )}
                   <input

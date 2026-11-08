@@ -19,6 +19,8 @@ export function getEmailSender(): string {
   return 'WorkPerHour <onboarding@resend.dev>';
 }
 
+import { shouldExposeMockCodes } from './mockCodeHelper.js';
+
 export function deliverSecurityCode(target: string, type: string, code: string) {
   const apiKey = process.env.RESEND_API_KEY;
   if (apiKey && target.includes('@')) {
@@ -35,10 +37,11 @@ export function deliverSecurityCode(target: string, type: string, code: string) 
     }).catch(err => console.error('[email] send failed:', err?.message || err));
     return;
   }
-  if (!IS_PRODUCTION) {
+  if (shouldExposeMockCodes()) {
     console.warn(`[SECURITY AUTH CODE] ${type} code for ${target}: ${code}`);
   } else {
-    console.info(`[SECURITY AUTH CODE] ${type} code generated for ${target}`);
+    const masked = code ? `****${code.slice(-2)}` : '****';
+    console.info(`[SECURITY AUTH CODE] ${type} code generated for ${target}: ${masked}`);
   }
 }
 

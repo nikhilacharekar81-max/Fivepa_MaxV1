@@ -85,9 +85,18 @@ export const ForgotPasswordModal: React.FC<ForgotPasswordModalProps> = ({
             <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 space-y-1">
               <p className="font-semibold">Enter the 6-digit recovery OTP code sent to {forgotQuery}.</p>
               {mockForgotCodeDisplay && (
-                <div className="p-1.5 bg-white border border-amber-200 rounded text-fiverr-dark font-mono font-bold flex items-center justify-between mt-1">
-                  <span className="text-[10px] text-fiverr-muted uppercase">Test OTP:</span>
-                  <span className="text-xs text-emerald-700">{mockForgotCodeDisplay}</span>
+                <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-900 flex items-center justify-between mt-2">
+                  <span className="font-bold uppercase tracking-wider text-[10px] flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    <span>TEST MODE - code: {mockForgotCodeDisplay}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setForgotCode(mockForgotCodeDisplay)}
+                    className="px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-[10px] rounded transition cursor-pointer shrink-0"
+                  >
+                    Fill code
+                  </button>
                 </div>
               )}
             </div>
