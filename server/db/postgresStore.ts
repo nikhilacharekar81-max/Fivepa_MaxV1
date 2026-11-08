@@ -1017,24 +1017,21 @@ export class PostgresStore {
     if (process.env.NODE_ENV !== 'test') {
       throw new Error(`[PostgresStore] FATAL: cleanAllData() is strictly prohibited when NODE_ENV is not 'test' (current: ${process.env.NODE_ENV}).`);
     }
-    const dbName = getDatabaseName();
-    const connStr = process.env.DATABASE_URL || '';
-    const isTestDbName = dbName.includes('test') || dbName.includes('cloud_sql_test_database');
-    const isTestConnStr = connStr === '' || connStr.includes('test') || connStr.includes('cloud_sql_test_database');
-    if (!isTestDbName && !isTestConnStr) {
-      throw new Error(`[PostgresStore] FATAL: Refusing cleanAllData(): Database '${dbName}' or connection string is not explicitly identified as a dedicated test database.`);
-    }
 
     const pool = this.getPool();
+
+    // 1. Mandatory live query of current_database() - fail closed if query fails or returns non-test db
+    let activeDb = '';
     try {
       const res = await pool.query('SELECT current_database()');
-      const activeDb = res.rows[0]?.current_database || '';
-      if (!activeDb.includes('test') && activeDb !== 'cloud_sql_test_database') {
-        throw new Error(`[PostgresStore] FATAL: Refusing cleanAllData(): Connected database '${activeDb}' is not explicitly identified as a dedicated test database.`);
-      }
+      activeDb = res.rows[0]?.current_database || '';
     } catch (err: any) {
-      if (err.message && err.message.includes('FATAL')) throw err;
-      // If query fails, verify we are in test environment and dbName/connStr checked out.
+      throw new Error(`[PostgresStore] FATAL: cleanAllData() aborted because SELECT current_database() query failed: ${err?.message}`);
+    }
+
+    const isTestDb = activeDb.includes('test') || activeDb === 'cloud_sql_test_database' || activeDb.includes('pglite');
+    if (!activeDb || !isTestDb) {
+      throw new Error(`[PostgresStore] FATAL: Refusing cleanAllData(): Connected database '${activeDb}' is not positively verified as a dedicated test database.`);
     }
 
     const tables = [
@@ -1072,18 +1069,46 @@ export class PostgresStore {
       'financial_ledger_state',
       'app_metadata'
     ];
+
     for (const table of tables) {
+      // Re-verify test database safety prior to every destructive statement
+      let currentActiveDb = '';
+      try {
+        const safetyCheck = await pool.query('SELECT current_database()');
+        currentActiveDb = safetyCheck.rows[0]?.current_database || '';
+      } catch (err: any) {
+        throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData during table ${table} cleanup: Database identity query failed: ${err?.message}`);
+      }
+
+      if (!currentActiveDb.includes('test') && currentActiveDb !== 'cloud_sql_test_database' && !currentActiveDb.includes('pglite')) {
+        throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData: Database identity changed to '${currentActiveDb}'.`);
+      }
+
       try {
         await pool.query(`TRUNCATE TABLE ${table} CASCADE`);
-      } catch {
+      } catch (truncErr: any) {
+        // Re-verify before DELETE fallback as well
+        let currentActiveDbDel = '';
+        try {
+          const safetyCheckDel = await pool.query('SELECT current_database()');
+          currentActiveDbDel = safetyCheckDel.rows[0]?.current_database || '';
+        } catch (err: any) {
+          throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData DELETE fallback for table ${table}: Database identity query failed: ${err?.message}`);
+        }
+
+        if (!currentActiveDbDel.includes('test') && currentActiveDbDel !== 'cloud_sql_test_database' && !currentActiveDbDel.includes('pglite')) {
+          throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData DELETE fallback: Database identity changed to '${currentActiveDbDel}'.`);
+        }
+
         try {
           await pool.query(`DELETE FROM ${table}`);
         } catch (delErr: any) {
+          if (delErr.message && delErr.message.includes('FATAL')) throw delErr;
           console.warn(`[PostgresStore] Notice: table ${table} clean:`, delErr?.message);
         }
       }
     }
-    console.log('[PostgresStore] All application tables successfully cleaned in PostgreSQL.');
+    console.log('[PostgresStore] All application tables successfully cleaned in dedicated test database.');
   }
 }
 

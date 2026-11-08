@@ -11,8 +11,8 @@ describe('FIX 1: PayPal Admin Environment Route Mounting', () => {
   let adminToken: string;
   let userToken: string;
 
-  beforeEach(() => {
-    siteSettings.resetToDefaults();
+  beforeEach(async () => {
+    await siteSettings.resetToDefaults();
   });
 
   // Setup Express app as per the test suite requirement

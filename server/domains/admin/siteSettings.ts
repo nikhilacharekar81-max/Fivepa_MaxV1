@@ -517,8 +517,8 @@ export class SiteSettingsService {
     return JSON.parse(JSON.stringify(this.settings[section]));
   }
 
-  // Reset a section or all settings back to default
-  public resetToDefaults(section?: keyof SiteSettingsState, actor: string = 'Super Admin'): SiteSettingsState {
+  // Reset a section or all settings back to default (Awaits database persistence)
+  public async resetToDefaults(section?: keyof SiteSettingsState, actor: string = 'Super Admin'): Promise<SiteSettingsState> {
     const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
 
     if (section) {
@@ -549,12 +549,13 @@ export class SiteSettingsService {
         actor,
         notes: 'Reset all 9 settings sections back to platform factory defaults'
       });
-      import('../finance/financeService.js').then(({ financeService }) => {
+      try {
+        const { financeService } = await import('../finance/financeService.js');
         financeService.setPlatformCommissionRate(DEFAULT_SITE_SETTINGS.commission.commissionPercent);
-      }).catch(() => {});
+      } catch {}
     }
 
-    this.saveToDisk();
+    await this.saveToDatabase();
     return this.getSettings();
   }
 

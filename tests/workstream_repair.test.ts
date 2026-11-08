@@ -26,7 +26,7 @@ function createAuthHeaders(user: { id: string; role: string; email: string; sess
 
 test('FivePA WorkStream & Workspace Architecture Repair Suite (Parts 15.A - 15.G)', async (t) => {
   await postgresStore.cleanAllData();
-  siteSettings.resetToDefaults();
+  await siteSettings.resetToDefaults();
   await hydrateStoreFromPostgres();
 
   const app = express();
