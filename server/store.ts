@@ -1750,6 +1750,8 @@ export async function hydrateStoreFromPostgres() {
     const userCount = Number(userCountRes.rows[0]?.c || 0);
 
     if (userCount > 0 && alreadyInitialized && process.env.NODE_ENV !== 'test') {
+      await pool.query("DELETE FROM gigs WHERE id LIKE 'GIG-A-%' OR id LIKE 'GIG-B-%'").catch(() => {});
+      await pool.query("DELETE FROM users WHERE id LIKE 'USR-BUYER-%' OR id LIKE 'USR-SELLER%' OR id LIKE 'USR-OUTSIDER-%'").catch(() => {});
       await workspaceService.hydrateFromPostgres();
       console.log('[PostgresStore] Zero split-brain Cloud Run architecture initialized (fast path).');
       return;

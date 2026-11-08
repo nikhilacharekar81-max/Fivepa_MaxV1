@@ -541,8 +541,12 @@ router.post('/messages', requireAuth, rateLimit(120, 60_000), async (req: Reques
     if (!orderId && !workspaceId) return res.status(400).json({ error: 'Order ID or Workspace ID is required' });
 
     let order = orderId ? await store.getOrder(orderId) : null;
-    let workspace = workspaceId ? await workspaceService.getWorkspaceAsync(workspaceId) : (order?.workspaceId ? await workspaceService.getWorkspaceAsync(order.workspaceId) : null);
-    if (orderId && !order) return res.status(404).json({ error: 'Order not found' });
+    let workspace = workspaceId
+      ? await workspaceService.getWorkspaceAsync(workspaceId)
+      : (order?.workspaceId
+          ? await workspaceService.getWorkspaceAsync(order.workspaceId)
+          : (orderId ? await workspaceService.getWorkspaceAsync(orderId) : null));
+    if (orderId && !order && !workspace) return res.status(404).json({ error: 'Order not found' });
     if (workspaceId && !workspace) return res.status(404).json({ error: 'Workspace not found' });
     if (!order && !workspace) return res.status(404).json({ error: 'Order or Workspace not found' });
 
@@ -967,6 +971,7 @@ router.post('/orders/:id/offers', requireAuth, requireActiveStatus, rateLimit(20
       id: 'off_' + randomUUID().slice(0, 12),
       number: generateCollisionSafeOfferNumber(kind),
       orderId: isWorkspaceOnly ? undefined : order!.id,
+      originOrderId: isWorkspaceOnly ? undefined : order!.id,
       workspaceId: isWorkspaceOnly ? workspace.workspaceId : order!.workspaceId,
       kind,
       title,

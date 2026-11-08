@@ -38,8 +38,8 @@ export async function setupSSR(
   const distPath = path.resolve(root, 'dist');
   const clientDist = path.resolve(distPath, 'client');
   const serverDist = path.resolve(distPath, 'server');
-  const hasProdBuild = isProd && fs.existsSync(path.resolve(clientDist, 'index.html'));
   const isTest = process.env.NODE_ENV === 'test';
+  const hasProdBuild = !isTest && fs.existsSync(path.resolve(clientDist, 'index.html'));
 
   if (isTest) {
     templateHtml = fs.readFileSync(path.resolve(root, 'index.html'), 'utf-8');
@@ -76,6 +76,10 @@ export async function setupSSR(
         const ssrModule = await import(path.resolve(serverDist, entryFile));
         ssrRender = ssrModule.render;
       }
+    }
+    if (!ssrRender) {
+      const mod = await import('../src/entry-server.tsx');
+      ssrRender = mod.render;
     }
   }
 

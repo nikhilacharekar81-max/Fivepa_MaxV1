@@ -4,7 +4,9 @@ import express from 'express';
 import request from 'supertest';
 import { apiRouter } from '../server/routes/index.js';
 import { signToken } from '../server/middleware/auth.js';
+import { postgresStore } from '../server/db/postgresStore.js';
 import { siteSettings } from '../server/domains/admin/siteSettings.js';
+import { store } from '../server/store.js';
 
 describe('FIX 1: PayPal Admin Environment Route Mounting', () => {
   let app: express.Application;
@@ -12,7 +14,22 @@ describe('FIX 1: PayPal Admin Environment Route Mounting', () => {
   let userToken: string;
 
   beforeEach(async () => {
+    await postgresStore.runMigrations();
     await siteSettings.resetToDefaults();
+    await store.saveUser({
+      id: 'admin_1',
+      name: 'Admin',
+      email: 'admin@workperhour.com',
+      role: 'super_admin',
+      status: 'active'
+    } as any);
+    await store.saveUser({
+      id: 'u1',
+      name: 'Sarah J',
+      email: 'sarah.j@example.com',
+      role: 'freelancer',
+      status: 'active'
+    } as any);
   });
 
   // Setup Express app as per the test suite requirement

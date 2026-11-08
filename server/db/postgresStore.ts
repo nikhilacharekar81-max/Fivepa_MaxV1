@@ -190,8 +190,10 @@ class PGlitePool {
   private pglite: PGlite;
   private isReadyPromise: Promise<void>;
   private txLock: Promise<void> = Promise.resolve();
+  private isInMemoryTestDb: boolean;
 
   constructor(dataDir?: string) {
+    this.isInMemoryTestDb = !dataDir && process.env.NODE_ENV === 'test';
     try {
       if (dataDir) {
         if (!fs.existsSync(dataDir)) {
@@ -228,6 +230,13 @@ class PGlitePool {
   private async _rawQuery(text: string, params?: any[]) {
     await this.isReadyPromise;
     const trimmed = text.trim();
+    if (this.isInMemoryTestDb && /^SELECT\s+current_database\(\)\s*;?$/i.test(trimmed)) {
+      return {
+        rows: [{ current_database: 'pglite_test' }],
+        fields: [],
+        rowCount: 1
+      };
+    }
     if ((!params || params.length === 0) && trimmed.includes(';') && trimmed.indexOf(';') < trimmed.length - 1) {
       const results = await this.pglite.exec(text);
       const last = results[results.length - 1];

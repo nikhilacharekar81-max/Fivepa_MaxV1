@@ -337,30 +337,22 @@ export async function verifyAuthTokenMiddleware(req: Request, res: Response, nex
       try {
         const dbUser = await store.getUser(payload.id);
         if (dbUser) {
-          if (!validateTokenSessionVersion(payload, dbUser)) {
-            (req as any).user = null;
-            (req as any).authenticatedUserId = null;
-            (req as any).authenticatedUser = null;
-            // User was authenticated but token is invalid, fail with 403 instead of 401
-            return res.status(403).json({ error: 'Forbidden: Invalid session' });
+          if (validateTokenSessionVersion(payload, dbUser)) {
+            (req as any).user = {
+              id: dbUser.id,
+              role: dbUser.role,
+              status: dbUser.status,
+              email: dbUser.email
+            };
+            (req as any).authenticatedUserId = dbUser.id;
+            (req as any).authenticatedUser = dbUser;
+            return next();
           }
-          (req as any).user = {
-            id: dbUser.id,
-            role: dbUser.role,
-            status: dbUser.status,
-            email: dbUser.email
-          };
-          (req as any).authenticatedUserId = dbUser.id;
-          (req as any).authenticatedUser = dbUser;
-          return next();
         }
       } catch (err) {
         (req as any).authDbError = true;
         (req as any).authDbErrorObject = err;
       }
-    } else {
-       // Token invalid, fail with 403
-       return res.status(403).json({ error: 'Forbidden: Invalid token' });
     }
   }
 
