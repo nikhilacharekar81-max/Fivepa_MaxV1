@@ -21,7 +21,8 @@ import {
   Eye,
   X,
   Info,
-  Check
+  Check,
+  Sparkles
 } from 'lucide-react';
 import { Gig, Order, Project, Proposal, UserAccount, WorkstreamOffer } from '../types';
 import { getAuthToken, setAuthToken, requestDemoSession } from '../utils/authToken';

@@ -196,102 +196,8 @@ app.use('/api/*', (_req, res) => {
 // Register root routes (robots.txt, sitemap.xml)
 app.use('/', rootRouter);
 
-// SSR Middleware
+// SSR Middleware (Real Data)
 (async () => {
-  try {
-    await setupSSR(app, IS_PROD, __dirname, async (pathname?: string) => {
-        // ... (data fetching)
-        return { gigs: [], users: [], projects: [], categories: [] };
-    });
-  } catch (ssrSetupErr) {
-    console.error('[SSR Setup Error]', ssrSetupErr);
-  } finally {
-    resolveStartupReady();
-  }
-})();
-
-// Global Error Handler
-app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  if (res.headersSent) {
-    return next(err);
-  }
-
-  const status = Number(err?.status || err?.statusCode || 500);
-  const isApi = req.path?.startsWith('/api') || req.originalUrl?.startsWith('/api');
-
-  console.error(`[Error] ${req.method} ${req.path}:`, err);
-
-  if (isApi) {
-    if ((process.env.NODE_ENV === 'production' || IS_PROD) && status >= 500) {
-      return res.status(500).json({ error: 'Internal server error' });
-    }
-    const safeMsg = (status < 500 && err?.message) ? err.message : ((process.env.NODE_ENV === 'production' || IS_PROD) ? 'Internal server error' : (err?.message || 'Internal server error'));
-    return res.status(status).json({ error: safeMsg });
-  }
-
-  const isUriError = err instanceof URIError || err?.name === 'URIError' || (err?.message && String(err.message).includes('URI'));
-  if (isUriError) {
-    const clientDistHtml = path.resolve(__dirname, 'dist/client/index.html');
-    const devHtml = path.resolve(__dirname, 'index.html');
-    const htmlPath = fs.existsSync(clientDistHtml) ? clientDistHtml : devHtml;
-    if (fs.existsSync(htmlPath)) {
-      return res.status(200).setHeader('Content-Type', 'text/html').sendFile(htmlPath);
-    }
-  }
-
-  return res.status(status).setHeader('Content-Type', 'text/html').send(`
-    &lt;!DOCTYPE html&gt;
-    &lt;html&gt;
-      &lt;head&gt;&lt;title&gt;Error&lt;/title&gt;&lt;/head&gt;
-      &lt;body style="font-family: sans-serif; padding: 2rem; text-align: center;"&gt;
-        &lt;h1&gt;Server Error&lt;/h1&gt;
-        &lt;p&gt;${(process.env.NODE_ENV === 'production' || IS_PROD) ? 'An unexpected error occurred.' : (err?.message || 'An unexpected error occurred.')}&lt;/p&gt;
-      &lt;/body&gt;
-    &lt;/html&gt;
-  `);
-});
-
-
-export const server = createServer(app);
-
-// Initialize WebSocket Engine
-initWebSocketServer(server);
-
-const portArgIndex = process.argv.findIndex(arg => arg === '--port' || arg === '-p');
-const cliPort = portArgIndex !== -1 && process.argv[portArgIndex + 1] ? Number(process.argv[portArgIndex + 1]) : null;
-const PORT = cliPort || (process.env.PORT ? Number(process.env.PORT) : 3000);
-
-process.on('unhandledRejection', (reason) => {
-  console.error('[UnhandledRejection]', reason);
-});
-
-if (process.env.NODE_ENV !== 'test' && !server.listening) {
-  server.on('error', (err: any) => {
-    if (err.code === 'EADDRINUSE') {
-      console.warn(`Port ${PORT} in use, selecting dynamic fallback port`);
-      server.listen(0, '0.0.0.0');
-    }
-  });
-  server.listen(Number(PORT), '0.0.0.0', () => {
-    const actualPort = (server.address() as any)?.port || PORT;
-    console.log(`WorkPerHour server running on http://0.0.0.0:${actualPort}`);
-  });
-}
-
-// Application Startup & Hydration
-(async () => {
-  try {
-    await hydrateStoreFromPostgres();
-    runBackgroundJobs();
-  } catch (err) {
-    if (IS_PROD) {
-      console.error('[FATAL] Postgres hydration failed; refusing to start:', err);
-      process.exit(1);
-    } else {
-      console.warn('[DEV] Postgres hydration notice (continuing in dev mode):', err);
-    }
-  }
-
   try {
     await setupSSR(app, IS_PROD, __dirname, async (pathname?: string) => {
       try {
@@ -426,6 +332,95 @@ if (process.env.NODE_ENV !== 'test' && !server.listening) {
     console.error('[SSR Setup Error]', ssrSetupErr);
   } finally {
     resolveStartupReady();
+  }
+})();
+
+// Global Error Handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  const status = Number(err?.status || err?.statusCode || 500);
+  const isApi = req.path?.startsWith('/api') || req.originalUrl?.startsWith('/api');
+
+  console.error(`[Error] ${req.method} ${req.path}:`, err);
+
+  if (isApi) {
+    if ((process.env.NODE_ENV === 'production' || IS_PROD) && status >= 500) {
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+    const safeMsg = (status < 500 && err?.message) ? err.message : ((process.env.NODE_ENV === 'production' || IS_PROD) ? 'Internal server error' : (err?.message || 'Internal server error'));
+    return res.status(status).json({ error: safeMsg });
+  }
+
+  const isUriError = err instanceof URIError || err?.name === 'URIError' || (err?.message && String(err.message).includes('URI'));
+  if (isUriError) {
+    const clientDistHtml = path.resolve(__dirname, 'dist/client/index.html');
+    const devHtml = path.resolve(__dirname, 'index.html');
+    const htmlPath = fs.existsSync(clientDistHtml) ? clientDistHtml : devHtml;
+    if (fs.existsSync(htmlPath)) {
+      return res.status(200).setHeader('Content-Type', 'text/html').sendFile(htmlPath);
+    }
+  }
+
+  const escapedMsg = (err?.message || 'An unexpected error occurred.')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+  return res.status(status).setHeader('Content-Type', 'text/html').send(`
+    <!DOCTYPE html>
+    <html>
+      <head><title>Error</title></head>
+      <body style="font-family: sans-serif; padding: 2rem; text-align: center;">
+        <h1>Server Error</h1>
+        <p>${(process.env.NODE_ENV === 'production' || IS_PROD) ? 'An unexpected error occurred.' : escapedMsg}</p>
+      </body>
+    </html>
+  `);
+});
+
+
+export const server = createServer(app);
+
+// Initialize WebSocket Engine
+initWebSocketServer(server);
+
+const portArgIndex = process.argv.findIndex(arg => arg === '--port' || arg === '-p');
+const cliPort = portArgIndex !== -1 && process.argv[portArgIndex + 1] ? Number(process.argv[portArgIndex + 1]) : null;
+const PORT = cliPort || (process.env.PORT ? Number(process.env.PORT) : 3000);
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[UnhandledRejection]', reason);
+});
+
+if (process.env.NODE_ENV !== 'test' && !server.listening) {
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`Port ${PORT} in use, selecting dynamic fallback port`);
+      server.listen(0, '0.0.0.0');
+    }
+  });
+  server.listen(Number(PORT), '0.0.0.0', () => {
+    const actualPort = (server.address() as any)?.port || PORT;
+    console.log(`WorkPerHour server running on http://0.0.0.0:${actualPort}`);
+  });
+}
+
+// Application Startup & Hydration
+(async () => {
+  try {
+    await hydrateStoreFromPostgres();
+    runBackgroundJobs();
+  } catch (err) {
+    if (IS_PROD) {
+      console.error('[FATAL] Postgres hydration failed; refusing to start:', err);
+      process.exit(1);
+    } else {
+      console.warn('[DEV] Postgres hydration notice (continuing in dev mode):', err);
+    }
   }
 })();
 

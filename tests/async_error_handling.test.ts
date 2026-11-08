@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, before } from 'node:test';
+import assert from 'node:assert';
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
 import { wrapRouter, asyncHandler } from '../server/middleware/asyncHandler.js';
@@ -6,7 +7,7 @@ import { wrapRouter, asyncHandler } from '../server/middleware/asyncHandler.js';
 describe('FIX 3: Async Handler and Error Middleware', () => {
   let app: express.Application;
 
-  beforeAll(() => {
+  before(() => {
     app = express();
     app.use(express.json());
 
@@ -55,23 +56,23 @@ describe('FIX 3: Async Handler and Error Middleware', () => {
     const res = await request(app).get('/api/async-throw');
     const elapsed = Date.now() - start;
 
-    expect(elapsed).toBeLessThan(1000);
-    expect(res.status).toBe(500);
-    expect(res.body).toHaveProperty('error');
+    assert.ok(elapsed < 1000);
+    assert.strictEqual(res.status, 500);
+    assert.ok(res.body.error);
   });
 
   it('respects custom error status code like 400', async () => {
     const res = await request(app).get('/api/custom-status');
 
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: 'Invalid input param' });
+    assert.strictEqual(res.status, 400);
+    assert.deepStrictEqual(res.body, { error: 'Invalid input param' });
   });
 
   it('returns JSON 404 for unknown /api/* routes', async () => {
     const res = await request(app).get('/api/non-existent-endpoint');
 
-    expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: 'Not found' });
+    assert.strictEqual(res.status, 404);
+    assert.deepStrictEqual(res.body, { error: 'Not found' });
   });
 
   it('hides error details and stack traces in production mode', async () => {
@@ -95,8 +96,8 @@ describe('FIX 3: Async Handler and Error Middleware', () => {
 
     const res = await request(prodApp).get('/api/fail');
 
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({ error: 'Internal server error' });
-    expect(JSON.stringify(res.body)).not.toContain('secret_table');
+    assert.strictEqual(res.status, 500);
+    assert.deepStrictEqual(res.body, { error: 'Internal server error' });
+    assert.ok(!JSON.stringify(res.body).includes('secret_table'));
   });
 });

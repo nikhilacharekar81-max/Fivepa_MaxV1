@@ -659,7 +659,7 @@ export class PostgresStore {
       // 1. Ensure buyer wallet row exists
       await client.query(
         `INSERT INTO wallets (user_id, user_name, user_email, user_role, available_balance, funds_on_hold, pending_withdrawals, status)
-         VALUES ($1, $1, $1 || '@example.com', 'buyer', 0.00, 0.00, 0.00, 'active')
+         VALUES ($1::text, $1::text, $1::text || '@example.com', 'buyer', 0.00, 0.00, 0.00, 'active')
          ON CONFLICT (user_id) DO NOTHING`,
         [buyerId]
       );

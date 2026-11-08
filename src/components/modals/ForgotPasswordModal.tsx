@@ -1,4 +1,5 @@
 import React from 'react';
+import { Sparkles } from 'lucide-react';
 
 interface ForgotPasswordModalProps {
   isOpen: boolean;

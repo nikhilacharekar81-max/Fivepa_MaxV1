@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Users, Briefcase, Layers, Shield, Sliders,
   FileText, CheckCircle2, DollarSign, Wallet, ShieldCheck, Scale,
   CornerDownLeft, TrendingUp, Star, MessageCircle, Flag, HelpCircle,
-  FileCode, Settings, Activity, ShieldAlert, LogOut, Award, CreditCard
+  FileCode, Settings, Activity, ShieldAlert, LogOut, Award, CreditCard, Sparkles
 } from 'lucide-react';
 import { UserAccount, Gig, Project, Proposal, Order } from '../types';
 import { getDeviceId as defaultGetDeviceId } from '../utils/deviceId';

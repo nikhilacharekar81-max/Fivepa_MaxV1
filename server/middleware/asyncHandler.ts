@@ -28,8 +28,24 @@ export function asyncHandler(fn: (req: Request, res: Response, next: NextFunctio
 export function wrapRouter<T extends Router>(router: T): T {
   if (!router) return router;
 
+  // Wrap existing routes
+  if ((router as any).stack) {
+    (router as any).stack.forEach((layer: any) => {
+      if (layer.route) {
+        layer.route.stack.forEach((routeLayer: any) => {
+          if (typeof routeLayer.handle === 'function' && routeLayer.handle.length !== 4 && !(routeLayer.handle as any).stack && !wrappedFunctions.has(routeLayer.handle)) {
+            routeLayer.handle = asyncHandler(routeLayer.handle);
+          }
+        });
+      } else if (layer.handle && (layer.handle as any).stack) {
+        // Recursively wrap nested routers
+        wrapRouter(layer.handle);
+      }
+    });
+  }
+
   // Patch method functions for future route additions
-  const methods = ['get', 'post', 'put', 'patch', 'delete', 'use'] as const;
+  const methods = ['get', 'post', 'put', 'patch', 'delete'] as const;
   for (const method of methods) {
     const originalMethod = (router as any)[method];
     if (typeof originalMethod !== 'function' || (originalMethod as any).__wrapped) continue;

@@ -341,7 +341,8 @@ export async function verifyAuthTokenMiddleware(req: Request, res: Response, nex
             (req as any).user = null;
             (req as any).authenticatedUserId = null;
             (req as any).authenticatedUser = null;
-            return next();
+            // User was authenticated but token is invalid, fail with 403 instead of 401
+            return res.status(403).json({ error: 'Forbidden: Invalid session' });
           }
           (req as any).user = {
             id: dbUser.id,
@@ -357,6 +358,9 @@ export async function verifyAuthTokenMiddleware(req: Request, res: Response, nex
         (req as any).authDbError = true;
         (req as any).authDbErrorObject = err;
       }
+    } else {
+       // Token invalid, fail with 403
+       return res.status(403).json({ error: 'Forbidden: Invalid token' });
     }
   }
 
