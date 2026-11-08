@@ -1018,9 +1018,17 @@ export class PostgresStore {
       throw new Error(`[PostgresStore] FATAL: cleanAllData() is strictly prohibited when NODE_ENV is not 'test' (current: ${process.env.NODE_ENV}).`);
     }
 
+    const APPROVED_TEST_DATABASES = [
+      'cloud_sql_test_database',
+      'test_database',
+      'fivepa_test',
+      'app_test',
+      'pglite_test'
+    ];
+
     const pool = this.getPool();
 
-    // 1. Mandatory live query of current_database() - fail closed if query fails or returns non-test db
+    // 1. Mandatory live query of current_database() - fail closed if query fails or returns non-approved test db
     let activeDb = '';
     try {
       const res = await pool.query('SELECT current_database()');
@@ -1029,9 +1037,9 @@ export class PostgresStore {
       throw new Error(`[PostgresStore] FATAL: cleanAllData() aborted because SELECT current_database() query failed: ${err?.message}`);
     }
 
-    const isTestDb = activeDb.includes('test') || activeDb === 'cloud_sql_test_database' || activeDb.includes('pglite');
+    const isTestDb = APPROVED_TEST_DATABASES.includes(activeDb);
     if (!activeDb || !isTestDb) {
-      throw new Error(`[PostgresStore] FATAL: Refusing cleanAllData(): Connected database '${activeDb}' is not positively verified as a dedicated test database.`);
+      throw new Error(`[PostgresStore] FATAL: Refusing cleanAllData(): Connected database '${activeDb}' is not in the explicit allowlist of approved test databases.`);
     }
 
     const tables = [
@@ -1071,7 +1079,7 @@ export class PostgresStore {
     ];
 
     for (const table of tables) {
-      // Re-verify test database safety prior to every destructive statement
+      // Re-verify test database safety prior to every destructive statement against allowlist
       let currentActiveDb = '';
       try {
         const safetyCheck = await pool.query('SELECT current_database()');
@@ -1080,8 +1088,8 @@ export class PostgresStore {
         throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData during table ${table} cleanup: Database identity query failed: ${err?.message}`);
       }
 
-      if (!currentActiveDb.includes('test') && currentActiveDb !== 'cloud_sql_test_database' && !currentActiveDb.includes('pglite')) {
-        throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData: Database identity changed to '${currentActiveDb}'.`);
+      if (!APPROVED_TEST_DATABASES.includes(currentActiveDb)) {
+        throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData: Database identity changed to '${currentActiveDb}' (not in approved test database allowlist).`);
       }
 
       try {
@@ -1096,8 +1104,8 @@ export class PostgresStore {
           throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData DELETE fallback for table ${table}: Database identity query failed: ${err?.message}`);
         }
 
-        if (!currentActiveDbDel.includes('test') && currentActiveDbDel !== 'cloud_sql_test_database' && !currentActiveDbDel.includes('pglite')) {
-          throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData DELETE fallback: Database identity changed to '${currentActiveDbDel}'.`);
+        if (!APPROVED_TEST_DATABASES.includes(currentActiveDbDel)) {
+          throw new Error(`[PostgresStore] FATAL: Aborted cleanAllData DELETE fallback: Database identity changed to '${currentActiveDbDel}' (not in approved test database allowlist).`);
         }
 
         try {
@@ -1108,7 +1116,7 @@ export class PostgresStore {
         }
       }
     }
-    console.log('[PostgresStore] All application tables successfully cleaned in dedicated test database.');
+    console.log('[PostgresStore] All application tables successfully cleaned in approved dedicated test database.');
   }
 }
 
