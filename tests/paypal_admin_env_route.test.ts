@@ -1,14 +1,19 @@
-import { describe, it } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import express from 'express';
 import request from 'supertest';
 import { apiRouter } from '../server/routes/index.js';
 import { signToken } from '../server/middleware/auth.js';
+import { siteSettings } from '../server/domains/admin/siteSettings.js';
 
 describe('FIX 1: PayPal Admin Environment Route Mounting', () => {
   let app: express.Application;
   let adminToken: string;
   let userToken: string;
+
+  beforeEach(() => {
+    siteSettings.resetToDefaults();
+  });
 
   // Setup Express app as per the test suite requirement
   const setup = () => {

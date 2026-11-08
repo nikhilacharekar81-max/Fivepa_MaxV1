@@ -8,6 +8,7 @@ import { store, hydrateStoreFromPostgres } from '../server/store.ts';
 import { postgresStore } from '../server/db/postgresStore.ts';
 import { signToken } from '../server/middleware/auth.ts';
 import { financialTransactionService } from '../server/domains/finance/financial.service.ts';
+import { siteSettings } from '../server/domains/admin/siteSettings.ts';
 
 function createAuthHeaders(user: { id: string; role: string; email: string; sessionVersion?: number }, extraHeaders: Record<string, string> = {}) {
   const token = signToken({
@@ -24,6 +25,8 @@ function createAuthHeaders(user: { id: string; role: string; email: string; sess
 }
 
 test('FivePA WorkStream & Workspace Architecture Repair Suite (Parts 15.A - 15.G)', async (t) => {
+  await postgresStore.cleanAllData();
+  siteSettings.resetToDefaults();
   await hydrateStoreFromPostgres();
 
   const app = express();
