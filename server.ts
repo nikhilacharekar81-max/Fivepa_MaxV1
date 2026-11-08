@@ -196,6 +196,20 @@ app.use('/api/*', (_req, res) => {
 // Register root routes (robots.txt, sitemap.xml)
 app.use('/', rootRouter);
 
+// SSR Middleware
+(async () => {
+  try {
+    await setupSSR(app, IS_PROD, __dirname, async (pathname?: string) => {
+        // ... (data fetching)
+        return { gigs: [], users: [], projects: [], categories: [] };
+    });
+  } catch (ssrSetupErr) {
+    console.error('[SSR Setup Error]', ssrSetupErr);
+  } finally {
+    resolveStartupReady();
+  }
+})();
+
 // Global Error Handler
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) {

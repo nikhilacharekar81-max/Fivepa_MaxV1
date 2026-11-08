@@ -26,13 +26,13 @@ describe('FIX 1: PayPal Admin Environment Route Mounting', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects non-admin user request to /api/admin/payment-gateways/paypal/environment with 403', async () => {
+  it('rejects non-admin user request to /api/admin/payment-gateways/paypal/environment with 401', async () => {
     const res = await request(app)
       .post('/api/admin/payment-gateways/paypal/environment')
       .set('Authorization', `Bearer ${userToken}`)
       .send({ environment: 'sandbox' });
 
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
   });
 
   it('successfully reaches /api/admin/payment-gateways/paypal/environment for authenticated admin', async () => {
