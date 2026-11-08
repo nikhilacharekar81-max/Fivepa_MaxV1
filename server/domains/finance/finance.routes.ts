@@ -945,16 +945,16 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
       }
     }
 
-    // Execute atomic session creation & pending session reuse inside a database transaction with FOR UPDATE row locks
-    const checkoutResult = await postgresStore.executeInTransaction(async (client) => {
-      // 1. Acquire row lock to serialize concurrent checkout creation requests for the same order or user deposit
+    // STEP 1: Validate and Reserve (SHORT DB Transaction)
+    const reservation = await postgresStore.executeInTransaction(async (client) => {
+      // Acquire short row-level lock to serialize concurrent checkout creation
       if (normalizedOrderId) {
         await client.query('SELECT id FROM orders WHERE id = $1::text FOR UPDATE', [normalizedOrderId]);
       } else {
         await client.query('SELECT user_id FROM wallets WHERE user_id = $1::text FOR UPDATE', [authUserId]).catch(() => {});
       }
 
-      // 2. Check for an existing active pending session under lock
+      // Check for an existing valid pending session or reservation
       let activeSessRes;
       if (normalizedOrderId && ['order_payment', 'order', 'order_escrow'].includes(resolvedPurpose)) {
         activeSessRes = await client.query(
@@ -963,7 +963,7 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
               AND user_id = $2::text
               AND gateway = $3::text
               AND environment = $4::text
-              AND status IN ('pending', 'approved')
+              AND status IN ('pending', 'approved', 'reserving')
               AND created_at > NOW() - INTERVAL '15 minutes'
             ORDER BY created_at DESC LIMIT 1`,
           [normalizedOrderId, authUserId, normalizedGateway, activeEnv]
@@ -976,7 +976,7 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
               AND gateway = $2::text
               AND environment = $3::text
               AND expected_amount = $4::numeric
-              AND status IN ('pending', 'approved')
+              AND status IN ('pending', 'approved', 'reserving')
               AND created_at > NOW() - INTERVAL '5 minutes'
             ORDER BY created_at DESC LIMIT 1`,
           [authUserId, normalizedGateway, activeEnv, authoritativeAmount]
@@ -990,32 +990,74 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
           : (activeSess.metadata || {});
 
         const activePayPalOrderId = activeSess.paypal_order_id || activeSess.provider_tx_id;
-        const activeCheckoutUrl = activeSess.gateway === 'paypal' && activePayPalOrderId
-          ? `https://www.${activeSess.environment === 'sandbox' ? 'sandbox.' : ''}paypal.com/checkoutnow?token=${activePayPalOrderId}`
-          : `/checkout/pay?session_id=${encodeURIComponent(activeSess.id)}`;
+        if (activePayPalOrderId && activeSess.status !== 'reserving') {
+          const activeCheckoutUrl = activeSess.gateway === 'paypal'
+            ? `https://www.${activeSess.environment === 'sandbox' ? 'sandbox.' : ''}paypal.com/checkoutnow?token=${activePayPalOrderId}`
+            : `/checkout/pay?session_id=${encodeURIComponent(activeSess.id)}`;
 
-        return {
-          success: true,
-          replayed: true,
-          reusedPendingSession: true,
-          checkoutId: String(activeSess.id),
-          sessionId: String(activeSess.id),
-          gateway: activeSess.gateway,
-          paypalOrderId: activePayPalOrderId || undefined,
-          providerOrderId: activeSess.provider_tx_id,
-          orderId: activeSess.order_id,
-          purpose: activeSess.purpose,
-          amount: Number(activeSess.expected_amount),
-          currency: activeSess.currency || 'USD',
-          environment: activeSess.environment,
-          redirectUrl: activeCheckoutUrl,
-          checkoutUrl: activeCheckoutUrl,
-          metadata: activeMeta
-        };
+          return {
+            reused: true,
+            sessionResponse: {
+              success: true,
+              replayed: true,
+              reusedPendingSession: true,
+              checkoutId: String(activeSess.id),
+              sessionId: String(activeSess.id),
+              gateway: activeSess.gateway,
+              paypalOrderId: activePayPalOrderId,
+              providerOrderId: activeSess.provider_tx_id,
+              orderId: activeSess.order_id,
+              purpose: activeSess.purpose,
+              amount: Number(activeSess.expected_amount),
+              currency: activeSess.currency || 'USD',
+              environment: activeSess.environment,
+              redirectUrl: activeCheckoutUrl,
+              checkoutUrl: activeCheckoutUrl,
+              metadata: activeMeta
+            }
+          };
+        }
+
+        if (activeSess.status === 'reserving' && new Date(activeSess.created_at).getTime() > Date.now() - 30_000) {
+          return {
+            reused: false,
+            checkoutId: String(activeSess.id),
+            activeEnv: activeSess.environment as 'production' | 'sandbox'
+          };
+        }
       }
 
-      // 3. Create external provider checkout session
-      const providerSession = await paymentGatewayManager.createCheckoutSession({
+      // Create an atomic reservation record
+      await client.query(
+        `INSERT INTO payment_checkout_sessions
+           (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, environment, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'reserving', $7, $8, NOW(), NOW())
+         ON CONFLICT (id) DO UPDATE SET updated_at = NOW()`,
+        [
+          checkoutId,
+          authUserId,
+          normalizedOrderId,
+          normalizedGateway,
+          authoritativeAmount,
+          resolvedPurpose,
+          activeEnv,
+          JSON.stringify(safeMetadata)
+        ]
+      );
+
+      return { reused: false, checkoutId, activeEnv };
+    });
+
+    if (reservation.reused && reservation.sessionResponse) {
+      return res.json(reservation.sessionResponse);
+    }
+
+    const reservationCheckoutId = reservation.checkoutId || checkoutId;
+
+    // STEP 2: Create external PayPal order OUTSIDE database transaction
+    let providerSession;
+    try {
+      providerSession = await paymentGatewayManager.createCheckoutSession({
         gateway: normalizedGateway as any,
         amount: authoritativeAmount,
         currency: 'USD',
@@ -1023,55 +1065,49 @@ router.post('/payments/gateway/checkout', requireAuth, rateLimit(20, 60_000), as
         orderId: normalizedOrderId || undefined,
         purpose: resolvedPurpose,
         description: resolvedDescription,
-        checkoutId,
-        env: activeEnv
+        checkoutId: reservationCheckoutId,
+        env: reservation.activeEnv
       });
-
-      const paypalOrderId = normalizedGateway === 'paypal' ? providerSession.providerSessionId : null;
-
-      try {
+    } catch (providerErr: any) {
+      await postgresStore.executeInTransaction(async (client) => {
         await client.query(
-          `INSERT INTO payment_checkout_sessions
-             (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, paypal_order_id, environment, metadata, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, $9, $10, NOW(), NOW())`,
-          [
-            checkoutId,
-            authUserId,
-            normalizedOrderId,
-            normalizedGateway,
-            authoritativeAmount,
-            resolvedPurpose,
-            providerSession.providerSessionId,
-            paypalOrderId,
-            activeEnv,
-            JSON.stringify(safeMetadata)
-          ]
-        );
-      } catch {
-        await client.query(
-          `INSERT INTO payment_checkout_sessions (id, user_id, order_id, gateway, expected_amount, currency, purpose, status, provider_tx_id, environment, created_at)
-           VALUES ($1, $2, $3, $4, $5, 'USD', $6, 'pending', $7, $8, NOW())`,
-          [checkoutId, authUserId, normalizedOrderId, normalizedGateway, authoritativeAmount, resolvedPurpose, providerSession.providerSessionId, activeEnv]
-        );
-      }
+          "UPDATE payment_checkout_sessions SET status = 'failed', updated_at = NOW() WHERE id = $1 AND status = 'reserving'",
+          [reservationCheckoutId]
+        ).catch(() => {});
+      });
+      throw providerErr;
+    }
 
-      return {
-        success: true,
-        checkoutId,
-        sessionId: checkoutId,
-        gateway: normalizedGateway,
-        paypalOrderId: paypalOrderId || undefined,
-        providerOrderId: providerSession.providerSessionId,
-        orderId: normalizedOrderId || undefined,
-        purpose: resolvedPurpose,
-        amount: authoritativeAmount,
-        currency: 'USD',
-        environment: activeEnv,
-        redirectUrl: providerSession.checkoutUrl || `/checkout/success?session_id=${checkoutId}&amount=${authoritativeAmount}`
-      };
+    const paypalOrderId = normalizedGateway === 'paypal' ? providerSession.providerSessionId : null;
+
+    // STEP 3: Attach provider order ID to reservation in a SHORT DB transaction
+    await postgresStore.executeInTransaction(async (client) => {
+      await client.query(
+        `UPDATE payment_checkout_sessions
+            SET status = 'pending',
+                provider_tx_id = $1::text,
+                paypal_order_id = $2::text,
+                updated_at = NOW()
+          WHERE id = $3::text`,
+        [providerSession.providerSessionId, paypalOrderId, reservationCheckoutId]
+      );
     });
 
-    res.json(checkoutResult);
+    // STEP 4: Return response to client
+    res.json({
+      success: true,
+      checkoutId: reservationCheckoutId,
+      sessionId: reservationCheckoutId,
+      gateway: normalizedGateway,
+      paypalOrderId: paypalOrderId || undefined,
+      providerOrderId: providerSession.providerSessionId,
+      orderId: normalizedOrderId || undefined,
+      purpose: resolvedPurpose,
+      amount: authoritativeAmount,
+      currency: 'USD',
+      environment: reservation.activeEnv,
+      redirectUrl: providerSession.checkoutUrl || `/checkout/success?session_id=${reservationCheckoutId}&amount=${authoritativeAmount}`
+    });
   } catch (err: any) {
     res.status(500).json(formatApiError(err));
   }
